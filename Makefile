@@ -24,8 +24,10 @@ LDFLAGS := -s -w \
   -X $(MODULE)/internal/build.BuildDate=$(BUILD_DATE)
 
 # 必须能编过的平台组合（docs/技术选型与MVP规格.md §6）。
-# 8 个是完整矩阵；其中 linux/amd64、linux/arm64、darwin/arm64、windows/amd64、
-# freebsd/amd64 这 5 个是逐条实测过的重点目标（另外 3 个由 build-all 顺带覆盖）。
+# 这 8 个（4 OS × 2 arch）全部是 build-all 的产出目标，并且已在开发机上逐条实测过
+# `CGO_ENABLED=0 GOOS=… GOARCH=… go build` 退出码 0（含新增的 golang.org/x/term 之后）。
+# 其中 linux/amd64、linux/arm64、darwin/arm64、windows/amd64、freebsd/amd64 这 5 个是
+# 重点目标：四个 OS 都覆盖到，也是实际装机最常见的架构。
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 \
   windows/amd64 windows/arm64 freebsd/amd64 freebsd/arm64
 
