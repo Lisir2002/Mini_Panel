@@ -1,0 +1,384 @@
+openapi: 3.0.3
+info:
+  title: Mini Panel API
+  version: 0.1.0-m0
+  description: |
+    Mini Panel 的内部 REST 接口，M0 里程碑。
+
+    约定：
+      - 所有响应均为 application/json; charset=utf-8。
+      - 除 /healthz 与安全入口页面本身，所有接口都要求会话 Cookie；
+        未认证的请求一律得到"伪装响应"（默认 404），而不是 401。
+      - 任何写操作（非 GET/HEAD/OPTIONS）必须回传 X-Mini-CSRF 请求头，
+        其值等于 mp_csrf Cookie（double-submit）。
+      - 携带口令的接口在没有 TLS 时返回 503 tls_required；仅当面板监听
+        回环地址且客户端也是回环地址时才允许明文调试。
+
+    本文件与 internal/api/server.go 的路由表由 TestOpenAPIContractMatchesRoutes
+    强制对齐（`make check-contract`）：新增接口而未登记规格，测试即失败。
+servers:
+  - url: /
+tags:
+  - name: public
+    description: 无需会话
+  - name: auth
+    description: 登录、初始化、登出
+  - name: panel
+    description: 面板自身的只读与设置接口
+  - name: account
+    description: 当前管理员的两步验证与口令
+security:
+  - sessionCookie: []
+    csrfHeader: []
+paths:
+  /healthz:
+    get:
+      tags: [public]
+      summary: 存活探针与产品事实
+      security: []
+      description: |
+        安全入口之外也可访问：监控系统需要它。返回产品名、版本、运行时长，
+        以及 requires_setup / entrance_enabled 两个初始化状态。
+        telemetry 恒为 false，且代码中不存在任何外呼上报路径。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  product: { type: string, example: Mini Panel }
+                  version: { type: string }
+                  commit: { type: string }
+                  uptime_seconds: { type: integer, format: int64 }
+                  telemetry: { type: boolean, example: false }
+                  requires_setup: { type: boolean }
+                  entrance_enabled: { type: boolean }
+  /api/v1/setup:
+    post:
+      tags: [auth]
+      summary: 创建第一个管理员（仅在账号表为空时可用）
+      security: []
+      description: |
+        必须先访问过安全入口（携带 mp_entrance 标记 Cookie），否则按伪装响应处理。
+        一旦存在任何账号即返回 409 already_initialized，因此它不是常驻的
+        未认证建号接口。口令强度不达标返回 400。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Credentials"
+      responses:
+        "201": { description: 已创建 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/Disguised" }
+        "409": { description: 管理员账号已存在 }
+        "503": { $ref: "#/components/responses/TLSRequired" }
+  /api/v1/login:
+    post:
+      tags: [auth]
+      summary: 登录并建立会话
+      security: []
+      description: |
+        未知用户名与错误密码返回完全相同的 401 响应体，避免账号枚举。
+        失败按 IP + 用户名计数，达到 panel.login_limit 后进入指数退避锁定，
+        最长 1 小时；锁定期内即使口令正确也返回 429。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Credentials"
+      responses:
+        "200":
+          description: 登录成功，同时下发 mp_session 与 mp_csrf
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  username: { type: string }
+                  csrf: { type: string }
+                  totp_enabled: { type: boolean }
+                  must_change_pw: { type: boolean }
+                  expires_at: { type: integer, format: int64 }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/Disguised" }
+        "429": { description: 失败次数过多，响应体内含剩余等待时长 }
+        "503": { $ref: "#/components/responses/TLSRequired" }
+  /api/v1/logout:
+    post:
+      tags: [auth]
+      summary: 作废当前会话
+      responses:
+        "200": { description: 已登出 }
+        "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/session:
+    get:
+      tags: [panel]
+      summary: 当前会话身份
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  username: { type: string }
+                  csrf: { type: string }
+                  platform: { type: string, example: linux }
+        "403": { description: 当前 IP 不在 panel.ip_allowlist 中 }
+        "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/capabilities:
+    get:
+      tags: [panel]
+      summary: 本机能力位图
+      description: |
+        前端渲染的唯一依据。规则：features 中为 false 的项，unavailable 必须给出
+        可读理由；界面据此显示"禁用 + 理由"，绝不渲染点击无响应的按钮。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Capabilities"
+        "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/system/info:
+    get:
+      tags: [panel]
+      summary: 主机与面板运行信息
+      responses:
+        "200": { description: OK }
+        "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/settings:
+    get:
+      tags: [panel]
+      summary: 设置项列表
+      description: |
+        每一项带 source：db 表示运行态可写值（存在 SQLite），panel.json 表示这是
+        进程当前实际使用的引导值。panel.port / panel.entrance / panel.ssl /
+        panel.session_timeout / panel.login_limit / panel.unauth_status 一律以运行
+        中的配置为准回显，绝不回显数据库里的镜像值——数据库种子行只是初始化占位，
+        把它当成真值会让设置页显示一个并没有在监听的端口。
+        panel.entrance 只回显"已启用/已关闭"，不回显入口路径本身：入口是伪装手段，
+        而设置页是会被截图的地方；需要看它请用 minipanel doctor。
+        这些引导值不可通过 API 写入，修改需要编辑 panel.json 并重启，这是有意的设计。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string }
+                        value: { type: string }
+                        updated_at: { type: integer, format: int64, description: Unix 秒 }
+                        editable: { type: boolean }
+                        source: { type: string, enum: [db, panel.json] }
+        "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/settings/{key}:
+    put:
+      tags: [panel]
+      summary: 写入一个可修改的设置项
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+            enum:
+              - panel.ip_allowlist
+              - panel.password_expiry_days
+              - panel.basic_auth
+              - panel.trust_proxy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value: { type: string }
+      responses:
+        "200": { description: 已写入 }
+        "400":
+          description: 值不合法（非法 IP/CIDR、非布尔、越界）或该键不可通过 API 修改
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/audit:
+    get:
+      tags: [panel]
+      summary: 审计日志分页读取（倒序）
+      description: |
+        只追加：整个接口面没有任何删除、清空审计的端点，包内也不存在相应方法。
+        params_mask 中的口令类字段已掩码，params_hash 是原始值的 SHA-256，
+        用于取证比对而不保存凭据本身。
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200": { description: OK }
+        "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/2fa/setup:
+    post:
+      tags: [account]
+      summary: 生成 TOTP 密钥与 otpauth URI（尚未生效）
+      responses:
+        "200": { description: 返回 secret / url / 提示文本 }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/2fa/enable:
+    post:
+      tags: [account]
+      summary: 用一个有效口令确认启用两步验证
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, pattern: "^[0-9]{6}$" }
+      responses:
+        "200": { description: 已启用 }
+        "400": { description: 口令校验失败或未先 setup }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/password:
+    post:
+      tags: [account]
+      summary: 修改当前管理员口令
+      description: 校验旧口令与新口令强度；成功后作废该用户除当前会话外的所有会话。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [old_password, new_password]
+              properties:
+                old_password: { type: string, format: password }
+                new_password: { type: string, format: password }
+      responses:
+        "200": { description: 已更新 }
+        "400": { description: 旧口令错误或新口令强度不足 }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { $ref: "#/components/responses/Disguised" }
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: mp_session
+      description: HttpOnly + SameSite=Strict，过期即失效；登出与改密会作废会话。
+    csrfHeader:
+      type: apiKey
+      in: header
+      name: X-Mini-CSRF
+      description: double-submit，值等于 mp_csrf Cookie。
+  responses:
+    Disguised:
+      description: |
+        伪装响应：入口外的路径、无会话或已失效会话都以"资源不存在"的形式回答，
+        状态码由 panel.unauth_status 决定（400/401/403/404/444）。
+        伪装只是掩护，真正的访问控制是监听地址 + 认证 + IP 白名单。
+    TLSRequired:
+      description: 面板未启用 TLS 且不是回环调试，拒绝接收凭据。
+    BadRequest:
+      description: 请求体或参数不合法
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: 用户名或密码错误（对未知用户与错误密码给出完全相同的响应）
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    CSRF:
+      description: 缺少或错误的 X-Mini-CSRF
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Credentials:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string, minLength: 3, maxLength: 32 }
+        password: { type: string, format: password, minLength: 10 }
+        code: { type: string, description: 启用两步验证时必填的 6 位动态口令 }
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          required: [kind, message]
+          properties:
+            kind:
+              type: string
+              description: 稳定的机器可读标识，前端据此分支，不依赖中文文案
+            message: { type: string }
+    Capabilities:
+      type: object
+      properties:
+        os: { type: string, example: linux }
+        os_family: { type: string, example: debian }
+        os_version: { type: string, example: Ubuntu 22.04.5 LTS }
+        arch: { type: string, example: amd64 }
+        is_privileged: { type: boolean }
+        hostname: { type: string }
+        web_servers:
+          type: array
+          items: { type: string, enum: [nginx, apache, caddy] }
+        php_modes:
+          type: array
+          items: { type: string, enum: [fpm, cgi, module, not_found] }
+        php_versions: { type: array, items: { type: string } }
+        php_ext_install:
+          type: array
+          items: { type: string, enum: [package, source, prebuilt_dll] }
+        reload_mode: { type: string, enum: [sighup, restart_only, none] }
+        firewall: { type: string, enum: [ufw, firewalld, nftables, windows_filter_platform, none] }
+        schedulers:
+          type: array
+          items: { type: string, enum: [panel, crontab, taskschd] }
+        supports_sub_second_cron: { type: boolean }
+        service_manager: { type: string, example: systemd }
+        package_manager: { type: string, example: apt }
+        permissions: { type: string, example: posix }
+        remote_access:
+          type: array
+          items:
+            type: object
+            properties:
+              kind: { type: string, example: ssh }
+              enabled: { type: boolean }
+              port: { type: integer }
+        database_engines: { type: array, items: { type: string } }
+        features:
+          type: object
+          additionalProperties: { type: boolean }
+          description: 能力开关。false 的项必须在 unavailable 里有理由。
+        unavailable:
+          type: object
+          additionalProperties: { type: string }
+          description: 禁用理由，供 UI 直接展示。

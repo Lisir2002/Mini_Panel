@@ -1,0 +1,499 @@
+<!doctype html>
+<!--
+  Mini Panel — M0 内置界面（占位实现）
+
+  这是"能用"的最小面板：登录 / 初始化、能力位图、系统信息、设置、审计、2FA、改密。
+  它不带构建步骤，因此 `go build` 出来的二进制立刻可以在浏览器里验收安全链路。
+  M1 会用 Vue 3 + Vite + Element Plus 的前端工程（web/）替换本文件，
+  产物仍然输出到 webui/dist，接口与这里调用的完全一致。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<!-- 内联图标：避免浏览器自动请求 /favicon.ico（安全入口之外它会命中伪装响应）。 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23171b21'/%3E%3Cpath d='M8 23V9h3.4l4.6 8 4.6-8H24v14h-2.8v-8.6L17.4 21h-2.8l-3.8-6.6V23z' fill='%233b82f6'/%3E%3C/svg%3E">
+<title>Mini Panel</title>
+<style>
+  :root{--bg:#0f1216;--card:#171b21;--line:#252b33;--fg:#e6e9ee;--muted:#8b95a3;
+        --accent:#3b82f6;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.6 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  a{color:var(--accent)}
+  .wrap{max-width:1080px;margin:0 auto;padding:24px}
+  .top{display:flex;align-items:center;justify-content:space-between;gap:16px;
+       border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:20px}
+  .brand{font-weight:700;letter-spacing:.5px}
+  .brand small{color:var(--muted);font-weight:400;margin-left:8px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin-bottom:16px}
+  .card h3{margin:0 0 12px;font-size:15px}
+  label{display:block;color:var(--muted);margin:10px 0 4px;font-size:12px}
+  input,textarea,select{width:100%;background:#0c1015;border:1px solid var(--line);color:var(--fg);
+        border-radius:7px;padding:9px 10px;font:inherit}
+  textarea{min-height:74px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+  button{background:var(--accent);color:#fff;border:0;border-radius:7px;padding:9px 16px;
+        font:inherit;font-weight:600;cursor:pointer}
+  button.ghost{background:transparent;border:1px solid var(--line);color:var(--muted)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .msg{margin-top:10px;font-size:13px}
+  .msg:empty{display:none}
+  .msg.bad{color:var(--bad)}.msg.ok{color:var(--ok)}
+  /* 表格统一交给 table-layout:fixed + <colgroup> 管列宽：内容再长也不会把
+     相邻列挤成竖排（M0 审计表实测"结果"列被压到 31px）。 */
+  table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed}
+  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top;
+        min-width:0;overflow-wrap:anywhere}
+  th{color:var(--muted);font-weight:500}
+  .nowrap{white-space:nowrap}
+  .clip{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .pre{white-space:pre-line}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+  /* KPI 卡：长值（内核串）必须能换行而不是溢出后被相邻卡片裁掉。 */
+  .kpi{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:#0c1015;
+       min-width:0;overflow:hidden}
+  .kpi b{display:block;font-size:19px;font-weight:600;min-width:0;overflow-wrap:anywhere}
+  .kpi span{color:var(--muted);font-size:12px;min-width:0;overflow-wrap:anywhere}
+  .tag{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px}
+  .tag.on{background:rgba(34,197,94,.15);color:var(--ok)}
+  .tag.off{background:rgba(239,68,68,.12);color:var(--bad)}
+  .tag.partial{background:rgba(245,158,11,.14);color:var(--warn)}
+  code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:#a5c8ff}
+  .hide{display:none}
+  .muted{color:var(--muted)}
+  .tiny{font-size:11px}
+  /* 门禁提示：只在真有状态要说时占一行，没内容就不留白。 */
+  .hint{color:var(--muted);font-size:12px;line-height:1.5;margin-top:12px}
+  .hint:empty{display:none}
+  .notice{border-left:3px solid var(--warn);background:rgba(245,158,11,.07);
+          padding:10px 12px;border-radius:0 8px 8px 0;margin-bottom:16px;font-size:13px}
+  /* 同一张卡里放两张语义不同的表时，用小标题把它们隔开，别让人混读。 */
+  .secttl{color:var(--muted);font-size:12px;font-weight:600;letter-spacing:.3px;
+          margin:16px 0 4px;padding-top:8px;border-top:1px solid var(--line)}
+  .secttl:first-of-type{border-top:0;padding-top:0}
+  .src{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;
+       background:rgba(59,130,246,.12);color:#a5c8ff}
+  .src.db{background:rgba(148,163,184,.14);color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand">Mini Panel<small id="ver">—</small></div>
+    <div class="row" id="userbar"></div>
+  </div>
+  <div id="notice"></div>
+
+  <!-- 未登录 -->
+  <div id="gate">
+    <div class="card" style="max-width:420px">
+      <h3 id="gateTitle">登录</h3>
+      <form id="gateForm" autocomplete="off">
+        <label>用户名</label><input id="inUser" autocomplete="username" required>
+        <label>密码</label><input id="inPass" type="password" autocomplete="current-password" required>
+        <div id="totpBox" class="hide">
+          <label>动态口令（6 位）</label><input id="inCode" inputmode="numeric" maxlength="6">
+        </div>
+        <div class="row" style="margin-top:14px">
+          <button id="gateBtn" type="submit">登录</button>
+        </div>
+        <div class="hint" id="gateHint"></div>
+        <div class="msg" id="gateMsg"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 已登录 -->
+  <div id="app" class="hide">
+    <div class="card">
+      <h3>概览</h3>
+      <div class="grid" id="kpis"></div>
+      <div class="row" style="margin-top:12px">
+        <button class="ghost" id="btnRefresh">刷新</button>
+        <span class="muted" id="sysNote"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>本机能力</h3>
+      <p class="muted" style="margin:0 0 10px;font-size:13px">
+        下面两张表是两回事：<b>探测到的机制</b>只说明这台宿主机上有什么（装了 nginx、能发 sighup、有 apt），
+        面板能不能操作它，一律看第二张 <b>capability bitmap</b>。机制字段不是功能开关，
+        前端不会把 <code>reload_mode=sighup</code> 这类探测结果画成"现在就能重载"。
+        第二张表逐行照抄接口返回的 features / unavailable，前端不判断任何能力是否可用。
+      </p>
+      <div class="secttl">探测到的机制（宿主环境，不代表本版本可操作）</div>
+      <table id="capsMech">
+        <colgroup><col style="width:34%"><col></colgroup>
+        <tbody id="capsMechBody"></tbody>
+      </table>
+      <div class="secttl">本版本可操作的功能（capability bitmap，来自 /api/v1/capabilities 的 features）</div>
+      <p class="muted" id="capsSummary" style="margin:0 0 4px;font-size:12px"></p>
+      <table id="caps">
+        <colgroup><col style="width:34%"><col></colgroup>
+        <tbody id="capsBody"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3>面板设置</h3>
+      <table id="settings">
+        <colgroup><col style="width:21%"><col><col style="width:160px"><col style="width:172px"><col style="width:150px"></colgroup>
+        <thead><tr><th>键</th><th>值</th><th class="nowrap">更新时间</th><th>来源</th><th>可改性</th></tr></thead>
+        <tbody id="settingsBody"></tbody>
+      </table>
+      <div class="hint" id="setHint">
+        "来源"列照抄接口给的 source 字段：<b>运行中 panel.json</b> 表示这一行回显的是进程当前实际在用的引导值
+        （端口、TLS、会话超时、登录失败上限、未认证状态码），数据库里的镜像不会拿来冒充；
+        <b>数据库</b> 表示值取自 settings 表。安全入口的值由后端决定怎么表述，面板页不会把它画成路径，
+        需要看入口本身请在服务器上执行 <code>minipanel doctor</code>。
+      </div>
+      <label>可修改项的值</label>
+      <div class="row">
+        <select id="setKey" style="max-width:280px"></select>
+        <input id="setVal" style="flex:1" placeholder="新值">
+        <button id="btnSetSave">保存</button>
+      </div>
+      <div class="msg" id="setMsg"></div>
+    </div>
+
+    <div class="card">
+      <h3>账号安全</h3>
+      <p class="muted" style="margin:0 0 10px;font-size:13px">
+        「配置两步验证」先生成密钥，扫码后必须输入 6 位口令确认才真正生效，未确认前不改变登录流程；
+        「修改密码」校验当前密码，成功后该账号的<b>其它</b>会话全部作废（当前会话仍可继续使用）；
+        「退出登录」只结束当前浏览器这一条会话。
+      </p>
+      <div class="row">
+        <button id="btn2fa">配置两步验证</button>
+        <button id="btnPw">修改密码</button>
+        <button class="ghost" id="btnLogout">退出登录</button>
+      </div>
+      <div id="twoFA" class="hide" style="margin-top:12px">
+        <p class="muted" style="font-size:13px">密钥（Base32）：<code id="totpSecret"></code></p>
+        <p class="muted" style="font-size:13px">otpauth：<code id="totpUrl" style="word-break:break-all"></code></p>
+        <div class="row">
+          <input id="totpConfirm" placeholder="扫码后输入 6 位口令以启用" maxlength="6" style="max-width:240px">
+          <button id="btn2faEnable">确认启用</button>
+        </div>
+      </div>
+      <div id="pwBox" class="hide" style="margin-top:12px">
+        <label>当前密码</label><input id="pwOld" type="password">
+        <label>新密码（≥10 位，四类字符中至少三类）</label><input id="pwNew" type="password">
+        <div class="row" style="margin-top:10px"><button id="btnPwSave">提交</button></div>
+      </div>
+      <div class="msg" id="secMsg"></div>
+    </div>
+
+    <div class="card">
+      <h3>审计日志 <span class="muted" style="font-weight:400;font-size:12px" id="auditCount"></span></h3>
+      <p class="muted" style="margin:0 0 10px;font-size:13px">
+        只追加，无清空接口。参数中的口令类字段在入库前已做掩码。
+      </p>
+      <table id="auditTbl">
+        <colgroup><col style="width:168px"><col style="width:92px"><col style="width:120px"><col>
+          <col style="width:104px"><col style="width:72px"></colgroup>
+        <thead><tr><th id="thTime" class="nowrap">时间</th><th>用户</th><th>来源 IP</th>
+          <th>动作 / 对象</th><th>结果</th><th>耗时</th></tr></thead>
+        <tbody id="auditBody"></tbody>
+      </table>
+      <div class="row" style="margin-top:10px"><button class="ghost" id="btnAudit">加载更多</button></div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+const csrf=()=>{const m=document.cookie.match(/(?:^|; )mp_csrf=([^;]+)/);return m?decodeURIComponent(m[1]):""};
+async function api(path,opts={}){
+  const h=Object.assign({"Content-Type":"application/json"},opts.headers||{});
+  if(opts.method&&opts.method!=="GET")h["X-Mini-CSRF"]=csrf();
+  const r=await fetch(path,Object.assign({credentials:"same-origin"},opts,{headers:h}));
+  const t=await r.text();
+  let j=null; try{j=JSON.parse(t)}catch(e){}
+  if(!r.ok){const err=(j&&j.error)||{};throw new Error(err.message||("HTTP "+r.status+(t?"： "+t.slice(0,80):"")))}
+  return j;
+}
+function say(el,text,kind){const e=$(el);e.textContent=text||"";e.className="msg "+(kind||"")}
+
+// ---------- 时间 / 时长格式化（不依赖 locale，不用 toLocaleString） ----------
+const pad=n=>String(n).padStart(2,"0");
+// 面板只做展示换算：输入一律是接口给的 epoch 秒或时长秒，不做任何数值猜测。
+function tzLabel(){const o=-new Date().getTimezoneOffset(),sign=o<0?"-":"+",a=Math.abs(o);
+  return "UTC"+sign+Math.floor(a/60)+(a%60?":"+pad(a%60):"")}
+function fmtTime(sec){if(!sec)return "—";const d=new Date(sec*1000);
+  return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+" "+
+         pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds())}
+// 人类可读时长：秒级也要说清楚，小于 1 分钟不再是空字符串（旧 fmtUp 的缺陷）。
+function fmtDur(sec){sec=Math.max(0,Math.floor(sec)||0);
+  const d=Math.floor(sec/86400),h=Math.floor(sec%86400/3600),m=Math.floor(sec%3600/60),s=sec%60;
+  const p=[];if(d)p.push(d+" 天");if(h)p.push(h+" 小时");if(m&&d<1)p.push(m+" 分钟");
+  if(!d&&!h&&(s||!p.length))p.push(s+" 秒");return p.join(" ")||"0 秒"}
+const fmtUp=fmtDur;
+// 时刻单元格：正文固定 YYYY-MM-DD HH:MM:SS，全文（含时区与原始 epoch）放 title。
+const timeCell=sec=>'<td class="nowrap" title="'+esc(fmtTime(sec)+" "+tzLabel()+"（epoch "+sec+"）")+'">'+fmtTime(sec)+"</td>";
+
+let health=null, caps=null, auditOffset=0;
+
+// ---------- 门禁：/healthz 决定是初始化还是登录 ----------
+async function boot(){
+  try{health=await api("/healthz")}
+  catch(e){$("#gateHint").textContent="无法连接面板接口：/healthz 没有响应，面板进程可能没起来。";return}
+  $("#ver").textContent="v"+(health.version||"dev")+" · 面板已运行 "+fmtUp(health.uptime_seconds||0);
+  if(health.requires_setup){
+    $("#gateTitle").textContent="初始化：创建第一个管理员";
+    $("#gateBtn").textContent="创建并登录";
+    $("#gateHint").textContent="仅在没有账号时可用；也可在服务器上执行 minipanel passwd <用户> 创建。";
+    $("#gateForm").onsubmit=doSetup;
+  }else{
+    $("#gateForm").onsubmit=doLogin;
+    // gateHint 只讲真实状态：入口开没开、忘了怎么办，没有可说时保持为空（CSS 会收起这一行）。
+    $("#gateHint").textContent=health.entrance_enabled
+      ?"安全入口已启用：只有从入口路径进来的请求才允许提交口令。忘记入口或口令时，在服务器上执行 minipanel doctor / minipanel passwd <用户>。"
+      :"未启用安全入口（panel.json 里 entrance 为空）：任何路径都会打开这个登录页。";
+  }
+  // 探测既有会话，避免已登录时还要再输一次密码
+  try{await api("/api/v1/session");await enterApp()}catch(e){/* 未登录，留在门禁 */}
+}
+async function doSetup(ev){
+  ev.preventDefault();
+  say("#gateMsg","");
+  try{
+    await api("/api/v1/setup",{method:"POST",body:JSON.stringify({username:$("#inUser").value,password:$("#inPass").value})});
+    await doLogin(ev,true);
+  }catch(e){say("#gateMsg",e.message,"bad")}
+}
+async function doLogin(ev,silent){
+  if(ev)ev.preventDefault();
+  say("#gateMsg","");
+  const body={username:$("#inUser").value,password:$("#inPass").value};
+  if($("#totpBox").classList.contains("hide")===false)body.code=$("#inCode").value;
+  try{
+    const r=await api("/api/v1/login",{method:"POST",body:JSON.stringify(body)});
+    if(r.totp_required){$("#totpBox").classList.remove("hide");return}
+    if(r.must_change_pw)note("该账号的密码由 CLI 设置，请尽快在“账号安全”中改为自己的密码。");
+    await enterApp();
+  }catch(e){
+    const msg=e.message||"";
+    if(/动态口令/.test(msg)){$("#totpBox").classList.remove("hide")}
+    if(!silent)say("#gateMsg",msg,"bad");
+  }
+}
+function note(text){$("#notice").innerHTML='<div class="notice">'+text+'</div>'}
+async function enterApp(){
+  $("#gate").classList.add("hide");$("#app").classList.remove("hide");
+  const s=await api("/api/v1/session");
+  $("#userbar").innerHTML='<span class="muted">'+s.username+'</span> <button class="ghost" onclick="logout()">退出</button>';
+  await Promise.all([loadCaps(),loadSystem(),loadSettings(),loadAudit(true)]);
+}
+async function logout(){
+  try{await api("/api/v1/logout",{method:"POST"})}catch(e){}
+  location.reload();
+}
+
+// ---------- 概览 ----------
+async function loadSystem(){
+  const d=await api("/api/v1/system/info");
+  const kb=n=>(n/1e9).toFixed(1)+" GB";
+  const pct=d.memory?d.memory.usedPercent.toFixed(1)+"%":"—";
+  // 宿主机运行时长（system/info）与面板进程运行时长（healthz）是两件事，标签必须分开。
+  const hostUp=d.uptime_seconds?fmtUp(d.uptime_seconds):"—";
+  const boot=d.boot_time?"上次启动："+fmtTime(d.boot_time):"";
+  $("#kpis").innerHTML=[
+    kpi("系统",d.os_pretty||d.os||"—"),
+    kpi("内核",d.kernel||"—"),
+    kpi("架构",d.arch||"—"),
+    kpi("CPU",(d.cpu_cores||"—")+" 核"),
+    kpi("内存",(d.memory?kb(d.memory.total):"—"),"已用 "+pct),
+    kpi("负载",d.load?d.load.m1.toFixed(2):"—"),
+    kpi("系统已运行",hostUp,boot),
+    kpi("面板端口",String(d.panel?d.panel.port:"—"),d.panel&&d.panel.tls?"HTTPS":"HTTP"),
+  ].join("");
+  $("#sysNote").textContent="站点根目录 "+((d.panel&&d.panel.siteRoot)||"未设置")
+    +" · 数据目录 "+((d.panel&&d.panel.dataDir)||"—");
+}
+// 长值一律带 title，卡片本身靠 CSS 换行，不允许溢出后被相邻卡片裁掉。
+const kpi=(t,v,s)=>{const val=v||"—";
+  return '<div class="kpi"><span>'+esc(t)+'</span><b title="'+esc(val)+'">'+esc(val)+'</b>'
+    +(s?'<span>'+esc(s)+'</span>':'')+'</div>'};
+
+// ---------- 能力位图 ----------
+// key 必须与后端常量逐一对齐：internal/platform/capabilities.go 的 Feat* 与
+// internal/platform/detect.go 的 feat*（site_write / php_version_switch /
+// firewall_write / service_write）。这里写错一个字母，那一行就会变成"灰但没理由"。
+const FEATS=[["site","网站"],["site_write","网站写入"],["php","PHP 多版本"],
+  ["php_version_switch","切换 PHP 版本"],["php_ext_source","PHP 源码编译扩展"],
+  ["ssl","SSL / ACME"],["database","数据库"],["backup","备份"],
+  ["firewall","防火墙"],["firewall_write","防火墙写入"],["cron","计划任务"],["terminal","Web 终端"],
+  ["monitor","监控"],["audit","审计"],["ssh_manager","SSH 管理"],["file_posix_perms","文件权限"],
+  ["service_write","服务管理"]];
+const NO_REASON="后端未给出理由（缺陷，请报告）";
+const capTag=(on)=>on?'<span class="tag on">可用</span>':'<span class="tag off">未开放</span>';
+async function loadCaps(){
+  caps=await api("/api/v1/capabilities");
+  const f=caps.features||{},u=caps.unavailable||{};
+  // 机制探测区：只描述宿主上有什么，一律不画"可用/未开放"标签，避免被读成功能开关。
+  // 每个字段显式登记它覆盖了接口里的哪些 key，最后兜底渲染没登记到的 key，
+  // 后端加字段时这里不会静默丢信息，而是当场点名"前端未分区"。
+  const used=new Set(["features","unavailable"]),mech=[];
+  const m=(label,keys,text,extra)=>{keys.forEach(k=>used.add(k));mech.push(tr(label,text,extra,keys))};
+  m("主机名 / 架构",["hostname","arch"],(caps.hostname||"—")+" · "+(caps.arch||"—"));
+  m("操作系统",["os","os_family","os_version","is_privileged"],
+    (caps.os||"—")+" / "+(caps.os_family||"—"),
+    (caps.os_version||"")+(caps.is_privileged?" · 进程具备提权能力":" · 未提权"));
+  m("Web 服务",["web_servers"],(caps.web_servers||[]).join(", ")||"未检测到");
+  m("PHP 运行时",["php_modes","php_versions"],(caps.php_modes||[]).join(", ")||"无",
+    (caps.php_versions||[]).join(" "));
+  m("扩展安装手段",["php_ext_install"],(caps.php_ext_install||[]).join(", ")||"不支持",
+    "只是宿主上可用的安装手段，面板能不能用看下面第二张表");
+  m("重载方式",["reload_mode"],caps.reload_mode||"none",
+    "探测到的是宿主机制，本版本没有可点的重载按钮");
+  m("防火墙后端",["firewall"],caps.firewall||"未检测到");
+  m("计划任务",["schedulers","supports_sub_second_cron"],
+    ((caps.schedulers||[]).join(", ")||"无")+(caps.supports_sub_second_cron?"（支持秒级）":"（不支持秒级）"));
+  m("服务管理 / 包管理",["service_manager","package_manager"],
+    (caps.service_manager||"未检测到")+" / "+(caps.package_manager||"未检测到"));
+  m("远程访问",["remote_access"],(caps.remote_access||[]).map(x=>(x&&x.kind?x.kind:x)).join(", ")||"无");
+  m("数据库引擎",["database_engines"],(caps.database_engines||[]).join(", ")||"未检测到");
+  m("权限模型",["permissions"],caps.permissions||"未检测到");
+  for(const k of Object.keys(caps))if(!used.has(k))
+    m(k+"（前端未分区，请报告缺陷）",[k],typeof caps[k]==="object"?JSON.stringify(caps[k]):String(caps[k]));
+  $("#capsMechBody").innerHTML=mech.join("");
+  // 功能区：唯一事实来源是 features/unavailable。
+  const rows=[];
+  const known=new Set(FEATS.map(x=>x[0]));
+  for(const [k,name] of FEATS)rows.push(featRow(k,name,f[k],u[k]));
+  // 后端加了新 feature key 而这里没跟上时，照样渲染出来并且点名"未登记"，
+  // 这样缺陷当场可见，不会静默变成少一行或灰行没理由。
+  for(const k of Object.keys(f))if(!known.has(k))rows.push(featRow(k,k+"（前端未登记，请报告缺陷）",f[k],u[k]));
+  for(const k of Object.keys(u))if(!known.has(k)&&!(k in f))rows.push(featRow(k,k+"（前端未登记，请报告缺陷）",undefined,u[k]));
+  $("#capsBody").innerHTML=rows.join("");
+  const on=Object.keys(f).filter(k=>f[k]===true);
+  $("#capsSummary").textContent="本版本可操作："+(on.length?on.length+" 项（"+on.map(k=>{
+    const hit=FEATS.find(x=>x[0]===k);return hit?hit[1]:k+"（前端未登记）"}).join("、")+"）":"0 项")+
+    "；其余 "+(Object.keys(f).length-on.length)+" 项由后端明确拒绝，理由见下表。";
+}
+// 唯一事实来源是接口的 features[key]；理由只在被拒绝时展示，缺失时点名缺陷。
+function featRow(k,name,on,reason){
+  const avail=on===true;
+  let cell=capTag(avail);
+  if(!avail)cell+=' <span class="muted">'+esc((typeof reason==="string"&&reason.trim())?reason.trim():NO_REASON)+"</span>";
+  else if(reason)cell+=' <span class="muted">（接口同时给出了不可用理由，前后矛盾，请报告缺陷）</span>';
+  return '<tr><th title="'+esc("features."+k)+'">'+esc(name)+"</th><td>"+cell+"</td></tr>";
+}
+const tr=(a,b,c,keys)=>'<tr><th'+(keys?' title="'+esc(keys.map(k=>"caps."+k).join(" · "))+'"':'')+'>'+
+  esc(a)+'</th><td>'+esc(b)+(c?' <span class="muted tiny">'+esc(c)+'</span>':'')+'</td></tr>';
+const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m]));
+
+// ---------- 设置 ----------
+// 显示层换算，不改数据：布尔串→是/否、秒数→可读时长、epoch→时刻，
+// 原始值一律留在 title 里。依据是后端自身的语义（internal/api/system.go 的
+// runtimeSetting / validateBoolString / validateNonNegativeInt 与 store.go 的种子值），
+// panel.port 一类启动项后端已经回填运行中的真实值，前端不做任何数字猜测。
+const SEC_KEYS={"panel.session_timeout":true};
+const UNIT_KEYS={"panel.login_limit":" 次","panel.password_expiry_days":" 天"};
+const isNum=v=>/^\d+$/.test(v);
+// source 是接口给的事实（"db" | "panel.json"），不是前端推断：panel.json 意味着这一行
+// 回显的是进程当前真正在用的引导值（数据库镜像只是占位，报出来会自相矛盾）。
+// panel.entrance 的 value 由后端决定且不含路径，前端只当普通文本渲染，不做任何路径样式。
+function settingSrc(it){
+  const raw=it.source==null?"":String(it.source);
+  if(raw==="panel.json")return{t:'<span class="src">运行中</span> <span class="muted tiny">panel.json</span>',
+    title:"source=panel.json：这一行回显的是进程当前实际在用的引导值（不是数据库里的镜像），改它要动文件并重启"};
+  if(raw==="db")return{t:'<span class="src db">数据库</span>',
+    title:"source=db：值取自 settings 表"};
+  return{t:'<span class="src db">'+esc(raw||"（接口未给出 source，请报告缺陷）")+'</span>',
+    title:"接口原样返回的 source："+raw};
+}
+function settingVal(it){
+  const k=it.key,v=it.value==null?"":String(it.value);
+  if(v==="")return{t:"（未设置）",title:"原始值：空字符串"};
+  if(v==="true"||v==="false")return{t:v==="true"?"是":"否",title:"原始值："+v};
+  if(SEC_KEYS[k]&&isNum(v))return{t:fmtDur(+v)+"（"+v+" 秒）",title:"原始值（秒）："+v};
+  if(UNIT_KEYS[k]&&isNum(v))return{t:v+UNIT_KEYS[k],title:"原始值："+v};
+  if(k==="panel.unauth_status"&&isNum(v))return{t:v,title:"原始值："+v+"（未认证请求得到的伪装响应状态码）"};
+  if(/_at$/.test(k)&&isNum(v)&&v.length>=10)return{t:fmtTime(+v),title:"原始值（epoch 秒）："+v+" · "+tzLabel()};
+  if(v.indexOf("\n")>=0)return{t:v,pre:true,title:"原始值："+v};
+  return{t:v,title:"原始值："+v};
+}
+async function loadSettings(){
+  const d=await api("/api/v1/settings");
+  $("#settingsBody").innerHTML=(d.items||[]).map(it=>{
+    const v=settingVal(it),src=settingSrc(it);
+    return '<tr><th><code>'+esc(it.key)+'</code></th>'+
+      '<td'+(v.pre?' class="pre"':'')+' title="'+esc(v.title)+'">'+esc(v.t)+'</td>'+
+      timeCell(it.updated_at)+
+      '<td title="'+esc(src.title)+'">'+src.t+'</td>'+
+      '<td>'+(it.editable?'<span class="tag partial">可改</span>':
+        '<span class="tag off">需改配置文件并重启</span>')+'</td></tr>'}).join("");
+  const edit=(d.items||[]).filter(i=>i.editable);
+  $("#setKey").innerHTML=edit.map(i=>'<option value="'+esc(i.key)+'">'+esc(i.key)+'</option>').join("");
+  // 没有可改项时不给"能点但什么都不做"的按钮；接口一旦给出就立刻恢复可用。
+  $("#btnSetSave").disabled=edit.length===0;
+  $("#setVal").disabled=edit.length===0;
+  $("#setVal").placeholder=edit.length?"新值":"当前没有可通过接口修改的设置项";
+}
+$("#btnSetSave").onclick=async()=>{
+  say("#setMsg","");
+  try{
+    await api("/api/v1/settings/"+encodeURIComponent($("#setKey").value),
+      {method:"PUT",body:JSON.stringify({value:$("#setVal").value})});
+    say("#setMsg","已保存","ok");await loadSettings();
+  }catch(e){say("#setMsg",e.message,"bad")}
+};
+
+// ---------- 账号安全 ----------
+$("#btn2fa").onclick=async()=>{
+  say("#secMsg","");
+  try{
+    const d=await api("/api/v1/2fa/setup",{method:"POST"});
+    $("#totpSecret").textContent=d.secret;$("#totpUrl").textContent=d.url;
+    $("#twoFA").classList.remove("hide");say("#secMsg",d.note,"");
+  }catch(e){say("#secMsg",e.message,"bad")}
+};
+$("#btn2faEnable").onclick=async()=>{
+  say("#secMsg","");
+  try{await api("/api/v1/2fa/enable",{method:"POST",body:JSON.stringify({code:$("#totpConfirm").value})});
+    say("#secMsg","两步验证已启用，下次登录需要动态口令","ok");$("#twoFA").classList.add("hide");
+  }catch(e){say("#secMsg",e.message,"bad")}
+};
+$("#btnPw").onclick=()=>{$("#pwBox").classList.toggle("hide")};
+$("#btnPwSave").onclick=async()=>{
+  say("#secMsg","");
+  try{await api("/api/v1/password",{method:"POST",
+      body:JSON.stringify({old_password:$("#pwOld").value,new_password:$("#pwNew").value})});
+    say("#secMsg","密码已更新，其他会话已失效","ok");
+  }catch(e){say("#secMsg",e.message,"bad")}
+};
+
+// ---------- 审计 ----------
+const durText=ms=>ms>=1000?(ms/1000).toFixed(1)+" 秒":ms+" 毫秒";
+async function loadAudit(reset){
+  if(reset){auditOffset=0;$("#auditBody").innerHTML="";$("#thTime").textContent="时间（"+tzLabel()+"）"}
+  const d=await api("/api/v1/audit?limit=30&offset="+auditOffset);
+  $("#auditCount").textContent="共 "+d.total+" 条";
+  $("#auditBody").insertAdjacentHTML("beforeend",(d.items||[]).map(it=>{
+    const ok=it.result==="ok";
+    const action=[it.action,it.target,it.params_mask].filter(Boolean).join("  ");
+    return timeCell(it.at)+"<td>"+esc(it.user||"—")+"</td>"+
+      '<td title="'+esc(it.ip+(it.geo?" · "+it.geo:""))+'">'+esc(it.ip||"—")+"</td>"+
+      '<td><code class="clip" title="'+esc(action)+'">'+esc(it.action||"—")+"</code>"+
+        (it.target&&it.target!==it.action?'<span class="clip muted" title="'+esc(it.target)+'">'+esc(it.target)+"</span>":"")+
+        (it.params_mask?'<span class="clip muted" title="'+esc(it.params_mask)+'">'+esc(it.params_mask)+"</span>":"")+"</td>"+
+      '<td class="nowrap" title="'+esc(it.error?("错误："+it.error):"结果："+it.result)+'">'+
+        '<span class="tag '+(ok?"on":"off")+'">'+esc(it.result||"—")+"</span></td>"+
+      '<td class="nowrap">'+durText(it.duration_ms||0)+"</td></tr>"}).join(""));
+  auditOffset+=(d.items||[]).length;
+  if(auditOffset>=d.total)$("#btnAudit").disabled=true;
+}
+$("#btnAudit").onclick=()=>loadAudit(false);
+$("#btnRefresh").onclick=()=>{loadSystem();loadCaps();loadSettings()};
+$("#btnLogout").onclick=logout;
+window.logout=logout;
+boot();
+</script>
+</body>
+</html>

@@ -1,0 +1,81 @@
+# ---- 构建产物 ----
+# make build / build-windows / build-all 的全部输出
+/bin/
+/dist/
+/out/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.o
+*.a
+
+# ---- 本机开发运行目录 ----
+# make run / make doctor 用 MINI_PANEL_ROOT 把 /etc、/var 前缀挪到这里；
+# 里面是 panel.json、minipanel.db、面板证书，属于运维数据，不入库。
+/data/
+
+# ---- SQLite 运行态 ----
+# 数据库里是口令哈希、会话 ID、审计记录；-wal/-shm 在下次 checkpoint 前持有同样的字节。
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.reindex
+
+# ---- 日志 ----
+*.log
+/logs/
+/log/
+
+# ---- 秘密材料：绝不入库 ----
+# panel.json 含安全入口路径（见 internal/config/config.go），文件权限本身是 0600，
+# 但入库等于把入口路径交给每一个 clone 的人。
+panel.json
+panel.json.tmp
+*.pem
+*.key
+*.crt
+*.cer
+*.der
+*.p12
+*.pfx
+*.jks
+id_rsa
+id_rsa.pub
+id_ed25519
+known_hosts
+*.totp
+secrets.env
+
+# ---- 前端 ----
+# 注意：M0 的前端是手写的 webui/dist/index.html，它【必须】入库（go:embed 依赖它），
+# 所以这里不写任何 webui/dist 规则，也不要恢复旧的 web/dist/assets 规则。
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.webpack/
+.vite/
+
+# ---- 环境与本地覆盖 ----
+.env
+.env.*
+!.env.example
+
+# ---- 编辑器 / 操作系统 ----
+/.idea/
+/.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---- Go 工具缓存 ----
+/vendor/
+coverage.out
+coverage.html
