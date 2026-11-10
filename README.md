@@ -5,10 +5,12 @@
 
 Mini Panel 模仿的是宝塔面板的**使用习惯**（面板端口 + 安全入口 + 站点列表 + 一键申请证书
 这套工作流，以及 `bt` 那样的命令行自救入口），**不是抄它的代码**：本仓库没有任何一行来自
-第三方面板，全部实现都是 Go 标准库 + 少量上游库（chi / gopsutil / modernc sqlite / x/crypto /
-x/sys / x/term，直接依赖共 6 个，逐条清单见 `docs/技术选型与MVP规格.md` §1），
-依赖各自的许可证见 `go.mod`；本仓库自身的授权条款**尚未确定**（由项目负责人拍板后才会出现 LICENSE 文件），
-因此现阶段不要假定任何默认许可。
+第三方面板，全部实现都是 Go 标准库 + 少量上游库（直接依赖共 6 个，逐条清单见
+`docs/技术选型与MVP规格.md` §1）。
+
+**授权：GPL-3.0-only 完全开源**（见 `LICENSE`）。依赖侧 chi 为 MIT，gopsutil、
+x/{crypto,sys,term}、modernc.org/sqlite 为 BSD-3-Clause，均与 GPL-3.0 兼容。
+变更授权需要全部贡献者同意，因此这条在 M0 定稿后不再轻动。
 
 仓库地址：https://github.com/Lisir2002/Mini_Panel
 
@@ -25,7 +27,7 @@ M0 交付的是**面板自身**：身份、会话、安全入口、能力位图�
 | 能力 | 实现位置 | 强制它的测试 |
 | --- | --- | --- |
 | 单二进制：API + 内嵌前端，无 nginx / 无 PHP / 无 python venv | `cmd/minipanel/main.go:1-3` 包注释、`webui/embed.go:15 go:embed` | `make build` |
-| CLI：`serve` `init` `doctor` `passwd` `reset-entrance` `version` | `cmd/minipanel/main.go:82 dispatch()` | `make doctor`（实测通过） |
+| CLI：`serve` `init` `doctor` `passwd` `reset-entrance` `version` | `cmd/minipanel/main.go:82 dispatch()` | `cmd/minipanel/main_test.go`（8 个用例）+ `make doctor`（实测通过） |
 | 引导配置 `panel.json`（0600，原子写） | `internal/config/config.go:96 Save()` | `TestSaveAndLoadRoundTripWithPermissions` |
 | SQLite 运行态存储 + 版本化迁移，文件强制 0600 | `internal/store/store.go:25 Open()`、`:64 migrate()`、`:50` chmod 循环（含 `-wal`/`-shm`） | `TestMigrationsAreIdempotentAndSeeded`、`TestFilePermissionsAreOwnerOnly`（只断言主文件，见 `docs/技术选型与MVP规格.md` §8.4） |
 | 口令哈希 bcrypt cost 12、强度规则（长度≥10 且四类中三类） | `internal/sec/sec.go:20 HashPassword()`、`:55 ValidatePassword()` | `TestValidatePassword`、`TestPasswordHashIsSaltedAndVerifiable` |
@@ -86,7 +88,10 @@ init 结束会打印这样一段（`cmd/minipanel/main.go` 的 `bannerLines()`�
 账号（走 `POST /api/v1/setup`，只在账号表为空时可用）。
 
 本机调试不必 root、也不必系统路径：`MINI_PANEL_ROOT` 会把 `/etc`、`/var` 前缀整体挪到一个
-目录下（`internal/platform/platform_linux.go:25-30`）：
+目录下（`internal/platform/platform_linux.go:25-30`）；`MINI_PANEL_DEBUG=1` 把日志级别降到
+Debug（`cmd/minipanel/main.go:156 newLogger()`）——**注意目前非测试代码里没有任何 `.Debug()`
+调用点**（`grep -rn "\.Debug(" --include='*.go' internal cmd | grep -v _test` 为空），所以今天
+打开它不会多出任何输出，它是给后续埋点留的口子，不是"更多信息"开关：
 
 ```bash
 make doctor    # 自检：路径 / 能力位图 / 数据库 / 证书（等价于 MINI_PANEL_ROOT=./data ... doctor）
@@ -110,16 +115,26 @@ minipanel reset-entrance              # 换一个安全入口（需重启面板�
 任何子命令加 `-h` 打印它自己的选项。出错时统一在 stderr 打 `minipanel: <原因>` 并**退出码 1**；
 **未知 flag 不会静默忽略**——`minipanel init --bogus` 得到
 `minipanel: flag provided but not defined: -bogus` 与退出码 1，这条是 Go flag 包的默认行为，
-本仓库没有把 `fs.Usage` 换成"继续跑"的版本。`-h` 是提问不是失败，打印用法后**退出码 0**。
+本仓库没有把 `fs.Usage` 换成"继续跑"的版本。`-h` 是提问不是失败，打印用法后**退出码 0**
+（`main.go:70-78` 把 `flag.ErrHelp` 映射成 0）。
 
-| 命令 | 选项 | 行为 / 退出 |
+**这一节的每一条都有进程内测试压着**：`cmd/minipanel/main_test.go`（277 行、8 个用例，
+`go test ./cmd/minipanel/`）。这些测试存在的原因写在文件头（`:17-20`）：M0 审计发现过一个
+HTTP 测试永远看不见的缺陷——`minipanel init --port 29095 --bind 127.0.0.1` **把 flag 全收下、
+一个都不生效、写的是默认值，然后打出一个看起来照办了的 banner**。所以下表每一条断言都从盘上
+读回来验证（`readBack()` 用 `serve` 一样的方式 `config.Load`），完整叙述见
+`docs/技术选型与MVP规格.md` §8.6。测试用 `MINI_PANEL_ROOT` 把 `/etc`、`/var` 挪进 `t.TempDir()`
+（`isolated()`，`:26-30`），不会碰真实主机路径。
+
+| 命令 | 选项 | 行为 / 退出（括号里是压它的测试） |
 | --- | --- | --- |
-| `minipanel serve` | `--bind <地址>`、`--port <端口>`、`--insecure-no-tls` | 前台运行。首次运行（没有 panel.json）会**就地执行 init**（`main.go:192`）。TLS 关闭且监听地址不是回环时打一条警告并照常启动，但登录接口会拒绝凭据（`main.go:201`）。收到 SIGINT/SIGTERM 后 10 秒优雅关闭（`main.go:266-275`）。 |
-| `minipanel init` | `--bind`、`--port`、`--insecure-no-tls`、`--entrance </路径>` | 唯一被允许写引导值的命令（`main.go:337 cmdInit()`），写入 panel.json 并生成入口与自签证书。**不接受位置参数**（多给就报错，`main.go:347`）。`--entrance -` 表示关闭入口，此时不会自动生成随机值（`main.go:368`，配套注释说明了为什么"入口为空"不能等价于"随机生成"）。 |
-| `minipanel doctor` | `--json` | 打印/输出探测到的路径、能力位图、schema 版本、用户/会话/审计计数、数据库大小、证书 SAN 与到期、监听地址、入口（`main.go:462 cmdDoctor()`）。**不要求面板正在运行**，所以它是失联时的第一手诊断。入口未启用或没有账号时会给出下一步提示。 |
-| `minipanel passwd <user>` | `--password '<口令>'` | 设置/重置管理员口令；账号不存在则创建。**用户名是最前面的位置参数**：`minipanel passwd admin --password 'X'`，因为 Go 的 flag 包遇到第一个位置参数就停止解析，代码为此把前置的用户名先摘出来（`main.go:581`），所以 `passwd --password 'X' admin` 也能工作。口令省略时分两条路（`main.go:606` 用 `term.IsTerminal(os.Stdin)` 判断）：**tty 下走 `term.ReadPassword`（`main.go:612`），屏幕与终端缓冲区别人都读不到**，提示语是 `输入新口令: `，读完立刻 `fmt.Println()` 换行；**管道下**（`echo 'X' | minipanel passwd admin`）不提示、直接 `readLine(os.Stdin)`（`main.go:621`），因为没有终端可隐藏。tty 这条是真关掉了回显——此前文案写"不回显"但没调 `term`，属于文案与行为不一致，已修。口令强度按 `sec.ValidatePassword` 校验，**CLI 不豁免**。已有账号被改口令后，该用户**全部会话作废**，且下次登录要求修改口令（`MustChangePW`）。 |
-| `minipanel reset-entrance` | `--set </路径>`、`--disable` | 重新生成（或指定、或关闭）安全入口，写回 panel.json 并同步 settings 表。打印"需重启面板生效"。 |
-| `minipanel version` | — | `Mini Panel <Version> (commit <Commit>, built <BuildDate>)`，三元组由 `-ldflags` 注入 `internal/build/build.go:4-8`。 |
+| `minipanel serve` | `--bind <地址>`、`--port <端口>`、`--insecure-no-tls` | 前台运行。首次运行（没有 panel.json）会**就地执行 init**（`main.go:192`）。TLS 关闭且监听地址不是回环时打一条警告并照常启动，但登录接口会拒绝凭据（`main.go:201`）。收到 SIGINT/SIGTERM 后 10 秒优雅关闭（`main.go:266-275`）。（`serve -h` 由 `TestSubcommandHelpIsNotAFailure` 压） |
+| `minipanel init` | `--bind`、`--port`、`--insecure-no-tls`、`--entrance </路径>` | 唯一被允许写引导值的命令（`main.go:337 cmdInit()`），写入 panel.json 并生成入口与自签证书。**每个 flag 都必须真的落到 panel.json**（`TestInitHonoursItsFlags`，`main_test.go:43`：端口/绑定/TLS 三项读回断言，另外 `main_test.go:70` 断言 `panel.json` 落盘 0600）。**不接受位置参数**（多给就报错，`main.go:347`；`--bogus` 与未知子命令一起由 `TestInitRejectsUnknownAndExtraArgs`（`main_test.go:75`）拒绝）。`--entrance -` 表示**关闭**入口，此时不会自动生成随机值（`main.go:368`；`TestInitEntranceFlag`（`main_test.go:88`）逐条压：`/myadmin` 原样、`myadmin` 自动补前导斜杠、`-` 关闭、`/api` 保留字拒绝、`/ab` 太短拒绝、`/../../etc` 穿越拒绝，并特意断言"空入口不得被重新解释成替我生成一个"） |
+| `minipanel doctor` | `--json` | 打印/输出探测到的路径、能力位图、schema 版本、用户/会话/审计计数、数据库大小、证书 SAN 与到期、监听地址、入口（`main.go:462 cmdDoctor()`）。**不要求面板正在运行**，所以它是失联时的第一手诊断。入口未启用或没有账号时会给出下一步提示。（`doctor` 与 `doctor --json` 由 `TestResetEntranceKeepsConfigAndMirrorInStep` 顺带跑通 `main_test.go:150-155`） |
+| `minipanel passwd <user>` | `--password '<口令>'` | 设置/重置管理员口令；账号不存在则创建。**用户名可以前置也可以后置**：`passwd admin --password 'X'` 与 `passwd --password 'X' admin` 都成立，因为 Go 的 flag 包遇到第一个位置参数就停止解析，代码为此把前置的用户名先摘出来（`main.go:581`）；给两个用户名则报错（`TestPasswdSetsMustChangeAndValidatesInput`，`main_test.go:174`）。口令省略时分两条路（`main.go:606` 用 `term.IsTerminal(os.Stdin)` 判断）：**tty 下走 `term.ReadPassword`（`main.go:612`），屏幕与终端缓冲区别人都读不到**，提示语是 `输入新口令: `，读完立刻换行；**管道下**（`echo 'X' | minipanel passwd admin`）不提示、直接 `readLine(os.Stdin)`（`main.go:621`），因为没有终端可隐藏。tty 这条是真关掉了回显——此前文案写"不回显"但没调 `term`，属于文案与行为不一致，已修（该分支需要真 pty，CI 里跑不到，缺口记在 §8.4）。口令强度按 `sec.ValidatePassword` 校验，**CLI 不豁免**（`--password short` 被拒；空 stdin 也被拒，同一测试 `main_test.go:204-214`）；非法用户名同样被拒。已有账号被改口令后，该用户**全部会话作废**，且下次登录要求修改口令（`MustChangePW`——测试 `main_test.go:193` 的理由就是"从 shell 传进去的口令不是操作者自己选的"）。 |
+| `minipanel reset-entrance` | `--set </路径>`、`--disable` | 重新生成（或指定、或关闭）安全入口，写回 panel.json **并同步 settings 表的 `panel.entrance`**，两边必须一致（`TestResetEntranceKeepsConfigAndMirrorInStep`，`main_test.go:122`；`main_test.go:135` 与 `:143` 分别断言镜像值）。`--set` 与 `--disable` 同时给是**矛盾而不是优先级**，直接拒绝（`main_test.go:146`）。打印"需重启面板生效"。 |
+| `minipanel version` | — | `Mini Panel <Version> (commit <Commit>, built <BuildDate>)`，三元组由 `-ldflags` 注入 `internal/build/build.go:4-8`。（`dispatch(["version"])` 返回 nil 由 `TestSubcommandHelpIsNotAFailure` 压；`TestUsageCoversEveryCommand`（`main_test.go:235`）还要求 6 个子命令与 8 个 flag 全部出现在 `usage` 文本里——帮助文档不许腐烂） |
+| banner（`init`/`serve` 打的） | — | banner 里的端口、绑定地址、URL 必须等于**实际生效**的值；入口关闭时明写"未设置"而不是留空（`TestBannerReportsLiveConfigValues`，`main_test.go:252`，绑定回环时还禁止出现 `0.0.0.0`） |
 
 ---
 
@@ -311,10 +326,12 @@ make clean              只删 bin/
 ```
 
 全程 `CGO_ENABLED=0`：SQLite 用纯 Go 驱动 `modernc.org/sqlite`，所以交叉编译不需要目标平台
-有 C 工具链，产物也不依赖目标机的 glibc。其中 linux/amd64、linux/arm64、darwin/arm64、
-windows/amd64、freebsd/amd64 是逐条实测过的重点组合（另外 3 个由 `make build-all` 同批产出）；此外
-`GOOS=windows|darwin|freebsd go vet ./internal/...` 也都退出码 0（平台专属的接口误用不会
-被留到发布日，复核命令见 `docs/技术选型与MVP规格.md` §6）。
+有 C 工具链，产物也不依赖目标机的 glibc。**8 个组合（linux / darwin / windows / freebsd ×
+amd64 / arm64）在这台开发机上逐条实测全部退出码 0**，其中 linux/amd64、linux/arm64、
+darwin/arm64、windows/amd64、freebsd/amd64 是**重点目标**（四个 OS 都覆盖到，且是实际部署最常见的
+那批架构）；
+此外 `GOOS=windows|darwin|freebsd|linux go vet ./internal/...` 也都退出码 0（平台专属的接口误用
+不会留到发布日，复核命令见 `docs/技术选型与MVP规格.md` §6）。
 后加的 `golang.org/x/term`（`minipanel passwd` 的隐藏输入）不改变这条矩阵：它与 `x/crypto`、
 `x/sys` 同属标准库同族，纯 syscall、无 cgo，唯一依赖是 `x/sys`；加上它之后 8 个组合重新实测
 仍然全部产出（见下方"如何验证"）。
@@ -338,15 +355,17 @@ windows/amd64、freebsd/amd64 是逐条实测过的重点组合（另外 3 个�
 | 命令 | 实测结果 |
 | --- | --- |
 | `make vet` | `go vet ./...` 无输出 |
-| `make test` | **全绿**：`internal/api` 10.7s、`internal/sec` 1.0s、`internal/store` 0.2s、`internal/audit` 0.16s、`internal/config` 0.003s、`internal/platform` 0.004s、`cmd/minipanel` 1.3s（新增 `cmd/minipanel/main_test.go`，见下）；`webui` 无测试文件（零依赖单文件前端，其契约由后端返回的字段名约束）。**曾经**这条会约 1/5 概率随机红：入口字母表（原 `sec.go:108`）里留着 `i`，而 `TestEntranceShape`（`internal/sec/sec_test.go:82`）把 `i` 列为易混字符；源码侧已改为删掉字母表里的 `i`（现 `internal/sec/sec.go:112`，31 字符），本轮 12 次独立复跑 0 红。测量过程、复核循环与留下的纪律见 `docs/技术选型与MVP规格.md` §8.3 |
+| `make test` | **全绿，且没有随机失败**：`internal/api` 10.3s、`internal/sec` 1.0s、`internal/store` 0.2s、`internal/audit` 0.14s、`internal/config` 0.003s、`internal/platform` 0.002s、`cmd/minipanel` 1.2s（新入库的 `cmd/minipanel/main_test.go`，8 个 CLI 用例，见上文"CLI 子命令"）；`webui` 无测试文件（零依赖单文件前端，它的契约由后端返回的字段名约束）。曾经约 1/5 概率飘红的入口字母表矛盾**已由源码侧修掉**：`go test -count=60`/`-count=200 -run TestEntranceShape ./internal/sec/` 本轮都 ok；历史、原因与防回归口径见 `docs/技术选型与MVP规格.md` §8.3 |
 | `make fmt` | `gofmt -s -l .` 执行前后都为空，且没有任何 `.go` 的 mtime 变化——**fmt 不产生 diff 是预期状态** |
 | `make check-contract` | `ok … internal/api 0.004s`（`TestOpenAPIContractMatchesRoutes` + `TestSpecDeclaresTheSecurityContract`） |
-| `make check-honesty` | `ok … internal/platform 0.002s`、`ok … internal/api 0.612s`（三条能力契约测试 + HTTP 面重述） |
-| `make build && ./bin/minipanel version` | `Mini Panel 0.1.0-m0 (commit none, built 2026-11-10T21:50:59Z)`；产物 12,333,218 字节 |
+| `make check-honesty` | `ok … internal/platform 0.002s`、`ok … internal/api 0.571s`（三条能力契约测试 + HTTP 面重述） |
+| `make build && ./bin/minipanel version` | `Mini Panel 0.1.0-m0 (commit ca2990d, built 2026-11-10T22:15:14Z)`；产物 12,333,218 字节。commit / built 由 Makefile 从 `git rev-parse --short HEAD`（取不到就写 `none`，`Makefile` 第 18 行）与 UTC 当前时间（第 19 行）注入，第 21-24 行的 `-ldflags -X $(MODULE)/internal/build.{Version,Commit,BuildDate}` 落到 `internal/build`，**每次构建都会变**，不是可以对表的常量 |
 | `make build-all` | 8 个产物全部产出，11.3–12.4 MB，末行打印 `build-all OK`（加入 `golang.org/x/term` 之后重跑，结论不变；`CGO_ENABLED=0` 见 `go version -m bin/minipanel`） |
 | `make doctor` | 打印平台、路径（`MINI_PANEL_ROOT=./data`，不动系统路径）、schema v1、用户/会话/审计计数、证书、监听与未认证响应，并逐条列出**未开放能力及理由**（末行可见 `backup(备份任务与归档管理在 M6 交付)`、`cron(计划任务调度器在 M6 交付)`，与 `internal/platform/detect.go:68-69` 原文一致） |
-| `GOOS=linux GOARCH=amd64\|arm64`、`GOOS=darwin GOARCH=arm64`、`GOOS=windows GOARCH=amd64`、`GOOS=freebsd GOARCH=amd64` 逐条 `go build` | 五个组合全部退出码 0 |
-| `GOOS=windows\|darwin\|freebsd go vet ./internal/...` | 三个平台全部退出码 0、无输出 |
+| 8 个组合逐条 `CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build`（linux/darwin/windows/freebsd × amd64/arm64） | **8/8 退出码 0**（本轮逐个跑，产物 15.8–17.5 MB，未加 `-s -w`；带 ldflags 的 `make build-all` 产物是 11.3–12.4 MB） |
+| `GOOS=linux\|windows\|darwin\|freebsd go vet ./internal/...` | 四个平台全部退出码 0、无输出 |
+| `go test ./cmd/minipanel/` | `ok … 1.17s`——`init` 的 flag 真的落到 panel.json、未知 flag/位置参数/未知子命令报错、`--entrance -` 关闭入口、`reset-entrance` 同步 settings 镜像、`passwd` 校验与 `must_change_pw`、`-h` 不算失败、usage 与命令表一致、banner 显示在用值 |
+| `go test -count=60 -run TestEntranceShape ./internal/sec/`；`-count=200` | 两者都 `ok`——曾经约 1/5 概率飘红的入口字母表矛盾已修（`internal/sec/sec.go:108-115` 注释写明原因与熵算法），这两条是它的回归口径，见 `docs/技术选型与MVP规格.md` §8.3 |
 | `go mod tidy -diff` | 无输出（`go.mod`/`go.sum` 已 tidy；因此不必执行 `make tidy`） |
 | `sed -n '5,12p' go.mod`；`grep -c '// indirect' go.mod` | 直接依赖 6 个（含 `golang.org/x/term v0.48.0`）、间接 15 个 |
 | `grep -rn "golang.org/x/term" --include='*.go' .` | 只有一处：`cmd/minipanel/main.go:42`——这个依赖只为隐藏口令输入而存在 |
@@ -378,7 +397,7 @@ windows/amd64、freebsd/amd64 是逐条实测过的重点组合（另外 3 个�
 | **M4 主机管理** | 防火墙规则写入、服务启停、Web 终端与录像审计、监控采集与图表、文件权限（随文件管理器）、SSH/RDP 访问管理页 | "防火墙规则写入在 M4 交付"、"服务启停在 M4 交付"、"Web 终端与录像审计在 M4 交付"、"监控采集与图表在 M4 交付"、"文件权限（属主/模式）管理随文件管理器在 M4 交付"、"SSH/RDP 访问管理页在 M4 交付" |
 | **M5 Windows 完整支持** | 不引入新功能：把散在 M0（探测/路径/位图）、M2（php-cgi 池、预编译 DLL）、M4（WFP 写入、SCM 启停、远程访问页）的 Windows 部分收敛成受支持的 GA——Windows 上的安装/升级/回滚、M2+M4 全部功能在 Windows CI 有断言、伪装与入口在 IIS-less 部署下可用 | 代码里**没有**以 "M5" 为理由的 Deny 文案（`grep -rn "M5" --include='*.go' .` 为空），M5 是项目定位；已存在的 Windows 约束逐条在 `internal/platform/platform_windows.go:45-101`。完成定义见 `docs/里程碑.md` M5 一节 |
 | **M6 计划任务与备份** | 计划任务调度器（内置 + `crontab`/`taskschd`）、备份任务与归档管理 | "计划任务调度器在 M6 交付"（`internal/platform/detect.go:69`）、"备份任务与归档管理在 M6 交付"（`:68`） |
-| M6 内未排期 | 子账号：把 `SessionUser` 的具体用户名变成富主体里的一个字段 | `internal/api/server.go:391` 的注释写着 "M6 (sub-accounts)"，但没有对应的 feature 名与理由，所以**不写承诺** |
+| 未排期（不占里程碑编号） | 子账号：把 `SessionUser` 的具体用户名变成富主体里的一个字段 | `internal/api/server.go:391` 的注释写着 "M6 (sub-accounts)"，但代码里既没有对应的 feature 名也没有 Deny 理由，所以本文档把它记为**未排期**、不占用 M6 编号（M6 只装调度器与备份这两件已有原文的事）；要正式排期，先在位图里给它一个条目 |
 
 > Windows 的工作是**分布式的**：M0 就写进了探测/路径/能力位图，写操作分别随 M2（php-cgi 池、
 > 预编译 DLL）与 M4（WFP 防火墙 Provider、SCM 服务启停、远程访问页）交付；**M5 不是"再补一批

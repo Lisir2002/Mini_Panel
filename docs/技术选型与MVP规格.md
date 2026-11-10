@@ -36,7 +36,8 @@
 | `modernc.org/sqlite` | v1.62.0 | `internal/store/store.go` 的 SQLite 驱动（纯 Go，无 cgo） | BSD-3 |
 
 * 六项都带 `LICENSE` 文件（复核：`head -3 "$(go env GOMODCACHE)/modernc.org/sqlite@v1.62.0/LICENSE"`），
-  全部是宽松许可，但**都不等于本仓库自己的授权条款**——本仓库的 LICENSE 仍未决定。
+  全部是宽松许可（MIT / BSD-3-Clause），与本项目自身的 **GPL-3.0-only** 兼容；
+  反向不成立：从这些依赖里抄代码可以，把 GPL-3.0 的 Mini Panel 链接进非兼容许可的发行物不行。
 * 间接依赖全部来自以上六项（`go.mod:14-30`，15 个），没有单独的"工具依赖"分区。
 * `x/` 三项与标准库同族：无 cgo、无生成代码、按 Go 发布节奏跟版本，因此把它们当作"标准库的
   延长线"来评估，不视为引入新框架。
@@ -274,12 +275,14 @@
 * 产物落在 `bin/`，`.gitignore` 已覆盖 `bin/`、`*.exe` 以及开发运行目录 `data/`。
 * 前端不参与交叉编译：`webui/dist/index.html` 是入库的静态文件，`go:embed` 在每个目标上都成立，
   所以 `make web` 只是存在性检查。
-* 其中 **linux/amd64、linux/arm64、darwin/arm64、windows/amd64、freebsd/amd64 这 5 个组合是
-  开发环境里逐条实测过的**（`make build-all` 一次编出全部 8 个，因此另外 3 个也在同一台机器上
-  编过）；另外 `GOOS=windows|darwin|freebsd go vet ./internal/...` 都退出码 0——
-  ** vet 能跨平台跑**意味着平台专属的接口误用（例如把 `syscall.SysProcAttr` 写进公共代码）
-  不会被留到发布日。复核：
-  `for os in windows darwin freebsd; do GOOS=$os go vet ./internal/... || echo "$os FAIL"; done`
+* 其中 **8 个组合（4 OS × 2 arch）在这台开发机上逐条实测过退出码 0**（`make build-all` 一次编出
+  全部 8 个；本轮另外用 `CGO_ENABLED=0 GOOS=… GOARCH=… go build` 逐个复核，8/8 通过）。
+  **重点目标是 linux/amd64、linux/arm64、darwin/arm64、windows/amd64、freebsd/amd64** 这 5 个——
+  它们覆盖四个 OS 上实际部署最常见的架构，其余 3 个（darwin/amd64、windows/arm64、freebsd/arm64）
+  同批产出但不在"要拿去装机"的清单里。另外 `GOOS=linux|windows|darwin|freebsd go vet ./internal/...`
+  四个平台都退出码 0——**vet 能跨平台跑**意味着平台专属的接口误用（例如把 `syscall.SysProcAttr`
+  写进公共代码）不会被留到发布日。复核：
+  `for os in linux windows darwin freebsd; do GOOS=$os go vet ./internal/... || echo "$os FAIL"; done`
 
 ---
 
@@ -373,11 +376,27 @@ go test -count=200 -run TestEntranceShape ./internal/sec/   # 本轮 ok：200 �
 
   对照修复前：同一条命令 32 次里红 7 次。`-count=N` 就是最省事的回归口径，不需要额外脚本；CI 若想
   便宜一点，保留 `N=60` 也够——在旧状态下 60 次全绿的概率只有 `0.776^60 ≈ 0.2%`。
-* **仍然没被覆盖的部分**：断言防的是"字母表加回易混字符"，禁集比字母表更宽是**正确**的设计；但
-  `NewEntrance()` 的长度与熵没有任何断言（把 8 改成 6 不会有人红），这条记进 §8.4。
+* **仍然没被覆盖的部分**：断言防的是"字母表加回易混字符"，禁集比字母表更宽是**正确**的设计。
+  形状本身是断言过的——`sec_test.go:77` 要求 `/` 前缀且 `len(e) == 9`，把 `NewEntrance()` 里的
+  8 改成 6 会立刻红。**没被断言的是字母表**：`entranceAlphabet` 在任何测试文件里一次都没出现
+  （`grep -rn "entranceAlphabet" --include='*_test.go' .` 为空），所以"31 个符号、不含易混字形"
+  这条规则只有 `:82` 的禁集在间接守着，往字母表里加回 `i` 只能靠概率撞上来才发现。这条记进 §8.4。
 * 与 §8.1（数据文件权限）同类：缺陷应当由代码在创建时收紧，而不是靠文档提醒运维手抖。
 
 ### 8.4 M0 的测试缺口（诚实清单）
+
+先说**已经补上的部分**（这不是缺口，写在这里是为了让 review 知道边界挪到哪了）：
+`cmd/minipanel/main_test.go`（277 行、8 个用例）把整层 CLI 语义纳入 CI——`init` 的
+`--bind/--port/--insecure-no-tls/--entrance` 真的落到 `panel.json`（`TestInitHonoursItsFlags`，`:43`，
+含 `panel.json` 0600 断言 `:70`）；未知 flag / 多余位置参数 / 未知子命令一律报错
+（`TestInitRejectsUnknownAndExtraArgs`，`:75`）；`--entrance -` 是关闭而不是"替我生成一个"
+（`TestInitEntranceFlag`，`:88`）；`reset-entrance` 同步配置文件与 settings 镜像、且 `--set` 与
+`--disable` 互斥（`TestResetEntranceKeepsConfigAndMirrorInStep`，`:122`）；`passwd` 置
+`must_change_pw`，并拒绝弱口令 / 空输入 / 非法用户名 / 双用户名
+（`TestPasswdSetsMustChangeAndValidatesInput`，`:174`）；`-h` 不算失败
+（`TestSubcommandHelpIsNotAFailure`，`:217`）；usage 文本与子命令、flag 清单一致
+（`TestUsageCoversEveryCommand`，`:235`）；banner 显示在用的端口与地址、入口关闭时写"未设置"
+（`TestBannerReportsLiveConfigValues`，`:252`）。
 
 下面是**代码已经保证、测试还没断言**的部分。列出来是为了让人知道哪些地方要靠 review 兜住，
 而不是假装"全都有测试压着"。
@@ -389,12 +408,13 @@ go test -count=200 -run TestEntranceShape ./internal/sec/   # 本轮 ok：200 �
 | 面板证书与私钥的 0600 | `internal/sec` 只有一个测试文件且不碰证书 | 代码 `internal/sec/tls.go:71-88` |
 | `444`（挂断型）伪装真的会断连 | `disguise()` 的 Hijacker 分支只在配置 444 时走到，M0 测试跑的是 404 | 代码 `internal/api/server.go:234` |
 | 前端"灰 + 理由"的实际渲染 | `make web` 只做存在性检查，没有 UI 自动化 | 服务端契约 `make check-honesty` 保证理由必然存在 |
-| CLI 层已进 CI（本轮新增 `cmd/minipanel/main_test.go`） | 覆盖：`init` 的 `--bind/--port/--insecure-no-tls/--entrance` 真的落到 panel.json；未知 flag / 多余位置参数 / 未知子命令一律报错；`--entrance -` 表示关闭而不是重新生成；`reset-entrance` 同步配置文件与 settings 镜像、`--set` 与 `--disable` 互斥；`passwd` 置 `must_change_pw`、用户名前置或后置都可、弱口令与空输入被拒；`-h` 不是失败；usage 文本与子命令/flag 清单一致；banner 显示在用的端口与地址 |
-| `minipanel passwd` 的 tty 隐藏输入 | `go test` 下 stdin 不是 tty，`term.IsTerminal` 恒为 false，所以 `ReadPassword` 分支本身仍不在 CI 覆盖里（管道分支与全部校验分支已在） | 代码 `cmd/minipanel/main.go` 走 `term.IsTerminal` → `term.ReadPassword`；`cmd/minipanel/main_test.go` 断言"空口令必须被拒绝"，pty 回显仍用 `pty.fork()` 手工验证。这正是§8.2 那条纪律的反面教材：**文案说"不回显"而代码没关 ECHO** 曾经成立过，只有断言能防它回来 |
-| 入口字母表本身没有断言 | 形状是断言过的（`sec_test.go:77` 要求 `/` 前缀 + `len(e) == 9`，所以 8 字符改短会红），但 **`entranceAlphabet` 在测试里一次都没被引用**（`grep -rn "entranceAlphabet" --include='*_test.go' .` 为空）：没人断言它是 31 个符号、也没人断言它是 2 的幂之外的什么。往字母表里加回易混字符只能靠 `:82` 那条禁集撞上来才发现 | 禁集断言 + §8.3 的 `-count=200` 重复；注释在 `internal/sec/sec.go:108-115` 里写明了 31 符号 × 8 字符 ≈ 39.6 bit |
+| `minipanel passwd` 的 **tty 分支**（真关回显那一条） | 测试文件自己写明 `go test` 下 stdin 不是 tty（`cmd/minipanel/main_test.go:210-211`），所以 `term.IsTerminal` 为真的分支走不到；管道分支与全部校验分支**已经**在 CI 里 | 代码 `cmd/minipanel/main.go:606`（`IsTerminal`）→ `:612`（`term.ReadPassword`）、`:621`（`readLine`）；本轮用 `pty.fork()` 手工验证主端流里不回声明文。这是 §8.2 那条纪律的反面教材：**文案说"不回显"而代码没关 ECHO** 曾经成立过，只有断言能防它回来；补法是在测试里自建 pty，或把该分支抽成可注入接口 |
+| 入口字母表本身没有断言 | 形状是断言过的（`sec_test.go:77` 要求 `/` 前缀且 `len(e) == 9`，把 8 字符改短会红），但 `entranceAlphabet` 在测试里一次都没被引用（`grep -rn "entranceAlphabet" --include='*_test.go' .` 为空）：没人断言它是 31 个符号。往字母表里加回易混字符，只能靠 `:82` 那条禁集撞上来才发现 | 禁集断言 + §8.3 的 `-count=200` 重复；注释 `internal/sec/sec.go:108-115` 写明了 31 符号 × 8 字符 ≈ 39.6 bit |
+| `MINI_PANEL_DEBUG=1` 目前没有可观察效果 | `newLogger()`（`cmd/minipanel/main.go:156-160`）会降到 Debug 级，但 `grep -rn "\.Debug(" --include='*.go' internal cmd \| grep -v _test` 为空 | 它只是留口。`README.md` 快速上手一节已按"今天不会多出任何输出"来写，等真出现 Debug 埋点这条缺口自动消失 |
 
-补齐建议按价值排序：证书生成与 SAN 重签 → 444 分支 → `-wal`/`-shm` 权限断言。三条都可以只在
-`internal/sec`、`internal/api`、`internal/store` 内部加测试，不动接口面，也不动能力位图白名单。
+补齐建议按价值排序：证书生成与 SAN 重签 → 444 分支 → passwd 的 pty 分支 → `-wal`/`-shm` 权限断言。
+这几条都可以只在 `internal/sec`、`internal/api`、`internal/store`、`cmd/minipanel` 内部加测试，
+不动接口面，也不动能力位图白名单。
 
 ### 8.5 其它不接受的做法（同源于上面的教训）
 
@@ -404,3 +424,34 @@ go test -count=200 -run TestEntranceShape ./internal/sec/   # 本轮 ok：200 �
   面板从运维脚下搬走。
 * 不接受"前端自己判断能力"：前端只照抄 `features` / `unavailable`，判断权在服务端与测试（§2.5）。
 * 不接受把伪装写成鉴权：见 §5 第 5 条。
+
+### 8.6 已修复的缺陷：`init` 收下 flag 却一个都不生效，banner 还装作照办
+
+`cmd/minipanel/main_test.go:17-20` 的文件头注释把这条写死在代码旁边：**"HTTP 测试永远看不见的
+缺陷"**——`minipanel init --port 29095 --bind 127.0.0.1` 会正常解析 flag、然后照常写入默认值，
+再打印一个看起来已经采纳了请求的 banner。它和 §8.1（权限靠运维记得 chmod）、§8.3（文案说
+"不回显"而代码没关 ECHO）是同一个家族的第三种表现：
+
+1. **声明与实现分离**：flag 表、提示语、banner 都是"声明"，`config.Save` 的字节才是"实现"。
+   只看输出的人会以为它成功了。
+2. **失败是静默的**：解析成功 ≠ 生效；没有报错、没有退出码变化，所以人工试一遍也发现不了
+   ——只有把值**从盘上读回来**才能区分。
+3. **它的爆炸半径比看起来大**：入口、端口、TLS 开关都是引导值，"以为关了 TLS"或"以为换了端口"
+   直接决定这台机器暴露什么。
+
+现在的防回归方式（不是注释，是断言）：
+
+* `TestInitHonoursItsFlags`（`main_test.go:43`）逐个读回 `cfg.Port` / `cfg.Bind` / `cfg.TLS`，
+  错误信息写得很直白："a silently dropped flag is worse than no flag at all"（`:51`）；
+  并断言 `panel.json` 落盘 0600（`:70`，理由：这个文件里放着入口和 TLS 开关）。
+* `TestInitRejectsUnknownAndExtraArgs`（`:75`）堵掉"多写了 flag/参数但被忽略"的另一半：
+  `--bogus`、多余位置参数、未知子命令三种都必须返回错误。
+* `TestBannerReportsLiveConfigValues`（`:252`）要求 banner 里的端口/地址/URL 与配置一致，
+  绑定回环时**禁止**出现 `0.0.0.0`，入口关闭必须显示"未设置"而不是空白——banner 是操作者唯一
+  一眼扫过的东西，它不能是第二真源。
+* `readBack()`（`:32-41`）刻意用 `serve` 同一个 `config.Load` 路径读，这样"写进去但读不出来"
+  也算失败。
+
+**这条给后续里程碑留下的规矩**：任何新增 flag / 设置项 / 引导值，验收方式是"从盘上读回来 +
+从 UI 侧再读一次"，而不是"命令没报错"。同理，`doctor` 与 banner 的输出必须是**进程真实使用的值**
+（§4.3 的镜像覆盖规则），否则它们会变成新的第二真源。
