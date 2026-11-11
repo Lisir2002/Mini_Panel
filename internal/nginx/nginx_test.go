@@ -382,3 +382,200 @@ func TestPHPBindingIsValidated(t *testing.T) {
 		t.Errorf("injection socket accepted: %v", err)
 	}
 }
+
+// TestCreateWithCustomIndexRendersAndRoundTrips pins both halves of the index
+// list: nginx sees the operator's order, and the marker lets the next List call
+// show the same list. Without the marker round-trip the edit dialog would open
+// with an empty list and silently reset the setting on the next save.
+func TestCreateWithCustomIndexRendersAndRoundTrips(t *testing.T) {
+	m, _ := newTestManager(t)
+	site, err := m.Create(Spec{
+		Name: "blog", Domains: []string{"blog.example.com"},
+		Index: []string{" home.html ", "index.html"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if want := []string{"home.html", "index.html"}; strings.Join(site.Index, ",") != strings.Join(want, ",") {
+		t.Errorf("index = %v, want %v", site.Index, want)
+	}
+	body, err := os.ReadFile(m.Layout.ConfigPath("blog"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	for _, want := range []string{
+		"index home.html index.html;",
+		`"index":["home.html","index.html"]`,
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("config missing %q\n%s", want, body)
+		}
+	}
+	list, err := m.List()
+	if err != nil || len(list) != 1 {
+		t.Fatalf("List = %+v, %v", list, err)
+	}
+	if strings.Join(list[0].Index, ",") != "home.html,index.html" {
+		t.Errorf("marker did not round-trip index: %+v", list[0])
+	}
+}
+
+// TestIndexIsValidated refuses the two ways a "filename" list could become more
+// than a list: path syntax (writes outside the root) and a PHP source file on a
+// static site (nginx serves it as text). A PHP-bound site may select index.php,
+// but unbinding then has to be a separate, explicit edit.
+func TestIndexIsValidated(t *testing.T) {
+	m, _ := newTestManager(t)
+	for _, index := range [][]string{
+		{"index.php"},
+		{"../index.html"},
+		{"a/b.html"},
+		{"index.html", "index.html"},
+		{"index.html;evil"},
+		{strings.Repeat("a", 65) + ".html"},
+		make([]string, 11),
+	} {
+		if _, err := m.Create(Spec{
+			Name: "blog", Domains: []string{"blog.example.com"}, Index: index,
+		}); !errors.Is(err, ErrInvalid) {
+			t.Errorf("index %v accepted or wrong error: %v", index, err)
+		}
+	}
+
+	if _, err := m.Create(Spec{
+		Name: "app", Domains: []string{"app.example.com"},
+		PHPVersion: "8.3", PHPSocket: "/run/php/php8.3-fpm.sock",
+		Index: []string{"index.php", "index.html"},
+	}); err != nil {
+		t.Fatalf("Create with index.php and PHP bound: %v", err)
+	}
+	before, _ := os.ReadFile(m.Layout.ConfigPath("app"))
+	if _, err := m.SetPHP("app", "", ""); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unbind with index.php err = %v, want ErrInvalid", err)
+	}
+	after, _ := os.ReadFile(m.Layout.ConfigPath("app"))
+	if string(before) != string(after) {
+		t.Errorf("refused unbind changed the config")
+	}
+	if _, err := m.SetBasics("app", []string{"app.example.com"}, "", []string{"index.html"}); err != nil {
+		t.Fatalf("drop index.php: %v", err)
+	}
+	if _, err := m.SetPHP("app", "", ""); err != nil {
+		t.Fatalf("unbind after index edit: %v", err)
+	}
+}
+
+// TestSetBasicsReplacesDomainsRootAndIndex covers the successful edit: domains
+// are normalized, a missing root is created, an empty root keeps the current
+// one, and an empty index restores the built-in list.
+func TestSetBasicsReplacesDomainsRootAndIndex(t *testing.T) {
+	m, rec := newTestManager(t)
+	if _, err := m.Create(Spec{Name: "blog", Domains: []string{"old.example.com"}}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	rec.cmds = nil
+	newRoot := filepath.Join(m.SiteRoot, "data")
+	site, err := m.SetBasics("blog",
+		[]string{"New.Example.COM", "www.new.example.com"}, newRoot,
+		[]string{"home.html", "index.html"})
+	if err != nil {
+		t.Fatalf("SetBasics: %v", err)
+	}
+	if want := []string{"new.example.com", "www.new.example.com"}; strings.Join(site.Domains, ",") != strings.Join(want, ",") {
+		t.Errorf("domains = %v, want %v", site.Domains, want)
+	}
+	if site.Root != newRoot {
+		t.Errorf("root = %q, want %q", site.Root, newRoot)
+	}
+	if fi, err := os.Stat(newRoot); err != nil || !fi.IsDir() {
+		t.Errorf("new root not created: %v", err)
+	}
+	if want := []string{"nginx -t", "nginx -s reload"}; strings.Join(rec.cmds, "|") != strings.Join(want, "|") {
+		t.Errorf("command order = %v, want %v", rec.cmds, want)
+	}
+	body, _ := os.ReadFile(m.Layout.ConfigPath("blog"))
+	for _, want := range []string{
+		"server_name new.example.com www.new.example.com;",
+		"root " + newRoot + ";",
+		"index home.html index.html;",
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("config missing %q\n%s", want, body)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(m.SiteRoot, "blog")); err != nil {
+		t.Errorf("old document root was removed: %v", err)
+	}
+
+	site, err = m.SetBasics("blog", []string{"new.example.com"}, "", nil)
+	if err != nil {
+		t.Fatalf("SetBasics defaults: %v", err)
+	}
+	if site.Root != newRoot {
+		t.Errorf("empty root changed the root to %q", site.Root)
+	}
+	if site.Index != nil {
+		t.Errorf("empty index did not reset the list: %v", site.Index)
+	}
+	body, _ = os.ReadFile(m.Layout.ConfigPath("blog"))
+	if !strings.Contains(string(body), "index index.html index.htm;") {
+		t.Errorf("default index line not restored\n%s", body)
+	}
+	list, _ := m.List()
+	if len(list) != 1 || strings.Join(list[0].Domains, ",") != "new.example.com" || list[0].Index != nil {
+		t.Errorf("List after edit = %+v", list)
+	}
+}
+
+func TestSetBasicsRollsBackWhenTestFails(t *testing.T) {
+	m, rec := newTestManager(t)
+	if _, err := m.Create(Spec{Name: "blog", Domains: []string{"blog.example.com"}}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	before, _ := os.ReadFile(m.Layout.ConfigPath("blog"))
+	newRoot := filepath.Join(m.SiteRoot, "rejected")
+	rec.cmds = nil
+	rec.failOn = "-t"
+	_, err := m.SetBasics("blog", []string{"new.example.com"}, newRoot, []string{"home.html"})
+	if !errors.Is(err, ErrConfigRejected) {
+		t.Fatalf("SetBasics err = %v, want ErrConfigRejected", err)
+	}
+	after, _ := os.ReadFile(m.Layout.ConfigPath("blog"))
+	if string(after) != string(before) {
+		t.Errorf("failed edit changed the config\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if _, err := os.Stat(newRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("new document root left behind after rollback: %v", err)
+	}
+	if want := []string{"nginx -t"}; strings.Join(rec.cmds, "|") != strings.Join(want, "|") {
+		t.Errorf("commands = %v, want only the failing test (no reload)", rec.cmds)
+	}
+}
+
+// TestSetBasicsChecksCertificateCoverage prevents the state where the vhost
+// claims a new server_name while ssl_certificate still holds the old names.
+// Narrowing to names the certificate already covers is allowed; adding an
+// uncovered name is refused before any file is written.
+func TestSetBasicsChecksCertificateCoverage(t *testing.T) {
+	m, _ := newTestManager(t)
+	if _, err := m.Create(Spec{
+		Name: "blog", Domains: []string{"blog.example.com", "www.blog.example.com"},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := m.SetSelfSigned("blog", false); err != nil {
+		t.Fatalf("SetSelfSigned: %v", err)
+	}
+	if _, err := m.SetBasics("blog", []string{"www.blog.example.com"}, "", nil); err != nil {
+		t.Fatalf("narrowing to a covered name was refused: %v", err)
+	}
+	before, _ := os.ReadFile(m.Layout.ConfigPath("blog"))
+	_, err := m.SetBasics("blog", []string{"www.blog.example.com", "new.example.com"}, "", nil)
+	if !errors.Is(err, ErrTLSInvalid) {
+		t.Fatalf("uncovered domain err = %v, want ErrTLSInvalid", err)
+	}
+	after, _ := os.ReadFile(m.Layout.ConfigPath("blog"))
+	if string(before) != string(after) {
+		t.Errorf("refused domain change still rewrote the config")
+	}
+}

@@ -3,10 +3,12 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六片：静态站点、站点证书与 PHP 版本绑定。这一页的边界与后端能力位图
-// 是同一句话，不另写一套：
+// M2 第三、四、六、七片：静态站点、站点证书、PHP 版本绑定与基础设置编辑。这一页的边界
+// 与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
+//   * 编辑对话框替换域名、根目录与默认文档。域名变更时后端先用现有证书校验新域名集合，
+//     覆盖不了就返回 422 invalid_tls 且不写文件——页面原样显示理由，不假装保存成功。
 //   * php_version_switch 只列出 php_fpm_versions；选择后由后端把版本解析成 socket。
 //     socket 当前不是 listening 时，页面直接说"站点会 502"，不把配置写入说成后端可用。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
@@ -17,7 +19,7 @@ const state = ref(null);
 const error = ref("");
 const msg = ref("");
 const busy = ref(false);
-const form = ref({ name: "", domains: "", root: "", php_version: "" });
+const form = ref({ name: "", domains: "", root: "", index: "", php_version: "" });
 
 const siteFeat = computed(() => store.caps?.features?.site || null);
 const siteWriteFeat = computed(() => store.caps?.features?.site_write || null);
@@ -40,10 +42,22 @@ const phpOpen = ref(false);
 const phpTarget = ref(null);
 const phpForm = ref({ version: "" });
 
+const editOpen = ref(false);
+const editTarget = ref(null);
+const editForm = ref({ domains: "", root: "", index: "" });
+
 function parseDomains(text) {
   return String(text || "")
     .split(/[\s,，;；]+/)
     .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+// 默认文档与域名不同：文件名区分大小写，也不该被转小写。
+function parseIndex(text) {
+  return String(text || "")
+    .split(/[\s,，;；]+/)
+    .map((s) => s.trim())
     .filter(Boolean);
 }
 
@@ -60,6 +74,8 @@ async function create() {
     const body = { name: form.value.name.trim(), domains: parseDomains(form.value.domains) };
     const root = form.value.root.trim();
     if (root) body.root = root;
+    const index = parseIndex(form.value.index);
+    if (index.length) body.index = index;
     if (form.value.php_version) body.php_version = form.value.php_version;
     const site = await api("/api/v1/sites", { method: "POST", body: JSON.stringify(body) });
     let php = "";
@@ -69,7 +85,7 @@ async function create() {
         : "，已绑定 PHP " + site.php_version + "，但 " + phpSocketWords(site) + "，站点会返回 502";
     }
     msg.value = "已创建 " + site.name + "，nginx 已通过 nginx -t 并重载" + php + "。";
-    form.value = { name: "", domains: "", root: "", php_version: "" };
+    form.value = { name: "", domains: "", root: "", index: "", php_version: "" };
     await load();
   } catch (e) {
     // 后端已经把 nginx -t 的输出带回来了（422 nginx_rejected），原样显示，
@@ -202,6 +218,38 @@ async function savePHP() {
   } finally { busy.value = false; }
 }
 
+function openEdit(r) {
+  error.value = ""; msg.value = "";
+  editTarget.value = r;
+  editForm.value = {
+    domains: (r.domains || []).join(" "),
+    root: r.root || "",
+    index: (r.index || []).join(" "),
+  };
+  editOpen.value = true;
+}
+
+async function saveEdit() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const body = { domains: parseDomains(editForm.value.domains) };
+    const root = editForm.value.root.trim();
+    if (root) body.root = root;
+    const index = parseIndex(editForm.value.index);
+    if (index.length) body.index = index;
+    const site = await api("/api/v1/sites/" + encodeURIComponent(editTarget.value.name),
+      { method: "PUT", body: JSON.stringify(body) });
+    msg.value = site.name + " 的基础设置已更新；nginx 已通过 nginx -t 并重载。";
+    editOpen.value = false;
+    await load();
+  } catch (e) {
+    // 400 invalid_site / 422 invalid_tls / 422 nginx_rejected 都带后端原文；
+    // 后端在返回前没有写入任何文件，页面只需要原样显示。
+    error.value = e.message;
+    await load();
+  } finally { busy.value = false; }
+}
+
 onMounted(load);
 </script>
 
@@ -210,7 +258,8 @@ onMounted(load);
     <h3>网站</h3>
     <p class="mp-note">
       管理面板自己创建的站点；可以在创建时或之后绑定一个本机探测到的 PHP fpm 版本，留空则是
-      <b>静态站点</b>。每一次创建、删除、PHP 切换或证书变更都是"先测试后生效"：写配置 →
+      <b>静态站点</b>。站点的域名、根目录与默认文档可随时编辑。每一次创建、编辑、删除、
+      PHP 切换或证书变更都是"先测试后生效"：写配置 →
       <code class="mp-code">nginx -t</code> → 只有通过才 reload；任何一步失败都会恢复上一份配置与证书。
       只列出面板自己写出的 vhost（文件内带标记），手工写的配置不会被列出来，也不会被删除。
     </p>
@@ -253,6 +302,13 @@ onMounted(load);
         <el-form-item label="网站根目录（可省略，默认 <站点根目录>/<站点名>）">
           <el-input v-model="form.root" placeholder="留空即可" style="max-width:420px" />
         </el-form-item>
+        <el-form-item label="默认文档（可省略，空格分隔；留空用内置列表）">
+          <el-input v-model="form.index" placeholder="index.html index.htm" style="max-width:420px" />
+          <div class="mp-hint" style="margin-top:4px">
+            绑定 PHP 时内置列表以 index.php 优先；静态站点不允许把 .php 文件写成默认文档，
+            否则 nginx 会把源码当文本返回。
+          </div>
+        </el-form-item>
         <el-form-item label="PHP 版本（可省略，留空为纯静态）">
           <el-select v-model="form.php_version" placeholder="纯静态" style="width:260px" :disabled="!phpAvailable">
             <el-option label="纯静态（不执行 PHP）" value="" />
@@ -278,7 +334,10 @@ onMounted(load);
           <tr v-for="r in rows" :key="r.name">
             <td><b>{{ r.name }}</b><div class="mp-muted mp-tiny"><code class="mp-code">{{ r.config_path }}</code></div></td>
             <td><span class="mp-clip" :title="r.domains.join(' ')">{{ r.domains.join(" · ") }}</span></td>
-            <td><code class="mp-code">{{ r.root }}</code></td>
+            <td>
+              <code class="mp-code">{{ r.root }}</code>
+              <div v-if="r.index?.length" class="mp-muted mp-tiny">index {{ r.index.join(" ") }}</div>
+            </td>
             <td>
               <span class="mp-tag on" v-if="r.enabled">已启用</span>
               <span class="mp-tag flat" v-else>未启用</span>
@@ -303,7 +362,8 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:170px;white-space:nowrap">
+            <td style="width:225px;white-space:nowrap">
+              <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" :disabled="!phpAvailable && !r.php_version" @click="openPHP(r)">
                 PHP
               </el-button>
@@ -327,6 +387,30 @@ onMounted(load);
           <tr v-if="!rows.length"><td colspan="8" class="mp-muted">还没有由面板创建的站点。</td></tr>
         </tbody>
       </table>
+
+      <el-dialog v-model="editOpen" :title="'编辑 · ' + (editTarget?.name || '')" width="min(620px, 94vw)">
+        <el-alert v-if="editTarget?.tls?.enabled" type="info" :closable="false" style="margin-bottom:10px"
+          title="该站点已启用 HTTPS：修改域名时后端会先用现有证书校验新域名集合。证书覆盖不了新名字会返回 422 且不写文件；需要先关闭 HTTPS，编辑后重新签发或上传。" />
+        <el-form label-position="top" @submit.prevent="saveEdit">
+          <el-form-item label="域名（空格或逗号分隔，支持 *.example.com）">
+            <el-input v-model="editForm.domains" placeholder="example.com www.example.com" />
+          </el-form-item>
+          <el-form-item label="网站根目录（必须位于站点根目录之下）">
+            <el-input v-model="editForm.root" placeholder="/www/wwwroot/example" />
+          </el-form-item>
+          <el-form-item label="默认文档（留空恢复内置列表）">
+            <el-input v-model="editForm.index" placeholder="index.html index.htm" />
+            <div class="mp-hint" style="margin-top:6px">
+              按输入顺序写入 vhost，最多 10 项，每项只能是文件名。站点未绑定 PHP 时不能写
+              .php / .phtml / .phar 项。修改根目录不会移动或删除旧目录中的任何文件。
+            </div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="editOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy" @click="saveEdit">保存</el-button>
+        </template>
+      </el-dialog>
 
       <el-dialog v-model="phpOpen" :title="'PHP · ' + (phpTarget?.name || '')" width="min(520px, 94vw)">
         <el-alert v-if="!phpAvailable" type="info" :closable="false" style="margin-bottom:10px"
@@ -402,8 +486,9 @@ onMounted(load);
       <div class="mp-hint">
         证书来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符证书仍需上传（DNS-01
         尚未交付）；手工上传与自签证书不会被自动替换。PHP 版本绑定使用各版本已有的 fpm socket，
-        不创建独立 pool；多版本安装/卸载与域名编辑仍是后续片，能力位图里的
-        <code class="mp-code">php</code> 仍为 degraded。新建站点的根目录是 0755 的空目录，
+        不创建独立 pool；多版本安装/卸载仍是后续片，能力位图里的
+        <code class="mp-code">php</code> 仍为 degraded。站点的域名、根目录与默认文档可以
+        随时编辑，域名变更受现有证书覆盖范围约束。新建站点的根目录是 0755 的空目录，
         放一个 <code class="mp-code">index.html</code>（或绑定 PHP 后放 index.php）就能访问。
       </div>
     </template>

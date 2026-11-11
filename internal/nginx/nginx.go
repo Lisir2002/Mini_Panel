@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -175,6 +176,10 @@ type Site struct {
 	Enabled    bool     `json:"enabled"`
 	CreatedAt  string   `json:"created_at"`
 	TLS        *TLSInfo `json:"tls,omitempty"`
+	// Index is the site's custom `index` list. Nil means nginx's default list
+	// (or index.php first when PHP is bound); a non-empty list is rendered
+	// verbatim, in order.
+	Index []string `json:"index,omitempty"`
 	// PHPVersion and PHPSocket name the fpm backend this site's .php location
 	// points at. The socket is supplied by the platform layer, which derives it
 	// from a discovered installation; it is never taken from an HTTP request.
@@ -188,6 +193,7 @@ type Spec struct {
 	Name       string   `json:"name"`
 	Domains    []string `json:"domains"`
 	Root       string   `json:"root"`
+	Index      []string `json:"index,omitempty"`
 	PHPVersion string   `json:"php_version,omitempty"`
 	PHPSocket  string   `json:"php_socket,omitempty"`
 }
@@ -197,6 +203,7 @@ type markerPayload struct {
 	Domains    []string   `json:"domains"`
 	Root       string     `json:"root"`
 	CreatedAt  string     `json:"created_at"`
+	Index      []string   `json:"index,omitempty"`
 	TLS        *markerTLS `json:"tls,omitempty"`
 	PHPVersion string     `json:"php_version,omitempty"`
 	PHPSocket  string     `json:"php_socket,omitempty"`
@@ -206,9 +213,71 @@ var (
 	nameRe    = regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`)
 	domainRe  = regexp.MustCompile(`^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
 	rootRe    = regexp.MustCompile(`^/[A-Za-z0-9._\-/]+$`)
+	indexRe   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 	phpVerRe  = regexp.MustCompile(`^[0-9]+\.[0-9]+$`)
 	phpSockRe = regexp.MustCompile(`^/[A-Za-z0-9._\-/]+\.sock$`)
 )
+
+// validateIndex checks the custom document-index list. Entries become tokens in
+// an nginx directive, so paths, whitespace, semicolons and braces are rejected
+// by shape rather than escaped. A .php file is refused while the site is static
+// because nginx would serve it as text: selecting index.php without a PHP
+// handler is a source-code leak, not a routing preference.
+func validateIndex(index []string, phpBound bool) error {
+	if len(index) > 10 {
+		return fmt.Errorf("%w：默认文档最多 10 项", ErrInvalid)
+	}
+	seen := map[string]bool{}
+	for _, name := range index {
+		if !indexRe.MatchString(name) || strings.Contains(name, "..") {
+			return fmt.Errorf("%w：默认文档 %q 必须是文件名（字母、数字、点、下划线、连字符），不能包含路径", ErrInvalid, name)
+		}
+		if seen[name] {
+			return fmt.Errorf("%w：默认文档 %q 重复", ErrInvalid, name)
+		}
+		seen[name] = true
+		lower := strings.ToLower(name)
+		if !phpBound && (strings.Contains(lower, ".php") || strings.HasSuffix(lower, ".phtml") ||
+			strings.HasSuffix(lower, ".phar")) {
+			return fmt.Errorf("%w：默认文档 %q 是 PHP 源文件，但站点未绑定 PHP；nginx 会把它当普通文本返回", ErrInvalid, name)
+		}
+	}
+	return nil
+}
+
+func normalizeIndex(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		out = append(out, strings.TrimSpace(s))
+	}
+	return out
+}
+
+// normalizeDomains lowercases, validates and de-duplicates a server_name list.
+// It is shared by Create and SetBasics so both write paths accept exactly the
+// same hostnames.
+func normalizeDomains(in []string) ([]string, error) {
+	if len(in) == 0 || len(in) > 20 {
+		return nil, fmt.Errorf("%w：需要 1-20 个域名", ErrInvalid)
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, d := range in {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if err := ValidateDomain(d); err != nil {
+			return nil, err
+		}
+		if seen[d] {
+			return nil, fmt.Errorf("%w：域名 %q 重复", ErrInvalid, d)
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	return out, nil
+}
 
 // validatePHP accepts either "no PHP binding" (both fields empty) or a version
 // plus the absolute unix socket the platform resolved for it. The socket is
@@ -314,7 +383,7 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 	}
 	s := Site{
 		Name: payload.Name, Domains: payload.Domains, Root: payload.Root,
-		ConfigPath: p, CreatedAt: payload.CreatedAt,
+		ConfigPath: p, CreatedAt: payload.CreatedAt, Index: payload.Index,
 		PHPVersion: payload.PHPVersion, PHPSocket: payload.PHPSocket,
 	}
 	s.TLS = m.tlsFromMarker(payload)
@@ -340,6 +409,9 @@ func parseMarker(body string) (markerPayload, bool) {
 		if validatePHP(p.PHPVersion, p.PHPSocket) != nil {
 			return markerPayload{}, false
 		}
+		if validateIndex(p.Index, p.PHPVersion != "") != nil {
+			return markerPayload{}, false
+		}
 		return p, p.Name != "" && len(p.Domains) > 0 && p.Root != ""
 	}
 	return markerPayload{}, false
@@ -351,21 +423,9 @@ func (m *Manager) Create(spec Spec) (Site, error) {
 	if err := ValidateName(spec.Name); err != nil {
 		return Site{}, err
 	}
-	if len(spec.Domains) == 0 || len(spec.Domains) > 20 {
-		return Site{}, fmt.Errorf("%w：需要 1-20 个域名", ErrInvalid)
-	}
-	seen := map[string]bool{}
-	domains := make([]string, 0, len(spec.Domains))
-	for _, d := range spec.Domains {
-		d = strings.ToLower(strings.TrimSpace(d))
-		if err := ValidateDomain(d); err != nil {
-			return Site{}, err
-		}
-		if seen[d] {
-			return Site{}, fmt.Errorf("%w：域名 %q 重复", ErrInvalid, d)
-		}
-		seen[d] = true
-		domains = append(domains, d)
+	domains, err := normalizeDomains(spec.Domains)
+	if err != nil {
+		return Site{}, err
 	}
 	root := spec.Root
 	if root == "" {
@@ -375,9 +435,13 @@ func (m *Manager) Create(spec Spec) (Site, error) {
 		return Site{}, err
 	}
 	root = filepath.Clean(root)
+	index := normalizeIndex(spec.Index)
 	phpVersion := strings.TrimSpace(spec.PHPVersion)
 	phpSocket := strings.TrimSpace(spec.PHPSocket)
 	if err := validatePHP(phpVersion, phpSocket); err != nil {
+		return Site{}, err
+	}
+	if err := validateIndex(index, phpVersion != ""); err != nil {
 		return Site{}, err
 	}
 
@@ -393,7 +457,7 @@ func (m *Manager) Create(spec Spec) (Site, error) {
 
 	createdAt := m.now().UTC().Format(time.RFC3339)
 	site := Site{
-		Name: spec.Name, Domains: domains, Root: root,
+		Name: spec.Name, Domains: domains, Root: root, Index: index,
 		ConfigPath: confPath, Enabled: true, CreatedAt: createdAt,
 		PHPVersion: phpVersion, PHPSocket: phpSocket,
 	}
@@ -481,8 +545,76 @@ func (m *Manager) SetPHP(name, version, socket string) (Site, error) {
 	if !ok {
 		return Site{}, ErrNotFound
 	}
+	if err := validateIndex(site.Index, version != ""); err != nil {
+		return Site{}, err
+	}
 	site.PHPVersion, site.PHPSocket = version, socket
 	if err := m.applyConfig(site.ConfigPath, render(site)); err != nil {
+		return Site{}, err
+	}
+	return site, nil
+}
+
+// SetBasics replaces the editable core of a panel-owned site: domains, document
+// root and the optional index list. It is a full replacement, not a patch; an
+// empty root keeps the current one (a site without a root is not a thing) and
+// an empty index means the built-in default list.
+//
+// Changing domains while HTTPS is on must not silently serve a certificate for
+// the old names, so the existing certificate is re-checked against the new list
+// before anything is written. Editing the root may create the new directory;
+// a rejected config removes it again, exactly like Create's rollback.
+func (m *Manager) SetBasics(name string, domains []string, root string, index []string) (Site, error) {
+	if err := ValidateName(name); err != nil {
+		return Site{}, err
+	}
+	site, ok := m.readSite(FileName(name))
+	if !ok {
+		return Site{}, ErrNotFound
+	}
+	domains, err := normalizeDomains(domains)
+	if err != nil {
+		return Site{}, err
+	}
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = site.Root
+	}
+	if err := m.ValidateRoot(root); err != nil {
+		return Site{}, err
+	}
+	root = filepath.Clean(root)
+	index = normalizeIndex(index)
+	if err := validateIndex(index, site.PHPVersion != ""); err != nil {
+		return Site{}, err
+	}
+	if !slices.Equal(domains, site.Domains) && site.TLS != nil {
+		certPath, keyPath := m.certPaths(site.Name)
+		certPEM, err := os.ReadFile(certPath)
+		if err != nil {
+			return Site{}, fmt.Errorf("%w：域名变更需要现有证书可读（%v）；请先关闭 HTTPS 再编辑", ErrTLSInvalid, err)
+		}
+		keyPEM, err := os.ReadFile(keyPath)
+		if err != nil {
+			return Site{}, fmt.Errorf("%w：域名变更需要现有私钥可读（%v）；请先关闭 HTTPS 再编辑", ErrTLSInvalid, err)
+		}
+		if _, err := validateCertificate(certPEM, keyPEM, domains, m.now()); err != nil {
+			detail := strings.TrimPrefix(err.Error(), ErrTLSInvalid.Error())
+			detail = strings.TrimPrefix(detail, "：")
+			return Site{}, fmt.Errorf("%w：新域名需要一份覆盖它们的证书（%s）；可先关闭 HTTPS，编辑后重新签发或上传", ErrTLSInvalid, detail)
+		}
+	}
+
+	madeRoot := false
+	if _, err := os.Stat(root); errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			return Site{}, fmt.Errorf("创建站点目录: %w", err)
+		}
+		madeRoot = true
+	}
+	site.Domains, site.Root, site.Index = domains, root, index
+	if err := m.applyConfig(site.ConfigPath, render(site)); err != nil {
+		m.undoRoot(root, madeRoot)
 		return Site{}, err
 	}
 	return site, nil
@@ -596,6 +728,7 @@ func (m *Manager) Delete(name string) (Site, error) {
 func render(s Site) string {
 	payload, _ := json.Marshal(markerPayload{
 		Name: s.Name, Domains: s.Domains, Root: s.Root, CreatedAt: s.CreatedAt,
+		Index:      s.Index,
 		TLS:        markerFromTLS(s.Name, s.TLS),
 		PHPVersion: s.PHPVersion, PHPSocket: s.PHPSocket,
 	})

@@ -187,8 +187,11 @@ paths:
         /api/v1/capabilities 里 site 那一项的 reason（本机没有 nginx / 面板不是
         root / 检测到 Apache 而写 Provider 目前只有 nginx），不在这里另写一套说法。
         每行是 {name, domains, root, config_path, enabled, created_at, tls?,
-        php_version?, php_socket?, php_socket_state?}；enabled 在 sites-enabled 布局里
-        等价于软链接存在，conf.d 布局里恒为 true。tls 只在启用 HTTPS 后出现，字段为
+        index?, php_version?, php_socket?, php_socket_state?}；enabled 在
+        sites-enabled 布局里等价于软链接存在，conf.d 布局里恒为 true。index 只在
+        操作者自定义了默认文档时出现，缺省表示面板内置列表（绑定 PHP 时为
+        index.php index.html index.htm，否则 index.html index.htm）。tls 只在启用
+        HTTPS 后出现，字段为
         {enabled, redirect, self_signed, acme, cert_path?, key_path?, not_after?,
         error?}；acme=true 的证书由面板自动续期，手工上传与自签证书不会以这种方式出现。
         php_version 非空表示站点已绑定到该 fpm 版本，php_socket 是平台从现场探测推导出的
@@ -200,12 +203,14 @@ paths:
         "404": { $ref: "#/components/responses/Disguised" }
     post:
       tags: [site]
-      summary: 创建一个站点（可选绑定 PHP）
+      summary: 创建一个站点（可选绑定 PHP、可选自定义默认文档）
       description: |
-        请求体 {name, domains[], root?, php_version?}。name 是 2-32 位小写字母/数字/
+        请求体 {name, domains[], root?, index?, php_version?}。name 是 2-32 位小写字母/数字/
         连字符，domains 是 1-20 个 example.com 或 *.example.com 形状的主机名，root
         省略时取站点根目录下的同名子目录，且必须位于站点根目录之内（不给站点表单变成
-        任意路径读取口的机会）。php_version 省略或为空表示纯静态站点；非空时必须是
+        任意路径读取口的机会）。index 省略或为空表示内置默认文档列表；非空时按给定顺序
+        写入 vhost，最多 10 项、每项必须是文件名（不能含路径），静态站点拒绝 .php 项，
+        否则 nginx 会把 PHP 源码当文本返回。php_version 省略或为空表示纯静态站点；非空时必须是
         本机探测到且带 fpm 后端的版本，平台把版本解析成 socket 后才写配置，版本不存在
         或只有 cli/cgi 时返回 422 php_unavailable，且不会创建站点。选择版本还要求
         php_version_switch 为 available；静态站点不受该能力影响。
@@ -227,6 +232,11 @@ paths:
                   maxItems: 20
                   items: { type: string }
                 root: { type: string, description: 可省略；必须位于站点根目录之下 }
+                index:
+                  type: array
+                  maxItems: 10
+                  items: { type: string }
+                  description: 可省略；默认文档文件名列表，按顺序写入 vhost
                 php_version: { type: string, description: 可省略；必须是现场探测到带 fpm 的版本，如 8.3 }
       responses:
         "201": { description: 已创建并 reload }
@@ -236,6 +246,49 @@ paths:
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { $ref: "#/components/responses/Disguised" }
   /api/v1/sites/{name}:
+    put:
+      tags: [site]
+      summary: 编辑站点基础设置（域名 / 根目录 / 默认文档）
+      description: |
+        M2 第七片：站点设置编辑。请求体 {domains[], root?, index?} 是全量替换：
+        domains 为新的 1-20 个域名，root 省略或为空时保留当前根目录，index 省略或为空
+        时恢复面板内置默认文档列表。站点名与 PHP 绑定不变。
+        域名变更且站点已启用 HTTPS 时，面板会用磁盘上的现有证书重新校验新域名集合；
+        证书不覆盖新名字就返回 422 invalid_tls，且不写入任何文件——不会出现"证书是
+        old.example.com 的、vhost 却声明 new.example.com"的错配。需要先关闭 HTTPS，
+        编辑域名后重新签发或上传。
+        新的根目录不存在时会以 0755 创建；若随后的 nginx -t 或 reload 失败，配置恢复
+        原样，新建的空目录也会删除。成功响应的站点行含 index（自定义时）与当前 PHP/证书状态。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [domains]
+              properties:
+                domains:
+                  type: array
+                  minItems: 1
+                  maxItems: 20
+                  items: { type: string }
+                root: { type: string, description: 省略或为空表示保留当前根目录 }
+                index:
+                  type: array
+                  maxItems: 10
+                  items: { type: string }
+                  description: 省略或为空表示恢复内置默认文档列表
+      responses:
+        "200": { description: 已更新并 reload，返回更新后的站点行 }
+        "400": { description: 参数不合法（invalid_site） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点（not_found） }
+        "422": { description: 证书不覆盖新域名（invalid_tls）或 nginx 拒绝（nginx_rejected），均已回滚 }
     delete:
       tags: [site]
       summary: 删除一个面板创建的站点

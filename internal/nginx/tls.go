@@ -406,12 +406,18 @@ func renderServer(s Site, tlsOn bool) string {
 	}
 	b.WriteString("    server_name " + strings.Join(s.Domains, " ") + ";\n\n")
 	b.WriteString("    root " + s.Root + ";\n")
-	if s.PHPVersion != "" {
+	switch {
+	case len(s.Index) > 0:
+		// An explicit list is rendered in the operator's order. A .php entry can
+		// only get here when PHP is bound (validateIndex), so nginx will hand it
+		// to the handler below instead of serving source text.
+		b.WriteString("    index " + strings.Join(s.Index, " ") + ";\n")
+	case s.PHPVersion != "":
 		// index.php first: a directory that has both index.php and index.html is
 		// a PHP application, and serving the static file would silently skip the
 		// handler the operator just selected.
 		b.WriteString("    index index.php index.html index.htm;\n")
-	} else {
+	default:
 		b.WriteString("    index index.html index.htm;\n")
 	}
 	if tlsOn {

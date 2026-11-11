@@ -78,8 +78,13 @@
   不写任何东西、不装任何东西。`internal/platform` 依赖它，而不是反过来。
   第六片只加了一个纯函数 `internal/php/php.go:352 FPMVersions()`：从探测结果里筛出带 fpm 的
   版本，作为 `php_fpm_versions` 与页面选择器的唯一来源。站点版本绑定在平台层
-  （`internal/platform/platform_linux.go:179 resolvePHPBinding()`）先按现场探测确认版本确有
+  （`internal/platform/platform_linux.go:190 resolvePHPBinding()`）先按现场探测确认版本确有
   fpm，再把 socket 交给 `internal/nginx` 写进 vhost；**不创建 per-site pool**。
+  第七片没有扩大 `SiteManager`，而是新增可选的
+  `internal/platform/sites.go:87 SiteSettingsManager`（`SetBasics`），由
+  `internal/platform/platform_linux.go:178` 接线到 nginx 的 `SetBasics`。这样旧 Provider 不必
+  实现一个它做不到的写入口，页面也能从缺失的接口得出"本机不能编辑站点"，而不是画一个点了
+  没反应的按钮。
 * `internal/acme` 是 M2 第五片新增的包：它只负责一件事——用 `golang.org/x/crypto/acme`
   走完 RFC 8555 的 HTTP-01 签发（`internal/acme/acme.go:125 Issue()`），并把 token 写进
   调用方给的 webroot。它不知道 nginx、不知道站点、不碰面板配置；证书装进 vhost 由
@@ -106,10 +111,10 @@
   平台实现再对它**当场验证过的**部分调用 `Allow()`，或调用 `Degrade()` 说清"主路径能做、缺的是哪一半"。
   默认拒绝，而不是默认允许。
   **实际状态**：`Allow()` 在生产代码里有五处——`internal/platform/detect.go:75` 点亮任何主机都成立的
-  `audit`，`internal/platform/platform_linux.go:439` / `:440` / `:446` 在"nginx 可识别、进程是 root、
-  `SiteACMEManager` 可用"时点亮 `site` / `site_write` / `ssl`，`:543` 在探测到带 fpm 的 PHP 版本
+  `audit`，`internal/platform/platform_linux.go:450` / `:451` / `:457` 在"nginx 可识别、进程是 root、
+  `SiteACMEManager` 可用"时点亮 `site` / `site_write` / `ssl`，`:554` 在探测到带 fpm 的 PHP 版本
   且站点可写时点亮 `php_version_switch`。生产代码里的 `Degrade()` 有四处：
-  `platform_linux.go:434` / `:435`（nginx 在但不是 root）与 `:527` / `:537`（PHP 有运行时但缺后端 /
+  `platform_linux.go:446` / `:447`（nginx 在但不是 root）与 `:538` / `:548`（PHP 有运行时但缺后端 /
   `php` 主路径仍缺安装卸载）。因此 `available` 不是只有 `audit`：`site`、`site_write`、`ssl`、
   `php_version_switch` 会在条件成立的主机上进入这一档；`php`、`database`、`firewall` 等仍停在
   `degraded` / `unavailable`。
@@ -138,7 +143,7 @@
   `site` / `ssl` 仍是 `unavailable`，在只实现了手工证书的构建里 `ssl` 也到不了 `available`。
 * 理由文案有下限："未实现"不算理由，必须写清**随哪个里程碑/Provider 交付**。
   同一种关闭状态在不同机器上要说不同的话：Linux 上"没装 ufw/firewalld/nft"与"装了但写入
-  Provider 还没上"是两句不同理由（`platform_linux.go:248-254`），运维必须能分清是机器的问题
+  Provider 还没上"是两句不同理由（`platform_linux.go:468-474`），运维必须能分清是机器的问题
   还是面板版本的问题。
 
 ### 2.3 Windows 的差异（不是"以后再说"，是现在就写进位图）
@@ -382,8 +387,8 @@ bcrypt 口令哈希、有效会话 ID 和整份审计记录：会话 ID 泄露�
 反应的按钮，或者一整块被藏起来的已交付功能。
 
 因此这条纪律是**测试强制**的，不是文档口径（M2 第一片是它的正面样本：`internal/php` 当场探到
-PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:498`
-起读现场，`:527` 报的是"检测到了什么、缺哪个后端"。第六片把"站点能绑定到某个已有版本"
+PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:509`
+起读现场，`:538` 报的是"检测到了什么、缺哪个后端"。第六片把"站点能绑定到某个已有版本"
 交付了，`php_version_switch` 才允许在"站点可写 + 探测到 fpm"时 `available`；
 但 `php` 本身仍是 `degraded`，多版本安装/卸载与 `php_ext_source` 没有写入路径）：
 

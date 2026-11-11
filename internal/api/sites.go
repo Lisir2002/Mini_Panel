@@ -9,12 +9,12 @@ import (
 )
 
 // Site management is the third slice of M2: static sites first, then the PHP
-// binding in the sixth slice. Domains are immutable for now and certificate
-// controls live in site_tls.go; the capability bitmap says exactly which half
-// exists (`php` stays degraded, `php_version_switch` is the site-level switch,
-// `ssl` covers all three certificate sources). The page renders from those
-// states, so a site created here cannot pretend to have a half-delivered
-// feature attached to it.
+// binding in the sixth slice and basic-settings editing (domains, root, index)
+// in the seventh. Certificate controls live in site_tls.go; the capability
+// bitmap says exactly which half exists (`php` stays degraded,
+// `php_version_switch` is the site-level switch, `ssl` covers all three
+// certificate sources). The page renders from those states, so a site created
+// here cannot pretend to have a half-delivered feature attached to it.
 //
 // Write discipline: the provider writes a config, runs `nginx -t`, and only
 // reloads when that passes. Every failure path restores the previous file
@@ -59,6 +59,21 @@ func (s *Server) sitePHPManager() (platform.SitePHPManager, string) {
 	return pm, ""
 }
 
+// siteSettingsManager is the optional basic-settings editor (domains, root,
+// default documents). Missing interface means the page hides the edit button
+// instead of offering a form behind an unimplemented method.
+func (s *Server) siteSettingsManager() (platform.SiteSettingsManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	sm, ok := m.(platform.SiteSettingsManager)
+	if !ok || sm == nil {
+		return nil, "该平台的站点 Provider 没有实现站点设置编辑"
+	}
+	return sm, ""
+}
+
 // handleSitesList is GET /api/v1/sites. Only files the panel wrote itself are
 // listed; a hand-written vhost in the same directory is somebody else's
 // configuration and is not reported as a panel site.
@@ -92,6 +107,7 @@ func (s *Server) handleSiteCreate(w http.ResponseWriter, r *http.Request) {
 		Name       string   `json:"name"`
 		Domains    []string `json:"domains"`
 		Root       string   `json:"root"`
+		Index      []string `json:"index"`
 		PHPVersion string   `json:"php_version"`
 	}
 	if err := decodeBody(r, &body); err != nil {
@@ -114,7 +130,7 @@ func (s *Server) handleSiteCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	site, err := m.Create(platform.SiteSpec{
-		Name: body.Name, Domains: body.Domains, Root: body.Root,
+		Name: body.Name, Domains: body.Domains, Root: body.Root, Index: body.Index,
 		PHPVersion: phpVersion,
 	})
 	switch {
@@ -133,6 +149,44 @@ func (s *Server) handleSiteCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_write", "创建站点失败："+err.Error())
+	}
+}
+
+// handleSiteUpdate is PUT /api/v1/sites/{name}. The body is a full replacement
+// of the editable basics: {domains, root?, index?}. An omitted/empty root keeps
+// the current directory; an empty index restores the built-in default list.
+// The provider validates hostnames, root confinement and index tokens, and
+// re-checks the existing certificate when domains change, so an HTTPS site
+// cannot start serving a certificate for names it no longer claims.
+func (s *Server) handleSiteUpdate(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteSettingsManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Domains []string `json:"domains"`
+		Root    string   `json:"root"`
+		Index   []string `json:"index"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetBasics(chiParam(r, "name"), body.Domains, body.Root, body.Index)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteTLSInvalid):
+		writeErr(w, http.StatusUnprocessableEntity, "invalid_tls", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_write", "更新站点失败："+err.Error())
 	}
 }
 

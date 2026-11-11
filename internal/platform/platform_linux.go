@@ -148,7 +148,7 @@ func (l linuxSites) Create(spec SiteSpec) (SiteInfo, error) {
 		return SiteInfo{}, err
 	}
 	s, err := l.m.Create(nginx.Spec{
-		Name: spec.Name, Domains: spec.Domains, Root: spec.Root,
+		Name: spec.Name, Domains: spec.Domains, Root: spec.Root, Index: spec.Index,
 		PHPVersion: version, PHPSocket: socket,
 	})
 	if err != nil {
@@ -166,6 +166,17 @@ func (l linuxSites) SetPHP(name, version string) (SiteInfo, error) {
 		return SiteInfo{}, err
 	}
 	s, err := l.m.SetPHP(name, v, socket)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
+// SetBasics is the domain/root/index half of editing. The nginx writer owns the
+// value checks (hostname shape, root confinement, index tokens) and the
+// certificate-coverage check; this adapter only translates errors.
+func (l linuxSites) SetBasics(name string, domains []string, root string, index []string) (SiteInfo, error) {
+	s, err := l.m.SetBasics(name, domains, root, index)
 	if err != nil {
 		return SiteInfo{}, mapNginxErr(err)
 	}
@@ -336,7 +347,7 @@ func mapACMEErr(err error) error {
 
 func toSiteInfo(s nginx.Site) SiteInfo {
 	out := SiteInfo{
-		Name: s.Name, Domains: s.Domains, Root: s.Root,
+		Name: s.Name, Domains: s.Domains, Root: s.Root, Index: s.Index,
 		ConfigPath: s.ConfigPath, Enabled: s.Enabled, CreatedAt: s.CreatedAt,
 		PHPVersion: s.PHPVersion, PHPSocket: s.PHPSocket,
 	}

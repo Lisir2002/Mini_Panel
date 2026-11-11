@@ -127,6 +127,7 @@ func (s *Server) routes() chi.Router {
 			// version, with the same test-before-reload and audit rules.
 			r.Get("/sites", s.handleSitesList)
 			r.Post("/sites", s.handleSiteCreate)
+			r.Put("/sites/{name}", s.handleSiteUpdate)
 			r.Delete("/sites/{name}", s.handleSiteDelete)
 			r.Put("/sites/{name}/php", s.handleSitePHP)
 			r.Post("/sites/{name}/tls", s.handleSiteTLSSet)

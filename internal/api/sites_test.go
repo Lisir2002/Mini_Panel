@@ -21,20 +21,22 @@ import (
 // it: capability gate, status codes, CSRF, and the audit trail.
 
 type fakeSites struct {
-	sites       map[string]platform.SiteInfo
-	createErr   error
-	deleteErr   error
-	tlsErr      error
-	acmeErr     error
-	phpErr      error
-	created     int
-	deleted     int
-	tlsSets     int
-	tlsClears   int
-	acmeCalls   int
-	phpSets     int
-	phpClears   int
-	lastCertLen int
+	sites        map[string]platform.SiteInfo
+	createErr    error
+	deleteErr    error
+	tlsErr       error
+	acmeErr      error
+	phpErr       error
+	settingsErr  error
+	created      int
+	deleted      int
+	tlsSets      int
+	tlsClears    int
+	acmeCalls    int
+	phpSets      int
+	phpClears    int
+	settingsSets int
+	lastCertLen  int
 }
 
 func newFakeSites() *fakeSites {
@@ -62,7 +64,7 @@ func (f *fakeSites) Create(spec platform.SiteSpec) (platform.SiteInfo, error) {
 		root = "/www/wwwroot/" + spec.Name
 	}
 	s := platform.SiteInfo{
-		Name: spec.Name, Domains: spec.Domains, Root: root,
+		Name: spec.Name, Domains: spec.Domains, Root: root, Index: spec.Index,
 		ConfigPath: "/etc/nginx/sites-available/minipanel-" + spec.Name + ".conf",
 		Enabled:    true, CreatedAt: "2026-11-11T00:00:00Z",
 	}
@@ -108,6 +110,26 @@ func (f *fakeSites) SetPHP(name, version string) (platform.SiteInfo, error) {
 	}
 	f.sites[name] = s
 	f.phpSets++
+	return s, nil
+}
+
+// SetBasics mirrors the provider contract: domains/root/index are replaced,
+// PHP and TLS stay as they are.
+func (f *fakeSites) SetBasics(name string, domains []string, root string, index []string) (platform.SiteInfo, error) {
+	if f.settingsErr != nil {
+		return platform.SiteInfo{}, f.settingsErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	s.Domains = domains
+	if root != "" {
+		s.Root = root
+	}
+	s.Index = index
+	f.sites[name] = s
+	f.settingsSets++
 	return s, nil
 }
 

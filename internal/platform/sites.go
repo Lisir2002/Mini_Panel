@@ -17,6 +17,7 @@ type SiteSpec struct {
 	Name       string   `json:"name"`
 	Domains    []string `json:"domains"`
 	Root       string   `json:"root"`
+	Index      []string `json:"index,omitempty"`
 	PHPVersion string   `json:"php_version,omitempty"`
 }
 
@@ -28,8 +29,11 @@ type SiteInfo struct {
 	Enabled    bool         `json:"enabled"`
 	CreatedAt  string       `json:"created_at"`
 	TLS        *SiteTLSInfo `json:"tls,omitempty"`
-	PHPVersion string       `json:"php_version,omitempty"`
-	PHPSocket  string       `json:"php_socket,omitempty"`
+	// Index is the site's custom document-index list; absent means the panel's
+	// default (index.php first for PHP sites, otherwise index.html/index.htm).
+	Index      []string `json:"index,omitempty"`
+	PHPVersion string   `json:"php_version,omitempty"`
+	PHPSocket  string   `json:"php_socket,omitempty"`
 	// PHPSocketState is the live state of PHPSocket (listening / idle / absent /
 	// not_socket / unknown), computed on every read. It is not persisted: "the
 	// site points at 8.3" and "php8.3-fpm is answering" are two separate facts,
@@ -50,10 +54,9 @@ type SiteTLSInfo struct {
 }
 
 // SiteManager is the write side of FeatWebSite. It is deliberately small: the
-// panel creates static sites, lists what it created, and deletes them. Editing
-// domains, PHP binding and certificates are later slices with their own
-// endpoints, and inventing them now would be the clickable-nothing this
-// project refuses.
+// panel creates static sites, lists what it created, and deletes them. PHP
+// binding, certificate controls and basic-settings editing are separate
+// optional interfaces with their own endpoints.
 type SiteManager interface {
 	List() ([]SiteInfo, error)
 	Create(SiteSpec) (SiteInfo, error)
@@ -74,6 +77,15 @@ type SiteProvider interface {
 // requested version must expose fpm on this machine.
 type SitePHPManager interface {
 	SetPHP(name, version string) (SiteInfo, error)
+}
+
+// SiteSettingsManager is the optional "edit the basics" half of a site writer:
+// replace domains, document root and the default-index list. It is separate
+// from SiteManager for the same reason as SitePHPManager: an older provider can
+// keep compiling and the UI can say "this host cannot edit sites yet" from a
+// missing interface instead of showing a form that writes nothing.
+type SiteSettingsManager interface {
+	SetBasics(name string, domains []string, root string, index []string) (SiteInfo, error)
 }
 
 // SiteTLSManager is the optional certificate side of a site writer. Manual
