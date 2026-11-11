@@ -21,10 +21,8 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"database/sql"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -46,6 +44,7 @@ import (
 	"github.com/Lisir2002/Mini_Panel/internal/audit"
 	"github.com/Lisir2002/Mini_Panel/internal/build"
 	"github.com/Lisir2002/Mini_Panel/internal/config"
+	"github.com/Lisir2002/Mini_Panel/internal/lockout"
 	"github.com/Lisir2002/Mini_Panel/internal/platform"
 	"github.com/Lisir2002/Mini_Panel/internal/sec"
 	"github.com/Lisir2002/Mini_Panel/internal/store"
@@ -491,13 +490,18 @@ func cmdDoctor(args []string) error {
 
 	certSummary := "未启用 TLS"
 	if e.cfg.TLS {
-		certSummary, err = describeCert(filepath.Join(e.cfg.DataDir, "panel-cert.pem"))
-		if err != nil {
-			return err
+		info := sec.ReadCert(sec.CertPath(e.cfg.DataDir))
+		if info.Err != nil {
+			return info.Err
 		}
+		certSummary = info.Summary
 	}
 
-	lockRisks := lockoutRisks(e)
+	// One computation, two consumers: internal/lockout is also what
+	// GET /api/v1/lockout-risks answers from, so the self-check and the 「CLI
+	// 对照」page cannot tell different stories about the same switch. Doctor keeps
+	// its old shape — only the switches that are actually armed right now.
+	lockRisks := lockout.OnlyArmed(lockout.Risks(e.st, e.cfg))
 
 	if *asJSON {
 		out := map[string]any{
@@ -566,29 +570,6 @@ func fileSize(p string) int64 {
 		return 0
 	}
 	return fi.Size()
-}
-
-func describeCert(path string) (string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "尚未生成（启动或 minipanel init 时自动创建）", nil
-		}
-		return "", err
-	}
-	blk, _ := pem.Decode(b)
-	if blk == nil || blk.Type != "CERTIFICATE" {
-		return "文件存在但无法解析，建议删除后重新 init", nil
-	}
-	c, err := x509.ParseCertificate(blk.Bytes)
-	if err != nil {
-		return "解析失败：" + err.Error(), nil
-	}
-	sans := append([]string{}, c.DNSNames...)
-	for _, ip := range c.IPAddresses {
-		sans = append(sans, ip.String())
-	}
-	return fmt.Sprintf("%s 到期，SAN: %s", c.NotAfter.Format("2006-01-02"), strings.Join(sans, " ")), nil
 }
 
 // ---- passwd ----------------------------------------------------------------
@@ -874,64 +855,4 @@ func targetUser(e *env, name string) (string, error) {
 		return "", fmt.Errorf("存在 %d 个账号（%s），请用 --user 指定哪一个",
 			len(got), strings.Join(got, ", "))
 	}
-}
-
-// lockoutRisk is one armed way to be locked out of the panel, paired with the
-// command that undoes it from the machine itself.
-type lockoutRisk struct {
-	Name  string `json:"name"`
-	State string `json:"state"`
-	Undo  string `json:"undo"`
-}
-
-// lockoutRisks reads the same values the middleware enforces. The point of
-// listing them is symmetry: a switch here without a matching minipanel command
-// means the operator's only way back is editing SQLite, which is not something
-// this panel should ever ask of somebody who already lost their entrance, phone
-// or IP address.
-func lockoutRisks(e *env) []lockoutRisk {
-	var out []lockoutRisk
-	if raw, _ := e.st.GetSetting("panel.ip_allowlist"); strings.TrimSpace(raw) != "" {
-		n := strings.Count(strings.TrimRight(strings.TrimSpace(raw), "\n"), "\n") + 1
-		out = append(out, lockoutRisk{
-			Name:  "IP 白名单",
-			State: fmt.Sprintf("已启用，%d 条；不在名单内的地址连登录页都看不到", n),
-			Undo:  "minipanel reset-ips --clear",
-		})
-	}
-	var totpOn int
-	_ = e.st.DB().QueryRow(`SELECT COUNT(1) FROM users WHERE totp_enabled=1`).Scan(&totpOn)
-	if totpOn > 0 {
-		out = append(out, lockoutRisk{
-			Name:  "两步验证",
-			State: fmt.Sprintf("%d 个账号已开启；密钥只存在本机数据库里", totpOn),
-			Undo:  "minipanel reset-2fa --clear --user <账号>",
-		})
-	}
-	if raw, _ := e.st.GetSetting("panel.password_expiry_days"); strings.TrimSpace(raw) != "" && strings.TrimSpace(raw) != "0" {
-		out = append(out, lockoutRisk{
-			Name:  "口令有效期",
-			State: "每 " + strings.TrimSpace(raw) + " 天要求更换（登录时判定，不打断进行中的会话）",
-			Undo:  "面板内改口令，或 minipanel passwd <账号> 后由本人确认",
-		})
-	}
-	var must int
-	_ = e.st.DB().QueryRow(`SELECT COUNT(1) FROM users WHERE must_change_pw=1`).Scan(&must)
-	if must > 0 {
-		out = append(out, lockoutRisk{
-			Name:  "口令待确认",
-			State: fmt.Sprintf("%d 个账号除改口令与登出外的请求会被拒绝", must),
-			Undo:  "面板内改口令；忘了旧口令用 minipanel passwd <账号>",
-		})
-	}
-	if e.cfg.TLS {
-		if _, err := describeCert(filepath.Join(e.cfg.DataDir, "panel-cert.pem")); err != nil {
-			out = append(out, lockoutRisk{
-				Name:  "面板证书",
-				State: "TLS 已开启但证书不可用：" + err.Error(),
-				Undo:  "minipanel init --insecure-no-tls 先恢复到回环可用，再修证书",
-			})
-		}
-	}
-	return out
 }

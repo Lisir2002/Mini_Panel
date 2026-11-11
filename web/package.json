@@ -1,0 +1,22 @@
+{
+  "name": "minipanel-web",
+  "private": true,
+  "version": "0.1.0-m1",
+  "type": "module",
+  "description": "Mini Panel 前端（Vue 3 + Vite + Element Plus）。产物为单个 webui/dist/index.html。",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "element-plus": "^2.9.5",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "unplugin-vue-components": "^28.0.5",
+    "vite": "^6.1.0",
+    "vite-plugin-singlefile": "^2.1.0"
+  }
+}

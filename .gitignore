@@ -53,8 +53,11 @@ known_hosts
 secrets.env
 
 # ---- 前端 ----
-# 注意：M0 的前端是手写的 webui/dist/index.html，它【必须】入库（go:embed 依赖它），
-# 所以这里不写任何 webui/dist 规则，也不要恢复旧的 web/dist/assets 规则。
+# M1 的前端源码在 web/，构建产物是 webui/dist/index.html，它【必须】入库：
+# go:embed 依赖它，而 `make build` / `make build-all` 因此不需要 node 工具链。
+# 所以这里不写任何 webui/dist 规则，也不要恢复旧的 web/dist/assets 忽略规则。
+# 产物只有一个文件这件事由 TestUIBundleIsASingleSelfContainedFile 守着：
+# 多出来的静态资源住在安全入口之外，未登录时会被闸门伪装掉。
 node_modules/
 npm-debug.log*
 yarn-error.log*

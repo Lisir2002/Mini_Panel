@@ -175,6 +175,47 @@ paths:
       responses:
         "200": { description: OK }
         "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/lockout-risks:
+    get:
+      tags: [panel]
+      summary: 自救对称表（CLI 对照，只读）
+      description: |
+        docs/功能设计.md §3.10 的「CLI 对照」页与 §6.3 的自查表是同一份数据：由
+        internal/lockout.Risks() 一次算出，`minipanel doctor` 取其中 armed=true 的
+        行作为风险清单，本端点返回全表（含未武装的行），因为这张表的价值在于
+        "出事之前就看到过"。两边不可能各说一套是这条设计的唯一理由。
+        每行 {name, state, armed, undo}：state 是当前状态的人话描述（读不到数据库时
+        如实写"读不出来"，不会假装未启用），armed 表示这个开关此刻是否真的能把人
+        关在外面，undo 是在服务器本机执行的命令文本。
+        本端点不执行任何命令，面板也没有执行命令的端点（§1.6：可传任意参数的执行器
+        是提权入口，不是功能）。armed 的行包括入口路径、IP 白名单、两步验证、口令
+        有效期与待确认口令；不含"当前是否正处于失败锁定中"——那个计数器只在面板进程
+        内存里，从第二个进程读不到，所以表里说的是规则而不是状态。
+        入口路径的值本身不在响应里出现：它和会话令牌一样是 secret，只说"已启用"。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        state: { type: string }
+                        armed: { type: boolean }
+                        undo: { type: string }
+                  armed: { type: integer }
+                  total: { type: integer }
+                  executable:
+                    type: boolean
+                    description: 恒为 false；本面板没有"执行这些命令"的端点
+        "403": { $ref: "#/components/responses/PasswordChange" }
+        "404": { $ref: "#/components/responses/Disguised" }
   /api/v1/settings:
     get:
       tags: [panel]

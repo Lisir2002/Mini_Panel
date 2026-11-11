@@ -120,6 +120,11 @@ func (s *Server) routes() chi.Router {
 			r.Get("/capabilities", s.handleCapabilities)
 			r.Get("/system/info", s.handleSystemInfo)
 
+			// M1: the last page of the milestone. Read-only by construction — the
+			// remedies it lists are commands, and this panel has no endpoint that
+			// runs a command.
+			r.Get("/lockout-risks", s.handleLockoutRisks)
+
 			r.Get("/settings", s.handleSettingsList)
 			r.Put("/settings/{key}", s.handleSettingsPut)
 

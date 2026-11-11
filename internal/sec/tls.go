@@ -7,11 +7,14 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -121,4 +124,58 @@ func HostListForCert(hosts []string) []string {
 	out := append([]string{}, hosts...)
 	sort.Strings(out)
 	return out
+}
+
+// CertPath is where the panel's own certificate lives inside dir. Both the
+// self-check and the lockout table need the same file, so the name is not spelled
+// out at two call sites any more than it has to be.
+func CertPath(dir string) string { return filepath.Join(dir, "panel-cert.pem") }
+
+// CertInfo is everything the panel can learn about its own certificate from the
+// file on disk. It exists because two callers ask different questions about the
+// same file — `doctor` wants one human sentence, the lockout table wants "could
+// this be why I cannot reach the panel" — and they must not parse it differently.
+type CertInfo struct {
+	// Summary is the sentence to show: expiry + SANs, or what is wrong instead.
+	Summary string
+	// Usable is whether a TLS handshake could be served from this file right
+	// now: parseable, within its validity window. A self-signed certificate is
+	// still "usable" here — the browser warning is a trust question, not a
+	// availability one, and the panel must not report a lock-out it does not cause.
+	Usable bool
+	// Err is non-nil only when the file could not be read at all (permissions,
+	// I/O), which is the one case where `doctor` refuses to guess and fails.
+	Err error
+}
+
+func ReadCert(path string) CertInfo {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return CertInfo{Summary: "尚未生成（启动或 minipanel init 时自动创建）"}
+	}
+	if err != nil {
+		return CertInfo{Summary: "无法读取", Err: err}
+	}
+	blk, _ := pem.Decode(b)
+	if blk == nil || blk.Type != "CERTIFICATE" {
+		return CertInfo{Summary: "文件存在但无法解析，建议删除后重新 init"}
+	}
+	c, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		return CertInfo{Summary: "解析失败：" + err.Error()}
+	}
+	now := time.Now()
+	usable := now.After(c.NotBefore) && c.NotAfter.After(now)
+	sans := append([]string{}, c.DNSNames...)
+	for _, ip := range c.IPAddresses {
+		sans = append(sans, ip.String())
+	}
+	summary := fmt.Sprintf("%s 到期，SAN: %s", c.NotAfter.Format("2006-01-02"), strings.Join(sans, " "))
+	if !usable {
+		if now.Before(c.NotBefore) {
+			return CertInfo{Summary: "有效期未到（" + c.NotBefore.Format("2006-01-02") + "）：" + summary}
+		}
+		return CertInfo{Summary: "已于 " + c.NotAfter.Format("2006-01-02") + " 过期"}
+	}
+	return CertInfo{Summary: summary, Usable: true}
 }

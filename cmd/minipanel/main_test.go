@@ -235,7 +235,10 @@ func TestSubcommandHelpIsNotAFailure(t *testing.T) {
 // TestUsageCoversEveryCommand keeps the help text from rotting: dispatch's
 // switch and the usage block are two lists that must stay one list.
 func TestUsageCoversEveryCommand(t *testing.T) {
-	for _, cmd := range []string{"serve", "init", "doctor", "passwd", "reset-entrance", "version"} {
+	// reset-ips / reset-2fa joined the list with M1's §6.3 gaps; the lockout table
+	// cross-checks these names against dispatch (lockout_test.go).
+	for _, cmd := range []string{"serve", "init", "doctor", "passwd", "reset-entrance",
+		"reset-ips", "reset-2fa", "version"} {
 		if !strings.Contains(usage, "minipanel "+cmd) {
 			t.Errorf("usage does not document %q", cmd)
 		}
