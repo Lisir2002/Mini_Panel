@@ -5,6 +5,7 @@ import { clearGate, notify, setGate, store } from "./store";
 import { fmtUp, tzLabel } from "./fmt";
 import LoginView from "./views/LoginView.vue";
 import OverviewView from "./views/OverviewView.vue";
+import SitesView from "./views/SitesView.vue";
 import CapabilitiesView from "./views/CapabilitiesView.vue";
 import SettingsView from "./views/SettingsView.vue";
 import SessionsView from "./views/SessionsView.vue";
@@ -13,13 +14,15 @@ import SecurityView from "./views/SecurityView.vue";
 import AuditView from "./views/AuditView.vue";
 
 // 页面清单就是这一份。每一项都对应接口面上真实存在的东西：
-// 概览→/system/info，能力→/capabilities，设置→/settings，会话→/sessions，
-// CLI 对照→/lockout-risks，安全→/2fa/*+/password，审计→/audit。M2+ 的站点/数据库等页面不在这里，
+// 概览→/system/info，网站→/sites（M2 第三片，静态站点；能力不可用时只显示理由），
+// 能力→/capabilities，设置→/settings，会话→/sessions，CLI 对照→/lockout-risks，
+// 安全→/2fa/*+/password，审计→/audit。数据库/备份/终端等页面不在这里，
 // 因为后端还没有那些端点（能力位图里带理由地灰着），不是"藏起来了"。
 // markRaw 不是优化而是正确性：组件对象一旦被包成响应式，<component :is> 拿到的
 // 就是 Ref 而不是组件，页面会安静地什么都不渲染。
 const VIEWS = [
   { key: "overview", label: "概览", comp: markRaw(OverviewView) },
+  { key: "sites", label: "网站", comp: markRaw(SitesView) },
   { key: "capabilities", label: "本机能力", comp: markRaw(CapabilitiesView) },
   { key: "settings", label: "面板设置", comp: markRaw(SettingsView) },
   { key: "sessions", label: "会话", comp: markRaw(SessionsView) },

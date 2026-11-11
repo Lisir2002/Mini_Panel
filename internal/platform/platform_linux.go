@@ -4,10 +4,13 @@ package platform
 
 import (
 	"bufio"
+	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/Lisir2002/Mini_Panel/internal/nginx"
 	"github.com/Lisir2002/Mini_Panel/internal/php"
 )
 
@@ -66,7 +69,115 @@ func (linuxPlatform) PoolDir(version string) string { return php.PoolDir(version
 
 func (linuxPlatform) SocketPath(version string) string { return php.SocketPath(version) }
 
-func (linuxPlatform) Detect() (*Capabilities, error) {
+// nginxRoot is the tree the site writer manages. The env override exists for
+// the same reason MINI_PANEL_SITE_ROOT does: `make run` must be able to point
+// at a scratch directory instead of /etc/nginx.
+func nginxRoot() string { return envOr("MINI_PANEL_NGINX_ROOT", "/etc/nginx") }
+
+// WebServer and Sites are the M2 provider seam. Both re-detect on every call
+// instead of caching a manager at startup, so the provider follows a host
+// that gains or loses nginx. The capability bitmap is computed once at panel
+// start, so a fresh install still needs a restart before the site page is
+// exposed; detection is cheap, and the provider itself never caches a lie.
+func (linuxPlatform) WebServer() (WebServerCtl, bool) {
+	m, err := nginx.New(nginxRoot(), linuxPlatform{}.SiteRoot())
+	if err != nil {
+		return nil, false
+	}
+	return linuxWebServer{m: m}, true
+}
+
+func (linuxPlatform) Sites() (SiteManager, bool) {
+	m, err := nginx.New(nginxRoot(), linuxPlatform{}.SiteRoot())
+	if err != nil {
+		return nil, false
+	}
+	// Writing /etc/nginx and reloading the server needs root. Reporting the
+	// capability without this check is how a panel ends up with a page whose
+	// every button returns EACCES.
+	if os.Geteuid() != 0 {
+		return nil, false
+	}
+	return linuxSites{m: m}, true
+}
+
+type linuxWebServer struct{ m *nginx.Manager }
+
+func (w linuxWebServer) Name() WebServerName { return WebNginx }
+
+func (w linuxWebServer) TestConfig() error {
+	_, err := w.m.TestConfig()
+	return err
+}
+
+func (w linuxWebServer) Reload() error {
+	_, err := w.m.Reload()
+	return err
+}
+
+func (w linuxWebServer) Restart() error {
+	_, err := w.m.Restart()
+	return err
+}
+
+// linuxSites converts between the platform-neutral rows and the nginx writer.
+// Error identity is preserved across the boundary via the platform sentinels,
+// so the HTTP layer never imports internal/nginx.
+type linuxSites struct{ m *nginx.Manager }
+
+func (l linuxSites) List() ([]SiteInfo, error) {
+	sites, err := l.m.List()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SiteInfo, 0, len(sites))
+	for _, s := range sites {
+		out = append(out, toSiteInfo(s))
+	}
+	return out, nil
+}
+
+func (l linuxSites) Create(spec SiteSpec) (SiteInfo, error) {
+	s, err := l.m.Create(nginx.Spec{Name: spec.Name, Domains: spec.Domains, Root: spec.Root})
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
+func (l linuxSites) Delete(name string) (SiteInfo, error) {
+	s, err := l.m.Delete(name)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
+func toSiteInfo(s nginx.Site) SiteInfo {
+	return SiteInfo{
+		Name: s.Name, Domains: s.Domains, Root: s.Root,
+		ConfigPath: s.ConfigPath, Enabled: s.Enabled, CreatedAt: s.CreatedAt,
+	}
+}
+
+func mapNginxErr(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, nginx.ErrExists):
+		return fmt.Errorf("%w", ErrSiteExists)
+	case errors.Is(err, nginx.ErrNotFound):
+		return fmt.Errorf("%w", ErrSiteMissing)
+	case errors.Is(err, nginx.ErrInvalid):
+		return fmt.Errorf("%w：%v", ErrSiteInvalid, err)
+	case errors.Is(err, nginx.ErrConfigRejected):
+		return fmt.Errorf("%w：%v", ErrSiteRefused, err)
+	default:
+		return err
+	}
+}
+
+func (p linuxPlatform) Detect() (*Capabilities, error) {
 	c := newBase()
 	c.OSFamily = osFamily()
 	c.OSVersion = osVersion(c.OSFamily)
@@ -91,6 +202,39 @@ func (linuxPlatform) Detect() (*Capabilities, error) {
 	}
 	if have("apachectl") != "" || have("httpd") != "" {
 		c.WebServers = append(c.WebServers, WebApache)
+	}
+
+	// M2 third slice: site creation is available only when the host has an
+	// nginx installation the writer recognises and the process can actually
+	// write there. The branches are kept apart because the UI has to be able
+	// to say "no web server" apart from "nginx present, not root" apart from
+	// "Apache here, the write provider is nginx-only" — three different
+	// operator actions, and one shared "not supported" sentence would hide
+	// which one applies.
+	hasNginx := false
+	for _, w := range c.WebServers {
+		if w == WebNginx || w == WebOpenResty {
+			hasNginx = true
+		}
+	}
+	_, siteErr := nginx.New(nginxRoot(), p.SiteRoot())
+	switch {
+	case !hasNginx && len(c.WebServers) > 0:
+		c.Deny(FeatWebSite, "本机检测到 Apache；站点写入 Provider 当前只实现了 nginx（M2 后续片）")
+		c.Deny(featSiteWrite, "站点写入 Provider 当前只实现了 nginx（M2 后续片）")
+	case !hasNginx:
+		c.Deny(FeatWebSite, "本机未检测到 nginx / openresty，站点创建需要一份可写的 nginx 配置目录")
+		c.Deny(featSiteWrite, "站点写入需要 nginx；本机没有可管理的 Web 服务器")
+	case siteErr != nil:
+		c.Deny(FeatWebSite, "检测到 nginx，但"+siteErr.Error()+"；站点写入需要一个可识别的配置目录")
+		c.Deny(featSiteWrite, "站点写入需要可识别的 nginx 配置目录："+siteErr.Error())
+	case !c.IsPrivileged:
+		why := "已检测到 nginx，但面板进程不是 root，无法写配置目录或 reload nginx"
+		c.Degrade(FeatWebSite, why, "以 root 身份运行面板（systemd 服务默认即为 root）", "minipanel doctor 的 site 行")
+		c.Degrade(featSiteWrite, why, "以 root 身份运行面板", "minipanel doctor 的 site 行")
+	default:
+		c.Allow(FeatWebSite)
+		c.Allow(featSiteWrite)
 	}
 
 	switch {

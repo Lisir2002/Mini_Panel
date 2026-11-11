@@ -63,8 +63,8 @@
   `ConfigDir()`、`DataDir()`、`LogDir()`、`SiteRoot()`、`BackupRoot()`。
   M2/M3/M4 的写操作接口（`WebServerCtl`、`FirewallCtl`、`PHPCtl`、`ServiceManager`）**现在就声明**，
   这样到里程碑时不需要重新塑形核心层。M2 第一片之后它们的现状不再相同：`PHPCtl` 在 Linux 上
-  **已经是实现**（`internal/platform/platform_linux.go:22` 的 `var _ PHPCtl = linuxPlatform{}`，
-  方法体在 `:60`、`:65`、`:67`，底下是 `internal/php` 的现场探测），
+  **已经是实现**（`internal/platform/platform_linux.go:25` 的 `var _ PHPCtl = linuxPlatform{}`，
+  方法体在 `:63`、`:68`、`:70`，底下是 `internal/php` 的现场探测），
   `WebServerCtl`、`FirewallCtl`、`ServiceManager` 仍然只有类型定义、没有实现、没有路由。
   "有没有实现"这件事由编译器管：那句 `var _ PHPCtl = linuxPlatform{}` 一改签名就编不过。
   接口声明见 `internal/platform/paths.go:77`——那里同时写明 `PoolDir`/`SocketPath` 给的是
@@ -95,7 +95,7 @@
   默认拒绝，而不是默认允许。
   **实际状态**：`Allow()` 全仓库只被调用一次（`internal/platform/detect.go:74`），
   生产代码里的 `Degrade()` 只有 M2 的 PHP 探测那两处
-  （`internal/platform/platform_linux.go:171`、`:174`），
+  （`internal/platform/platform_linux.go:315`、`:318`），
   `features` 里唯一的 `available` 仍然是 `audit`。探测到的**事实**（有 ufw、有 sshd、
   有 nginx、有 PHP 8.3）只写进 `Capabilities` 的描述字段，不写成"功能可用"。
 * `Deny()` / `Degrade()` / `Allow()` 三个入口都走同一个 `set()`：`Allow` 会清掉旧理由与
@@ -110,14 +110,14 @@
   （都在 `internal/platform/platform_php_test.go`，后者钉的是"`PHPCtl` 给的目标不随目录增删而变，
   变的是另一次读"）。入口是 `make check-honesty`。
 * 第一条测试里除了"关了必须有理由"，还有一条**白名单**：
-  `internal/platform/capabilities_test.go:174 implemented := map[string]bool{FeatAudit: true}`，随后双向断言
-  （`:175-182` 白名单外报 `available` 报错；`:183-187` 白名单内的项没报成 `available` 也报错）。
+  `internal/platform/capabilities_test.go:179 implemented := map[string]bool{FeatAudit: true}`，随后双向断言
+  （`:184-195` 白名单外报 `available` 报错；`:196-200` 白名单内的项没报成 `available` 也报错）。
   这一条把纪律从"不许没有理由"升级成"当前版本只许 `audit` 是功能"——任何
   "探测到机制就 `Allow` 成功能"的写法，包括只在某一个平台上成立的写法，都会让测试变红。
   白名单只管 `available`，因此 M2 把 `php` 写成 `degraded` 不需要、也不允许动这张表。
 * 理由文案有下限："未实现"不算理由，必须写清**随哪个里程碑/Provider 交付**。
   同一种关闭状态在不同机器上要说不同的话：Linux 上"没装 ufw/firewalld/nft"与"装了但写入
-  Provider 还没上"是两句不同理由（`platform_linux.go:104-110`），运维必须能分清是机器的问题
+  Provider 还没上"是两句不同理由（`platform_linux.go:248-254`），运维必须能分清是机器的问题
   还是面板版本的问题。
 
 ### 2.3 Windows 的差异（不是"以后再说"，是现在就写进位图）
@@ -225,7 +225,7 @@
   "已启用（值不在此展示，见 panel.json 或 minipanel doctor）"，关闭的时候显示"已关闭"
   （`internal/api/system.go:132-138`）。理由写在注释里：入口是伪装手段，而设置页是最容易被
   截图的地方。要看真值请用 `minipanel doctor`。这条由 `TestSettingsAllowListAndValidation`
-  （`internal/api/m0_test.go:361`）断言，同一条测试还要求 `panel.port` 等于进程实际监听端口。
+  （`internal/api/m0_test.go:372`）断言，同一条测试还要求 `panel.port` 等于进程实际监听端口。
 
 ### 4.3 一致性
 
@@ -254,12 +254,12 @@
    `/healthz` 永远可达。**持有合法 `mp_session` 后任何路径都可访问**——这是有意的：SPA 的导航、
    刷新与深链必须落在原路径上，把它们全部改写到一个魔法路径会拿可用的界面换一个勾。
    因此**入口不能缓解 XSS，也不能缓解 Cookie 泄露**，任何"安全入口保护登录后的面板"的表述都是
-   错的；`entranceGate` 的注释（`internal/api/server.go:175-193`）已经把这段结论写死，
+   错的；`entranceGate` 的注释（`internal/api/server.go:182-200`）已经把这段结论写死，
    文档与 README 必须原样表达这条边界。**"登录后逐路径校验入口"是 M1 待办**（见
    `docs/里程碑.md`），在它实现之前不得写成现状。真正的访问控制 = 监听地址 + 会话令牌与有效期
    + `panel.ip_allowlist` + CSRF + 登录锁定。
    伪装响应的**形态**也是一条决定：中性 HTML 错误页，只含状态码文本，不含产品名与版本
-   （`internal/api/server.go:268 disguise()` 的注释）。不用 Go 默认 `http.Error` 的
+   （`internal/api/server.go:275 disguise()` 的注释）。不用 Go 默认 `http.Error` 的
    `text/plain`，因为"404 Not Found"那 10 个字节本身就是运行环境指纹，而这条响应的目的正是
    让探测者学不到东西；也不冒充 nginx 的错误页——这个进程就是 web server，一张普通 404 是
    事实，冒充别人的错误页在事故响应时误导运维的程度不亚于误导扫描器。页面里内联
@@ -358,13 +358,13 @@ bcrypt 口令哈希、有效会话 ID 和整份审计记录：会话 ID 泄露�
 反应的按钮，或者一整块被藏起来的已交付功能。
 
 因此这条纪律是**测试强制**的，不是文档口径（M2 第一片是它的正面样本：`internal/php` 当场探到
-PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:171`
+PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:315`
 报的是"检测到了什么、缺哪个后端"，而 `php_version_switch`、`php_ext_source`、`site` 仍然停在
 `newBase()` 里那句 `unavailable` 理由上，探测到多版本不等于能切版本）：
 
 * `newBase()` 默认拒绝每一项功能并写好理由（`internal/platform/detect.go:18-76`，拒绝表 `:50`）；
 * `TestDetectedCapabilitiesAreExplained`（`internal/platform/capabilities_test.go:110`）除了
-  "关了必须有理由"，还有一条**白名单**：`capabilities_test.go:174` 把本版本已实现的功能写成
+  "关了必须有理由"，还有一条**白名单**：`capabilities_test.go:179` 把本版本已实现的功能写成
   `{FeatAudit: true}`，白名单外任何 `available` 都失败，白名单内的项没报成 `available` 也失败。
   白名单只管 `available` 这一档，所以 M2 把 `php` 报成 `degraded` 既不需要、也不允许动这张表。
   **本版本唯一算作"功能"的是审计日志**；身份、会话、入口、CSRF、锁定、2FA、能力契约、自检 CLI
@@ -451,7 +451,7 @@ M2 第二片补上了一条曾经记在本表里的缺口：**`doctor` 打印的
 | 面板自签证书生成、SAN 跟随本机地址重签 | `grep -rn "EnsureSelfSignedTLS" --include='*_test.go' .` 为空 | 代码 `internal/sec/tls.go:26`；`make doctor` 的证书行、`minipanel init` 的实际输出 |
 | `-wal` / `-shm` 的 0600 | `TestFilePermissionsAreOwnerOnly` 只 `os.Stat` 主库文件 | 代码 `internal/store/store.go:46-57` 的三元素循环 |
 | 面板证书与私钥的 0600 | `internal/sec` 只有一个测试文件且不碰证书 | 代码 `internal/sec/tls.go:74-86` |
-| `444`（挂断型）伪装真的会断连 | `disguise()` 的 Hijacker 分支只在配置 444 时走到，M0 测试跑的是 404 | 代码 `internal/api/server.go:268` |
+| `444`（挂断型）伪装真的会断连 | `disguise()` 的 Hijacker 分支只在配置 444 时走到，M0 测试跑的是 404 | 代码 `internal/api/server.go:275` |
 | 前端"灰 + 理由"的实际渲染 | 仓库里没有 UI 自动化：`make web` 编译前端并断言产物只有一个文件，`make check-ui` 断言能力 key 全覆盖与端点全覆盖，但**"页面画出来对不对"这一步仍然靠人**（真实浏览器的 puppeteer 脚本刻意不入仓库，它依赖本机 chrome） | `make check-ui` 的三条 + `make check-honesty` 保证理由必然存在；每轮里程碑手工跑一遍浏览器断言并在 README"如何验证"里记下条数 |
 | `minipanel passwd` 的 **tty 分支**（真关回显那一条） | 测试文件自己写明 `go test` 下 stdin 不是 tty（`cmd/minipanel/main_test.go:212-213`），所以 `term.IsTerminal` 为真的分支走不到；管道分支与全部校验分支**已经**在 CI 里 | 代码 `cmd/minipanel/main.go:637`（`IsTerminal`）→ `:643`（`term.ReadPassword`）、`:652`（`readLine`）；本轮用 `pty.fork()` 手工验证主端流里不回声明文。这是 §8.2 那条纪律的反面教材：**文案说"不回显"而代码没关 ECHO** 曾经成立过，只有断言能防它回来；补法是在测试里自建 pty，或把该分支抽成可注入接口 |
 | 入口字母表本身没有断言 | 形状是断言过的（`sec_test.go:77` 要求 `/` 前缀且 `len(e) == 9`，把 8 字符改短会红），但 `entranceAlphabet` 在测试里一次都没被引用（`grep -rn "entranceAlphabet" --include='*_test.go' .` 为空）：没人断言它是 31 个符号。往字母表里加回易混字符，只能靠 `:82` 那条禁集撞上来才发现 | 禁集断言 + §8.3 的 `-count=200` 重复；注释 `internal/sec/sec.go:108-115` 写明了 31 符号 × 8 字符 ≈ 39.6 bit |

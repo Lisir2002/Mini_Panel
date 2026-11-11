@@ -120,6 +120,13 @@ func (s *Server) routes() chi.Router {
 			r.Get("/capabilities", s.handleCapabilities)
 			r.Get("/system/info", s.handleSystemInfo)
 
+			// M2 third slice: static sites. GET lists only panel-owned configs;
+			// POST and DELETE go through csrf() and auditWrites() like every other
+			// write, and the provider runs `nginx -t` before it reloads.
+			r.Get("/sites", s.handleSitesList)
+			r.Post("/sites", s.handleSiteCreate)
+			r.Delete("/sites/{name}", s.handleSiteDelete)
+
 			// M1: the last page of the milestone. Read-only by construction — the
 			// remedies it lists are commands, and this panel has no endpoint that
 			// runs a command.

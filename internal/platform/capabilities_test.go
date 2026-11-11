@@ -168,23 +168,58 @@ func TestDetectedCapabilitiesAreExplained(t *testing.T) {
 	// behind it exists on every platform the panel claims, which is what stops a
 	// platform-specific `Allow` from sneaking a dead button into the UI.
 	//
-	// M1 has not added a module, so `audit` is still the only entry point on
-	// this list — it is the delivery switch, and docs/功能设计.md §4.3 requires
-	// the implementation, this whitelist and the docs to move together.
+	// Two kinds of entry. `implemented` is unconditional: the code is in this
+	// binary and works on every host it runs on. `conditional` is for modules
+	// whose availability is a fact about the host (nginx installed, process is
+	// root) — and the predicate asks the platform implementation itself rather
+	// than re-deriving that fact here, so the bitmap and the writer cannot
+	// disagree about whether a site can be created. Both directions are
+	// enforced: an available key in neither map fails, and a conditional key
+	// whose predicate holds but which is not available fails too.
 	implemented := map[string]bool{FeatAudit: true}
+	conditional := map[string]func(*Capabilities) bool{
+		FeatWebSite:   siteWriterReady,
+		featSiteWrite: siteWriterReady,
+	}
 	for name, f := range c.Features {
 		if f.State != StateAvailable {
 			continue
 		}
-		if !implemented[name] {
-			t.Errorf("这一版把 %s 报成可用，但没有对应实现", name)
+		if implemented[name] {
+			continue
 		}
+		if pred, ok := conditional[name]; ok && pred(c) {
+			continue
+		}
+		t.Errorf("这一版把 %s 报成可用，但没有对应实现", name)
 	}
 	for name := range implemented {
 		if !c.Has(name) {
 			t.Errorf("%s 是本版已实现的能力，必须报为可用", name)
 		}
 	}
+	for name, pred := range conditional {
+		if !pred(c) {
+			continue
+		}
+		if !c.Has(name) {
+			t.Errorf("%s 的前置条件已满足，但位图没有把它报成可用", name)
+		}
+	}
+}
+
+// siteWriterReady is the whitelist predicate for the M2 site slice: it asks the
+// platform whether a SiteManager is actually reachable right now, which is the
+// same question Detect() answers for the bitmap (nginx layout present, process
+// can write). Keeping one implementation means a host where the writer says
+// "no" can never be reported as site-available, and vice versa.
+func siteWriterReady(*Capabilities) bool {
+	sp, ok := Current().(SiteProvider)
+	if !ok {
+		return false
+	}
+	m, ok := sp.Sites()
+	return ok && m != nil
 }
 
 func TestPathsAreAbsoluteAndConsistent(t *testing.T) {

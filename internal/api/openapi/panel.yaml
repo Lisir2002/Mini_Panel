@@ -175,6 +175,77 @@ paths:
       responses:
         "200": { description: OK }
         "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/sites:
+    get:
+      tags: [site]
+      summary: 面板创建的静态站点列表
+      description: |
+        M2 第三片：静态站点。只列出面板自己写出的配置——文件内带机器可读的
+        minipanel-site 标记，且文件名与标记里的站点名一致。同一目录下手工写的
+        vhost 不是面板的，不出现在列表里，删除端点也碰不到它。
+        可选能力：site 不可用时本端点返回 403 capability，message 直接取
+        /api/v1/capabilities 里 site 那一项的 reason（本机没有 nginx / 面板不是
+        root / 检测到 Apache 而写 Provider 目前只有 nginx），不在这里另写一套说法。
+        每行是 {name, domains, root, config_path, enabled, created_at}；enabled 在
+        sites-enabled 布局里等价于软链接存在，conf.d 布局里恒为 true。
+      responses:
+        "200": { description: 返回 total 与 items }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { $ref: "#/components/responses/Disguised" }
+    post:
+      tags: [site]
+      summary: 创建一个静态站点
+      description: |
+        请求体 {name, domains[], root?}。name 是 2-32 位小写字母/数字/连字符，
+        domains 是 1-20 个 example.com 或 *.example.com 形状的主机名，root 省略时
+        取站点根目录下的同名子目录，且必须位于站点根目录之内（不给站点表单变成
+        任意路径读取口的机会）。
+        写入协议是"先测试后生效"：写配置 → nginx -t → 只有通过才 reload。任何一步
+        失败都会恢复改动前的文件，因此响应为 422 nginx_rejected 时 nginx 里看到的
+        仍然是上一份配置。成功的响应是 201 + 站点行。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, domains]
+              properties:
+                name: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+                domains:
+                  type: array
+                  minItems: 1
+                  maxItems: 20
+                  items: { type: string }
+                root: { type: string, description: 可省略；必须位于站点根目录之下 }
+      responses:
+        "201": { description: 已创建并 reload }
+        "400": { description: 站点参数不合法（invalid_site） }
+        "409": { description: 同名站点已存在（site_exists） }
+        "422": { description: nginx -t 或 reload 拒绝，已回滚（nginx_rejected） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/sites/{name}:
+    delete:
+      tags: [site]
+      summary: 删除一个面板创建的站点
+      description: |
+        只删除面板自己写的配置与 sites-enabled 软链接；站点根目录**故意保留**。
+        删除 vhost 是配置动作，把它变成对 /www/wwwroot/<name> 的递归删除，等于
+        在数据丢失按钮旁边放一个容易打错的名字。
+        与创建走同一套先测试后生效：删除后 nginx -t 不通过或 reload 被拒，文件与
+        软链接会被原样恢复，响应 422 nginx_rejected。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      responses:
+        "200": { description: 已删除并 reload }
+        "400": { description: 站点名格式不符 }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx 拒绝，已恢复 }
+        "403": { $ref: "#/components/responses/CSRF" }
   /api/v1/lockout-risks:
     get:
       tags: [panel]

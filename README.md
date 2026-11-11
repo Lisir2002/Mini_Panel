@@ -45,8 +45,8 @@ M1 的账号与会话页、前端工程化（Vue 3 + Vite + Element Plus）、�
 | 口令哈希 bcrypt cost 12、强度规则（长度≥10 且四类中三类） | `internal/sec/sec.go:20 HashPassword()`、`:55 ValidatePassword()` | `TestValidatePassword`、`TestPasswordHashIsSaltedAndVerifiable` |
 | 登录 / 登出 / 会话（`mp_session` HttpOnly + SameSite=Strict） | `internal/api/auth.go:59 handleLogin()`、`:254 setSessionCookies()` | `TestLogoutAndRevokeSessions`、`TestSessionEndpointReportsIdentity` |
 | 首个管理员引导（仅账号表为空时可用） | `internal/api/auth.go:170 handleSetup()` | `TestSetupOnlyWorksWhileNoUserExists`、`TestSetupRejectsWeakPasswordAndBadUsername` |
-| 安全入口闸门 + 伪装响应 | `internal/api/server.go:194 entranceGate()`、`:233 disguise()` | `TestEntranceGateDisguisesEverythingElse` |
-| 双提交 CSRF（`mp_csrf` Cookie ↔ `X-Mini-CSRF` 头） | `internal/api/server.go:371 csrf()` | `TestMutationsRequireCSRF` |
+| 安全入口闸门 + 伪装响应 | `internal/api/server.go:201 entranceGate()`、`:240 disguise()` | `TestEntranceGateDisguisesEverythingElse` |
+| 双提交 CSRF（`mp_csrf` Cookie ↔ `X-Mini-CSRF` 头） | `internal/api/server.go:378 csrf()` | `TestMutationsRequireCSRF` |
 | 按 IP+用户名 的登录失败锁定，退避翻倍、上限 1 小时 | `internal/api/auth.go:82` key 组装、`internal/sec/ratelimit.go:62 Fail()` | `TestLoginLockoutAfterNFailures`、`TestRateLimiter` |
 | TLS fail-closed 的凭据规则 | `internal/api/auth.go:51 credentialsAllowed()` | `TestCredentialsRefusedWithoutTLSThenListeningOnRoutableAddress` |
 | 面板自签证书，SAN 跟随本机地址自动重签 | `internal/sec/tls.go:26 EnsureSelfSignedTLS()`、`cmd/minipanel/main.go:304 certHosts()` | **无自动化测试**（M0 测试缺口，见 `docs/技术选型与MVP规格.md` §8.4）；可复核 `make doctor` 的证书行与 `minipanel init` 的实际输出 |
@@ -54,22 +54,24 @@ M1 的账号与会话页、前端工程化（Vue 3 + Vite + Element Plus）、�
 | 审计日志：只追加、敏感参数入库前掩码、另存 `params_hash` | `internal/audit/audit.go:34 Write()`、`:80 List()`、`:113 Mask()` | `TestWriteListAndMasking`、`TestMaskCoversTheShapesCredentialsArriveIn`、`TestAuditRecordsMutationsWithMaskedSecrets` |
 | 能力位图与"禁用必须带理由"的契约 | `internal/platform/detect.go:18 newBase()`、`internal/platform/capabilities.go:202 Deny()` / `:208 Degrade()` / `:220 Allow()` | `TestDetectedCapabilitiesAreExplained`、`TestCapabilitiesAreSelfConsistent` |
 | 平台抽象（Linux / Windows / 其他，构建标签分文件） | `internal/platform/paths.go:10 Platform` | `TestPathsAreAbsoluteAndConsistent`、`make build-all` |
-| PHP 现场探测（M2 第一、二片）：版本、SAPI、pool/socket 路径，以及**这两个路径此刻的状态**；`php` 一项的状态由它改写 | `internal/php/php.go:119 DiscoverIn()`、`internal/platform/platform_linux.go:144`（探测→位图）、`:171` / `:174` 两处 `Degrade()`、`cmd/minipanel/php.go:30 phpProbe()`。路径与状态是两次独立的读：`internal/php/php.go:270 DirStatus()`、`:286 SocketStatus()`、`:323 listeningSocketPaths()`（读内核表 `/proc/net/unix` 的 Path 列，不拨号、不连 socket） | `internal/php/php_test.go` 13 个用例，其中 `TestStatesOfTheReportedPaths` 真的起一个 listener 再关掉、`TestSocketStatusUsesThePathColumnVerbatim` 用伪造的内核表钉住列解析；`TestDetectPHPFieldsMatchDiscovery`、`TestDetectPHPExtInstallFromEvidence`、`TestDetectPHPFromRootedHosts`（4 个子用例）、`TestPHPCtlPathsAreTargetsAndStatesAreReads`；CLI 侧 `TestDoctorPHPCtlLineIsTheInterface`、`TestDoctorPHPRootedHostNamesTheVersion`、`TestDoctorTellsStoppedFpmApartFromRunningFpm`（停了 / 活着两种内核状态）、`TestSocketListeningWithoutFpmModeIsAContradiction`。以上全部在 `make check-honesty` 里 |
+| PHP 现场探测（M2 第一、二片）：版本、SAPI、pool/socket 路径，以及**这两个路径此刻的状态**；`php` 一项的状态由它改写 | `internal/php/php.go:119 DiscoverIn()`、`internal/platform/platform_linux.go:288`（探测→位图）、`:315` / `:318` 两处 `Degrade()`、`cmd/minipanel/php.go:30 phpProbe()`。路径与状态是两次独立的读：`internal/php/php.go:270 DirStatus()`、`:286 SocketStatus()`、`:323 listeningSocketPaths()`（读内核表 `/proc/net/unix` 的 Path 列，不拨号、不连 socket） | `internal/php/php_test.go` 13 个用例，其中 `TestStatesOfTheReportedPaths` 真的起一个 listener 再关掉、`TestSocketStatusUsesThePathColumnVerbatim` 用伪造的内核表钉住列解析；`TestDetectPHPFieldsMatchDiscovery`、`TestDetectPHPExtInstallFromEvidence`、`TestDetectPHPFromRootedHosts`（4 个子用例）、`TestPHPCtlPathsAreTargetsAndStatesAreReads`；CLI 侧 `TestDoctorPHPCtlLineIsTheInterface`、`TestDoctorPHPRootedHostNamesTheVersion`、`TestDoctorTellsStoppedFpmApartFromRunningFpm`（停了 / 活着两种内核状态）、`TestSocketListeningWithoutFpmModeIsAContradiction`。以上全部在 `make check-honesty` 里 |
+| Nginx 站点写入（M2 第三片）：静态站点的创建、列出与删除；写配置 → `nginx -t` → 只有通过才 reload，任何一步失败整步回滚；只列/只删面板自己写出的 vhost | `internal/nginx/nginx.go:292 Create()`、`:425 Delete()`、`:221 List()`、`:475 render()`（先测试后生效与回滚都在这里）；平台缝 `internal/platform/platform_linux.go:90 Sites()`、`:82 WebServer()`；HTTP `internal/api/sites.go:46 handleSitesList()`、`:66 handleSiteCreate()`、`:103 handleSiteDelete()`；能力位图只在"nginx 配置目录可识别 + 进程是 root"时 `Allow`，否则 `Deny` / `Degrade` 并区分三种理由（没有 Web 服务器 / 只检测到 Apache / 非 root） | `internal/nginx` 9 个用例，其中 `TestCreateWritesConfigAndReloads` 钉住"先 `nginx -t` 再 reload"的命令顺序，`TestCreateRollsBackWhenTestFails`、`TestCreateRollsBackWhenReloadFails`、`TestDeleteRestoresWhenConfigTestFails` 钉住三条回滚路径，`TestListIgnoresForeignConfigs` 钉住"不列也不删别人的 vhost"；HTTP 侧 `internal/api/sites_test.go` 的 `TestSiteEndpointsCreateListDelete`、`TestSiteEndpointsRefuseWhenCapabilityIsUnavailable`、`TestSiteWritesAreAudited`；能力白名单从"只有 audit"改为"audit 无条件 + site/site_write 由 `siteWriterReady()` 现场问平台"（`internal/platform/capabilities_test.go:216`） |
 | 设置项白名单校验（IP 白名单 / 口令有效期 / basic_auth / trust_proxy） | `internal/api/system.go:78 editableSettings`、`:273 validateIPAllowlist()` | `TestSettingsAllowListAndValidation`、`TestIPAllowlistBlocksAuthenticatedSession` |
 | OpenAPI 规格与路由表一一对应 | `internal/api/server.go:92 routes()`、`internal/api/openapi/panel.yaml` | `TestOpenAPIContractMatchesRoutes`、`TestSpecDeclaresTheSecurityContract` |
 | 会话列表与撤销（单个 / 除本条以外全部） | `internal/api/sessions.go:40 handleSessionsList()`、`:81 handleSessionRevoke()`、`:120 handleSessionsRevokeOthers()` | `internal/api/m1_test.go` 的会话用例；行上的 id 是 `sessions.ref`，令牌不出响应 |
 | 自救对称表（§6.3）：`doctor` 的风险清单与「CLI 对照」页共用一次计算 | `internal/lockout/lockout.go:52 Risks()`、`internal/api/lockout.go:23 handleLockoutRisks()`、`cmd/minipanel/main.go:504`（doctor 取 `OnlyArmed`） | `TestDoctorAndThePageReadTheSameRows`（两处逐行比对）、`TestEveryLockoutRowNamesACommandThatExists`（每行的命令与 flag 都得真的存在）、`internal/api/lockout_test.go` 5 个用例 |
-| 前端：Vue 3 + Vite + Element Plus，七页（概览 / 本机能力 / 面板设置 / 会话 / CLI 对照 / 账号安全 / 审计日志） | 源码 `web/src/`，`make web` → 单个 `webui/dist/index.html`，`webui/embed.go:15 go:embed` | `make check-ui`（产物自包含、能力 key 全覆盖、规格端点都有出口）+ 上述接口用例 |
+| 前端：Vue 3 + Vite + Element Plus，八页（概览 / 网站 / 本机能力 / 面板设置 / 会话 / CLI 对照 / 账号安全 / 审计日志） | 源码 `web/src/`（站点页 `web/src/views/SitesView.vue`），`make web` → 单个 `webui/dist/index.html`，`webui/embed.go:15 go:embed` | `make check-ui`（产物自包含、能力 key 全覆盖、规格端点都有出口）+ 上述接口用例 |
 | 文档自身的诚实：本文与 `docs/` 里的 `文件:行` 指针、点名的测试与子命令必须对得上代码 | `internal/docsync/citation_test.go` 3 个用例 | `make check-docs`；本轮实测条数见下方"如何验证" |
 
-**还没有做的（M0 明确不交付）**：站点、Nginx/Apache 配置、PHP 多版本与扩展、站点证书签发、
+**还没有做的（M0 明确不交付）**：PHP 版本绑定与扩展安装、站点证书签发、Apache 站点写入、
 数据库、备份、计划任务、防火墙规则写入、服务启停、Web 终端、监控图表、文件权限管理、
-SSH/RDP 管理页。这些在 UI 上不是"点击后无反应"，而是**灰掉并显示理由**，理由来自
+SSH/RDP 管理页。静态站点创建已随 M2 第三片交付（见上表），但它只覆盖 nginx + Linux + 静态页；
+PHP 绑站、证书与 Apache 仍没有写入路径。这些在 UI 上不是"点击后无反应"，而是**灰掉并显示理由**，理由来自
 `GET /api/v1/capabilities` 的 `features[key].reason`（例如"数据库 Provider 在 M3 交付"）。
 清单与理由的起点是 `internal/platform/detect.go:50-66` 的拒绝表，一共 **16 项，每一项都自带
 一句理由**；平台实现可以按现场证据改写其中的状态，但不能改出"没理由"这一档——
 `capabilities.go` 的 `set()` 与测试会拦下任何"关掉了却没理由"的项。反方向也拦：
-`capabilities_test.go:174` 的白名单声明**这个版本的 `features` 里只允许 `audit` 为 `available`**，
+`capabilities_test.go:179` 的白名单声明**这个版本的 `features` 里只允许 `audit` 为 `available`**，
 所以"探测到本机有 ufw / 有 PHP 二进制"绝不会被报成一项已交付功能
 （见下文能力位图一节与 `docs/技术选型与MVP规格.md` §8）。
 M2 的第一处改动在这里：`php` 一项不再照抄拒绝表，而是由 `internal/php` 的现场探测改写——
@@ -109,7 +111,7 @@ init 结束会打印这样一段（`cmd/minipanel/main.go` 的 `bannerLines()`�
 账号（走 `POST /api/v1/setup`，只在账号表为空时可用）。
 
 本机调试不必 root、也不必系统路径：`MINI_PANEL_ROOT` 会把 `/etc`、`/var` 前缀整体挪到一个
-目录下（`internal/platform/platform_linux.go:34-39`）；`MINI_PANEL_DEBUG=1` 把日志级别降到
+目录下（`internal/platform/platform_linux.go:37-42`）；`MINI_PANEL_DEBUG=1` 把日志级别降到
 Debug（`cmd/minipanel/main.go:165 newLogger()`）——**注意目前非测试代码里没有任何 `.Debug()`
 调用点**（`grep -rn "\.Debug(" --include='*.go' internal cmd | grep -v _test` 为空），所以今天
 打开它不会多出任何输出，它是给后续埋点留的口子，不是"更多信息"开关：
@@ -175,7 +177,7 @@ HTTP 测试永远看不见的缺陷——`minipanel init --port 29095 --bind 127
 服务端，并且是拒绝而不是降级。
 
 **2. 双提交 CSRF。** 非 GET/HEAD/OPTIONS 的请求必须带 `X-Mini-CSRF` 头，其值与服务端下发的
-`mp_csrf` Cookie 常量时间比较（`internal/api/server.go:371 csrf()`，Cookie 与头名集中在 `:41-46` 的常量块）。
+`mp_csrf` Cookie 常量时间比较（`internal/api/server.go:378 csrf()`，Cookie 与头名集中在 `:41-46` 的常量块）。
 `mp_csrf` 故意可被 JS 读取（它就是双提交的另一半，见 `internal/api/auth.go:254 setSessionCookies()`
 的注释），`mp_session` 是 HttpOnly + SameSite=Strict。
 *为什么*：SameSite 已经是主防线，双提交是纵深防御，同时给前端一个稳定的、非会话级的令牌可用于
@@ -192,35 +194,35 @@ HTTP 测试永远看不见的缺陷——`minipanel init --port 29095 --bind 127
 
 **4. 安全入口是未认证探测的伪装，不是鉴权层。** 配置入口后，未登录的请求访问入口之外的任何
 路径，都按 `panel.unauth_status` 应答（400/401/403/404，或 444 直接断开连接）。应答体是一张
-**中性的 HTML 错误页**，只有状态码文本，不含产品名与版本（`internal/api/server.go:268 disguise()`）。
+**中性的 HTML 错误页**，只有状态码文本，不含产品名与版本（`internal/api/server.go:275 disguise()`）。
 *为什么不是 `http.Error`*：Go 默认那 10 字节 `text/plain` 的 "404 Not Found" 本身就是运行环境
 指纹，而这条响应的全部意义是"探测者什么也学不到"；它同样**不伪装成 nginx 的错误页**——这个
 进程就是 web server，给一张普通 404 是事实，冒充别人的错误页在事故响应时误导运维的程度不亚于
 误导扫描器。`/healthz` 例外，监控探针不能被藏起来。直接 POST `/api/v1/login` 而没先访问过入口，
 同样按伪装应答——判断依据是访问入口时种下的 `mp_entrance` 标记 Cookie 与服务端配置值的常量时间
-比较（`internal/api/server.go:253 entranceMarked()`）。
+比较（`internal/api/server.go:260 entranceMarked()`）。
 
-**持有合法 `mp_session` 之后，接口与静态资源在入口之外照样能用**（`internal/api/server.go:205`
-的 `hasSession(r)` 分支，`hasSession` 在 `:248`）。这是**有意的**设计，不是遗漏：SPA 必须能在
+**持有合法 `mp_session` 之后，接口与静态资源在入口之外照样能用**（`internal/api/server.go:212`
+的 `hasSession(r)` 分支，`hasSession` 在 `:255`）。这是**有意的**设计，不是遗漏：SPA 必须能在
 导航、刷新、落到深链时继续工作，把这些请求统统改写成一个魔法路径换来的是一个勾，代价是一个
 不能用的界面。M1 收紧的是**页面导航**这一类：带着会话、但没有 `mp_entrance` 标记的 HTML 导航
-会被 302 送回入口一次（`internal/api/server.go:213` 的 guided hop，判定条件
+会被 302 送回入口一次（`internal/api/server.go:220` 的 guided hop，判定条件
 `isPageNavigation && !entranceMarked`），标记因此只在一次导航里有效。因此：
 
 * 入口**不能缓解 XSS，也不能缓解 Cookie 泄露**。拿到会话就等于拿到整个面板；任何"安全入口保护
   登录后的面板"的说法都是错的。这条收紧的目的不是多加一道鉴权，而是把"攻击者拿到会话后还能复用
   哪个 URL"收回到一次导航上。
-* 穿过闸门之后真正的判定只剩 `requireSession`（`internal/api/server.go:294`）——伪造一个像样的
+* 穿过闸门之后真正的判定只剩 `requireSession`（`internal/api/server.go:301`）——伪造一个像样的
   会话值能过闸门，但过不了会话查表，仍然拿到伪装响应。
 
 *为什么必须说清楚*：真正的访问控制是**监听地址 + 会话令牌与有效期 + 可选 IP 白名单**
-（`panel.ip_allowlist`，`internal/api/server.go:346 ipAllowed()`）+ CSRF + 登录锁定。入口路径写进
+（`panel.ip_allowlist`，`internal/api/server.go:353 ipAllowed()`）+ CSRF + 登录锁定。入口路径写进
 panel.json（0600）且被 `.gitignore` 排除，`GET /api/v1/settings` 也刻意不回显它的值（只说
 "已启用"），要看真值请用 `minipanel doctor`——伪装只在没人拿到配置文件的前提下成立。
 
 **5. 审计日志只追加。** `internal/audit` 包里**不存在删除或清空的方法**（`audit.go:78-80` 的注释
 与 `Write`/`List` 两个导出方法就是全部），接口面上也没有任何 `DELETE /audit`；每条写操作
-（成功或失败）都落一行（`internal/api/server.go:389 auditWrites()`）。口令、`token`、`key`、`pem`、
+（成功或失败）都落一行（`internal/api/server.go:396 auditWrites()`）。口令、`token`、`key`、`pem`、
 `cookie` 等敏感形状的字段入库前掩码成 `***`（`internal/audit/audit.go:113 Mask()`），同时保存一份
 对**未掩码原值**的 SHA-256 `params_hash`（`audit.go:48-56`）。
 *为什么*：能被被审计者抹掉的审计日志是装饰品；而 `params_hash` 让事后比对"这两次请求是不是同一个
@@ -246,10 +248,10 @@ panel.json（0600）且被 `.gitignore` 排除，`GET /api/v1/settings` 也刻�
 
 **9. 其它基线。** 响应头固定 `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、
 `Referrer-Policy: no-referrer`、`Cache-Control: no-store`，TLS 下追加 HSTS
-（`internal/api/server.go:160 securityHeaders()`）；`MinVersion: TLS 1.2`（`main.go:246`）。
+（`internal/api/server.go:167 securityHeaders()`）；`MinVersion: TLS 1.2`（`main.go:246`）。
 `X-Forwarded-For` 默认不信任，只有 `panel.trust_proxy=true` 时才解析，且启动时会打警告——
 开了它，扫描器就能伪造来源地址绕过按 IP 的锁定（`internal/api/server.go:54 var trustProxy`、
-`:466 clientIP()`）。请求体与审计缓冲都有上限（1 MiB / 8 KiB，`server.go:497`、`:401`），
+`:473 clientIP()`）。请求体与审计缓冲都有上限（1 MiB / 8 KiB，`server.go:504`、`:408`），
 没有全局 `WriteTimeout`（M4 的终端 WebSocket 会被它切断），只有
 `ReadHeaderTimeout`/`ReadTimeout`/`IdleTimeout`（`main.go:240-242`）。
 
@@ -273,7 +275,7 @@ panel.json（0600）且被 `.gitignore` 排除，`GET /api/v1/settings` 也刻�
 
 * `TestDetectedCapabilitiesAreExplained`（`internal/platform/capabilities_test.go:110`）——
   对当前主机真实探测，任何非 `available` 却没理由即失败；并且用**白名单**断言反向收紧
-  （`capabilities_test.go:174 implemented := map[string]bool{FeatAudit: true}`）：`features` 里
+  （`capabilities_test.go:179 implemented := map[string]bool{FeatAudit: true}`）：`features` 里
   出现白名单之外的任何 `available` 即失败，白名单里的项没报成 `available` 同样失败。也就是说本版本
   **只有 `audit` 算"已交付功能"**；哪天平台探测（`Detect`）因为"看到了某个机制"就 `Allow` 一项
   还没有实现的特性，测试会直接红，这条纪律写在 `docs/技术选型与MVP规格.md` §8。
@@ -296,10 +298,10 @@ panel.json（0600）且被 `.gitignore` 排除，`GET /api/v1/settings` 也刻�
 它属于 `newBase()` 而不属于任何平台实现），
 `features` 中唯一为 `available` 的是 `detect.go:74` 的 `audit`。探测到的事实（装了 ufw、跑着 sshd、
 有 nginx）只写进 `Capabilities` 的描述字段，绝不成了一项能力。
-唯一一处由证据改写的**状态**是 `php`：`internal/platform/platform_linux.go:144` 里的
+唯一一处由证据改写的**状态**是 `php`：`internal/platform/platform_linux.go:288` 里的
 `php.Discover()` 是本机现场探测，装了运行时却没有 fpm/cgi 后端时落到
-`:171` 的 `Degrade(FeatPHP, …)`——这是本项目第一处生产代码里的 `Degrade()` 调用；
-什么都没装时走 `:165` 的 `Deny(FeatPHP, …)`。理由里的后端名来自
+`:315` 的 `Degrade(FeatPHP, …)`——这是本项目第一处生产代码里的 `Degrade()` 调用；
+什么都没装时走 `:309` 的 `Deny(FeatPHP, …)`。理由里的后端名来自
 `internal/php/php.go:36` 起的 SAPI 常量表，测试在 `internal/php/php_test.go`：
 13 个用例跑假 root 树（`TestCLITreeWithoutFPM`、`TestStrayConfigDirIsNotARuntime`、
 `TestDefaultBinaryOnlyClaimsItsOwnVersion` 是其中三条），`TestLiveHostIsSelfConsistent`
@@ -314,8 +316,8 @@ panel.json（0600）且被 `.gitignore` 排除，`GET /api/v1/settings` 也刻�
 矛盾时 doctor 打印一行提示。
 Linux 上 `ufw`/`firewall-cmd`/`nft` 都没装与装了但没有写入 Provider，是**两句不同的理由**
 ——原文分别是 `"未检测到 ufw / firewall-cmd / nft 任一后端，本机没有可管理的防火墙"`
-（`internal/platform/platform_linux.go:108`）与 `"当前版本只读展示后端状态；规则写入 Provider 在 M4 交付"`
-（`:110`），`:104-106` 的注释写的就是这条区分："no firewall software on this host" 与
+（`internal/platform/platform_linux.go:252`）与 `"当前版本只读展示后端状态；规则写入 Provider 在 M4 交付"`
+（`:254`），`:248-250` 的注释写的就是这条区分："no firewall software on this host" 与
 "firewall present, write provider not shipped yet" 必须由 UI 区分开。Windows 的差异同样体现在位图里：PHP 只有 `php-cgi.exe`
 的 FastCGI 进程池（没有 php-fpm）、扩展只能装与 PHP 版本 × TS/NTS × VC 运行库 × 位数完全匹配的
 预编译 DLL、reload 只有 `restart_only`、防火墙是 WFP、计划任务走 `schtasks`
@@ -411,15 +413,15 @@ darwin/arm64、windows/amd64、freebsd/amd64 是**重点目标**（四个 OS 都
 | 命令 | 实测结果 |
 | --- | --- |
 | `make vet` | `go vet ./...` 无输出 |
-| `make test` | **全绿（10 个包有测试，本轮 `-count=1` 逐包计时）**：`internal/api` 21.1s、`cmd/minipanel` 3.2s、`internal/sec` 1.1s、`internal/store` 0.54s、`internal/docsync` 0.72s、`internal/lockout` 0.77s、`internal/php` 0.03s、`internal/audit` 0.34s、`internal/platform` 0.08s、`internal/config` 0.003s；`webui` 与 `internal/build` 无测试文件（零依赖单文件前端，它的契约由后端返回的字段名约束）。`cmd/minipanel` 的 17 个用例分布在 `main_test.go`（11）、`lockout_test.go`（2）与 `php_test.go`（4），见上文"CLI 子命令"。曾经约 1/5 概率飘红的入口字母表矛盾**已由源码侧修掉**：`go test -count=60`/`-count=200 -run TestEntranceShape ./internal/sec/` 本轮都 ok；历史、原因与防回归口径见 `docs/技术选型与MVP规格.md` §8.3 |
+| `make test` | **全绿（11 个包有测试，本轮 `-count=1` 逐包计时）**：`internal/api` 25.8s、`cmd/minipanel` 3.3s、`internal/sec` 1.1s、`internal/store` 0.45s、`internal/docsync` 0.69s、`internal/lockout` 0.70s、`internal/nginx` 0.01s、`internal/php` 0.03s、`internal/audit` 0.23s、`internal/platform` 0.09s、`internal/config` 0.003s；`webui` 与 `internal/build` 无测试文件（零依赖单文件前端，它的契约由后端返回的字段名约束）。`cmd/minipanel` 的 17 个用例分布在 `main_test.go`（11）、`lockout_test.go`（2）与 `php_test.go`（4），见上文"CLI 子命令"。曾经约 1/5 概率飘红的入口字母表矛盾**已由源码侧修掉**：`go test -count=60`/`-count=200 -run TestEntranceShape ./internal/sec/` 本轮都 ok；历史、原因与防回归口径见 `docs/技术选型与MVP规格.md` §8.3 |
 | `make fmt` | `gofmt -s -l .` 执行前后都为空，且没有任何 `.go` 的 mtime 变化——**fmt 不产生 diff 是预期状态** |
 | `make check-contract` | `ok … internal/api 0.004s`（`TestOpenAPIContractMatchesRoutes` + `TestSpecDeclaresTheSecurityContract`） |
 | `make check-honesty` | 四条 `go test`，本轮全部 `ok`：`internal/platform`（`TestDetectedCapabilitiesAreExplained`、`TestCapabilityStatesAreSymmetric`、`TestPathsAreAbsoluteAndConsistent`，M2 第一片再加 `TestDetectPHPFieldsMatchDiscovery`、`TestDetectPHPExtInstallFromEvidence`、`TestDetectPHPFromRootedHosts` 及其四个子用例，第二片再加 `TestPHPCtlPathsAreTargetsAndStatesAreReads`）、`internal/php`（`TestStatesOfTheReportedPaths` 现场 bind 一个 unix socket 再关掉、`TestSocketStatusUsesThePathColumnVerbatim` 用伪造的 `/proc/net/unix` 钉列解析）、`cmd/minipanel`（`-run 'TestDoctor\|TestSocketListeningWithoutFpmModeIsAContradiction'` 实测跑 5 条：`TestDoctorAndThePageReadTheSameRows` 与 PHP 的 4 条）、`internal/api`（`TestCapabilitiesAreSelfConsistent`，同一规则从 HTTP 面再述一遍）。PHP 这些归进这道门禁而不是普通单测，是因为它们断言的正是"位图不许抄表、必须由现场证据得出"，以及"路径与路径的状态不许说成同一件事" |
 | `make check-ui` | `ok … internal/api 0.083s`（`TestUIBundleIsASingleSelfContainedFile`：产物只有一个文件、没有入口外的资源引用；`TestUIDeclaresEveryCapabilityKey`：17 个能力 key 全在前端字典里；`TestUIReachesEveryDocumentedEndpoint`：规格里每个端点都有页面调用它） |
-| `make check-docs` | `ok … internal/docsync 0.53s`——三个用例：`TestCitationsPointInsideRealFiles` 核对每一个 `文件:行` 指针所指的文件存在、行号在文件内、区间没写反，并且**不接受指针落在空行或只剩 `}` 的行上**；`TestAnchoredCitationsSayWhatTheyClaim` 对写了符号名的指针确认那个符号确实就在所指行上（找不到就打印它真正在第几行）；`TestNamedTestsAndCommandsExist` 要求文档点名的 `TestXxx` 与 README 点名的 `minipanel <子命令>` 真的存在。本轮实测：**448 个行号指针 0 个越界、149 个带符号锚点的指针全部落在所指行上、67 个标识符与 8 个子命令全部存在**；它自愿放弃的部分（前一行已收尾、无法判定归属的裸 `:行`）连在哪一行都打印出来，本轮 0 处。覆盖面不会悄悄缩水：任何一个用例核对数为 0 就直接 `t.Fatal`。它第一轮跑就抓到 4 处真实文档说谎——3 个起点大于终点的反向区间，和 1 个仓库里从来没有过的测试名（三份文档都把它当作 check-honesty 的一条引用；真实用例是 `TestCapabilityStatesAreSymmetric`）；补上"空行/收尾括号不算落点""裸指针可继承上一行的文件（附录里的条目是折着写的）"之后又抓到 15 处行号漂移，逐条改掉，并把 `docs/技术选型与MVP规格.md` 里"main_test.go 277 行、8 个用例"这种同样过期的计数改成实测的 489 行、11 个用例。M2 第二片又红了一次，而且是同一类：`internal/platform/platform_linux.go` 里 `Versions()` 上方那段注释改写后整个文件后半部分平移 7 行，`cmd/minipanel/main.go` 的 doctor JSON 加了 2 个 key 之后 600 行以后平移 6 行，于是四份文档里数十处 `文件:行` 指针集体失准，另有一条跨文档指针（`功能设计.md` 引 `里程碑.md` 的未排期段）落在新空行上。逐条重新测行号后改掉，没有按偏移量批量加，因为"整个文件平移同一个数"这件事在某些位置并不成立：同一次改动里，`internal/platform/platform_linux.go` 的接口断言与 `rooted()` 那些行完全没动，从 `Versions()` 开始往下才平移 7 行。防误报规则写在 `notALineRef`：`0.0.0.0:29080`、`https://IP:29080` 里的冒号是端口，不是行号 |
-| 真实浏览器跑七个页面（puppeteer + chrome，脚本不入仓库） | **25/25 断言通过**——这一次运行是在 M2 第一片重建 `webui/dist` 之后做的；**第二片没有动前端，也没有动任何 `reason` 文案**（`git status webui/ web/` 为空，`internal/platform` 只有注释行改动），所以本片不重跑它，能对上表的仍是 `make check-ui` 那三条。导航 7 项、KPI 8 格、能力表 17 行且 16 个非可用项全部带理由（其中 PHP 是 `部分可用`，reason 与"复查"一行都画出来了；机制表里那行 PHP 写的是"未检测到 fpm / cgi · 已检测到 8.3，但没有能执行站点的 fpm/cgi 后端"）、设置表 10 行带来源列、CLI 对照 9 行且"概要说几项就标几项"（当时 2 项）、入口路径 `/let-me-in` 没有出现在 DOM 里、会话页两条在用→撤销其它全部后剩 1 条且当前会话仍活着、令牌未泄漏到页面、审计留痕、退出后回到登录页、入口外路径不渲染面板、除故意的 `/api/v1/session 404` 外没有任何 4xx |
-| `make build && ./bin/minipanel version` | `Mini Panel 0.1.0-m0 (commit 7ea7408, built 2026-11-11T04:23:09Z)`；产物 13,557,922 字节。commit / built 由 Makefile 从 `git rev-parse --short HEAD`（取不到就写 `none`，`Makefile:21`）与 UTC 当前时间（`Makefile:22`）注入，`Makefile:24-27` 的 `-ldflags -X $(MODULE)/internal/build.{Version,Commit,BuildDate}` 落到 `internal/build`，**每次构建都会变**，不是可以对表的常量 |
-| `make build-all` | 8 个产物全部产出，12.45–13.63 MB（`-s -w` + ldflags），末行打印 `build-all OK`；`CGO_ENABLED=0` 见 `go version -m bin/minipanel` |
+| `make check-docs` | `ok … internal/docsync 0.53s`——三个用例：`TestCitationsPointInsideRealFiles` 核对每一个 `文件:行` 指针所指的文件存在、行号在文件内、区间没写反，并且**不接受指针落在空行或只剩 `}` 的行上**；`TestAnchoredCitationsSayWhatTheyClaim` 对写了符号名的指针确认那个符号确实就在所指行上（找不到就打印它真正在第几行）；`TestNamedTestsAndCommandsExist` 要求文档点名的 `TestXxx` 与 README 点名的 `minipanel <子命令>` 真的存在。本轮实测：**469 个行号指针 0 个越界、168 个带符号锚点的指针全部落在所指行上、75 个标识符与 8 个子命令全部存在**；它自愿放弃的部分（前一行已收尾、无法判定归属的裸 `:行`）连在哪一行都打印出来，本轮 0 处。覆盖面不会悄悄缩水：任何一个用例核对数为 0 就直接 `t.Fatal`。它第一轮跑就抓到 4 处真实文档说谎——3 个起点大于终点的反向区间，和 1 个仓库里从来没有过的测试名（三份文档都把它当作 check-honesty 的一条引用；真实用例是 `TestCapabilityStatesAreSymmetric`）；补上"空行/收尾括号不算落点""裸指针可继承上一行的文件（附录里的条目是折着写的）"之后又抓到 15 处行号漂移，逐条改掉，并把 `docs/技术选型与MVP规格.md` 里"main_test.go 277 行、8 个用例"这种同样过期的计数改成实测的 489 行、11 个用例。M2 第二片又红了一次，而且是同一类：`internal/platform/platform_linux.go` 里 `Versions()` 上方那段注释改写后整个文件后半部分平移 7 行，`cmd/minipanel/main.go` 的 doctor JSON 加了 2 个 key 之后 600 行以后平移 6 行，于是四份文档里数十处 `文件:行` 指针集体失准，另有一条跨文档指针（`功能设计.md` 引 `里程碑.md` 的未排期段）落在新空行上。逐条重新测行号后改掉，没有按偏移量批量加，因为"整个文件平移同一个数"这件事在某些位置并不成立：同一次改动里，`internal/platform/platform_linux.go` 的接口断言与 `rooted()` 那些行完全没动，从 `Versions()` 开始往下才平移 7 行。防误报规则写在 `notALineRef`：`0.0.0.0:29080`、`https://IP:29080` 里的冒号是端口，不是行号 |
+| 真实浏览器跑八个页面（本轮 Playwright + 本机 chromium，脚本不入仓库） | **21/21 断言通过**——M2 第三片改了前端（导航从 7 项变 8 项、新增「网站」页），所以这一轮必须重跑；上一轮 `25/25` 是七页版本（M2 第一片后）的记录，与这一轮的页面清单不可比。本轮覆盖：首次访问显示初始化页、导航 8 项且顺序与 `VIEWS` 一致、八个页面各自渲染标题、能力页没有出现"理由与状态矛盾"缺陷提示、本机无 nginx 时网站页只显示不可用理由且没有可点的"新建"按钮、CLI 对照页列出安全入口与管理员口令两条 armed 风险、会话页标出当前会话、审计页有本轮记录、入口路径 `/let-me-in` 没有出现在 DOM 里、刷新后仍保持登录、退出后回到登录页。控制台唯一错误与唯一的非 2xx 都是登录前故意打 `/api/v1/session` 得到的 404，除此之外没有 4xx |
+| `make build && ./bin/minipanel version` | `Mini Panel 0.1.0-m0 (commit 33a06d9, built 2026-11-11T05:17:38Z)`；产物 13,627,554 字节。commit / built 由 Makefile 从 `git rev-parse --short HEAD`（取不到就写 `none`，`Makefile:21`）与 UTC 当前时间（`Makefile:22`）注入，`Makefile:24-27` 的 `-ldflags -X $(MODULE)/internal/build.{Version,Commit,BuildDate}` 落到 `internal/build`，**每次构建都会变**，不是可以对表的常量 |
+| `make build-all` | 8 个产物全部产出，12.52–13.65 MB（`-s -w` + ldflags），末行打印 `build-all OK`；`CGO_ENABLED=0` 见 `go version -m bin/minipanel` |
 | `make doctor` | 打印平台、路径（`MINI_PANEL_ROOT=./data`，不动系统路径）、**schema v3**、用户/会话/审计计数、数据库大小、证书、监听与未认证响应、**锁死风险**（只列 armed 行）与**未开放能力及理由**（`backup(备份任务与归档管理在 M6 交付)`、`cron(计划任务调度器在 M6 交付)` 与 `internal/platform/detect.go:57-58` 原文一致）。这一行列出的是**全部非 available 的 16 条**：15 条 `unavailable` 来自拒绝表，1 条 `degraded` 是 `php`，理由由 `internal/php` 现场探测拼出来而不是表里抄的。本轮在一个"入口已启用 + 一个管理员账号 + TLS 关闭"的实例上实测：armed 恰好两行（安全入口、管理员口令），与「CLI 对照」页标 `当前能` 的两行逐字相同 |
 | 8 个组合逐条 `CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build`（linux/darwin/windows/freebsd × amd64/arm64） | **8/8 退出码 0**（本轮逐个跑，产物 17.7–19.5 MB，未加 `-s -w`；带 ldflags 的 `make build-all` 产物是 12.45–13.63 MB） |
 | `GOOS=linux\|windows\|darwin\|freebsd go vet ./internal/...` | 四个平台全部退出码 0、无输出 |
@@ -459,7 +461,7 @@ darwin/arm64、windows/amd64、freebsd/amd64 是**重点目标**（四个 OS 都
 | **M4 主机管理** | 防火墙规则写入、服务启停、Web 终端与录像审计、监控采集与图表、文件权限（随文件管理器）、SSH/RDP 访问管理页 | "防火墙规则写入在 M4 交付"、"服务启停在 M4 交付"、"Web 终端与录像审计在 M4 交付"、"监控采集与图表在 M4 交付"、"文件权限（属主/模式）管理随文件管理器在 M4 交付"、"SSH/RDP 访问管理页在 M4 交付" |
 | **M5 Windows 完整支持** | 不引入新功能：把散在 M0（探测/路径/位图）、M2（php-cgi 池、预编译 DLL）、M4（WFP 写入、SCM 启停、远程访问页）的 Windows 部分收敛成受支持的 GA——Windows 上的安装/升级/回滚、M2+M4 全部功能在 Windows CI 有断言、伪装与入口在 IIS-less 部署下可用 | 代码里**没有**以 "M5" 为理由的 Deny 文案（`grep -rn "M5" --include='*.go' .` 为空），M5 是项目定位；已存在的 Windows 约束逐条在 `internal/platform/platform_windows.go:45-101`。完成定义见 `docs/里程碑.md` M5 一节 |
 | **M6 计划任务与备份** | 计划任务调度器（内置 + `crontab`/`taskschd`）、备份任务与归档管理 | "计划任务调度器在 M6 交付"（`internal/platform/detect.go:58`）、"备份任务与归档管理在 M6 交付"（`:57`） |
-| 未排期（不占里程碑编号） | 子账号：把 `SessionUser` 的具体用户名变成富主体里的一个字段 | `internal/api/server.go:450` 的注释写着 "M6 (sub-accounts)"，但代码里既没有对应的 feature 名也没有 Deny 理由，所以本文档把它记为**未排期**、不占用 M6 编号（M6 只装调度器与备份这两件已有原文的事）；要正式排期，先在位图里给它一个条目 |
+| 未排期（不占里程碑编号） | 子账号：把 `SessionUser` 的具体用户名变成富主体里的一个字段 | `internal/api/server.go:457` 的注释写着 "M6 (sub-accounts)"，但代码里既没有对应的 feature 名也没有 Deny 理由，所以本文档把它记为**未排期**、不占用 M6 编号（M6 只装调度器与备份这两件已有原文的事）；要正式排期，先在位图里给它一个条目 |
 
 > Windows 的工作是**分布式的**：M0 就写进了探测/路径/能力位图，写操作分别随 M2（php-cgi 池、
 > 预编译 DLL）与 M4（WFP 防火墙 Provider、SCM 服务启停、远程访问页）交付；**M5 不是"再补一批

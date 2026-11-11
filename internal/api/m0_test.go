@@ -44,6 +44,22 @@ type panel struct {
 
 func newPanel(t *testing.T, tweak func(*config.Config)) *panel {
 	t.Helper()
+	plat := platform.Current()
+	caps, err := plat.Detect()
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	return newPanelWith(t, tweak, plat, caps)
+}
+
+// newPanelWith is the seam the M2 site tests use: the same harness and the same
+// login path as every other API test, with a platform whose SiteProvider is a
+// fake. Keeping the harness identical is the point — the site endpoints must
+// behave like every other write (entrance, session, CSRF, audit), not like a
+// special case wired up only for tests.
+func newPanelWith(t *testing.T, tweak func(*config.Config), plat platform.Platform,
+	caps *platform.Capabilities) *panel {
+	t.Helper()
 	dir := t.TempDir()
 	cfg := &config.Config{
 		Bind: "127.0.0.1", Port: 29080, Entrance: testEntrance, TLS: false,
@@ -59,11 +75,6 @@ func newPanel(t *testing.T, tweak func(*config.Config)) *panel {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	plat := platform.Current()
-	caps, err := plat.Detect()
-	if err != nil {
-		t.Fatalf("detect: %v", err)
-	}
 	srv := New(cfg, st, plat, caps, audit.New(st),
 		sec.NewLimiter(cfg.LoginLimit, time.Minute),
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
