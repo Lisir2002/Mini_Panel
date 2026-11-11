@@ -436,6 +436,10 @@ func renderServer(s Site, tlsOn bool) string {
 		b.WriteString("        " + rewriteLocation(s) + "\n")
 	}
 	b.WriteString("    }\n")
+	if s.Hotlink {
+		b.WriteString("\n")
+		b.WriteString(hotlinkLocationBody(s))
+	}
 	if s.PHPVersion != "" {
 		// try_files keeps a missing script from reaching php-fpm as a request
 		// whose SCRIPT_FILENAME points at a file that does not exist. fastcgi_params

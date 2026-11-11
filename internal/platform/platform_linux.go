@@ -230,6 +230,17 @@ func (l linuxSites) SetRedirect(name, target string, code int, keepPath bool) (S
 	return toSiteInfo(s), nil
 }
 
+// SetHotlink toggles the fixed Referer check. The nginx writer owns the
+// extension list and the proxy/redirect exclusion; this adapter only translates
+// errors and the returned row.
+func (l linuxSites) SetHotlink(name string, enabled, allowEmpty bool) (SiteInfo, error) {
+	s, err := l.m.SetHotlink(name, enabled, allowEmpty)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
 // resolvePHPBinding is the only version→socket translation. It returns empty
 // strings for "static site" and a typed error for anything discovery did not
 // prove, so the API can say "this host does not have PHP 8.2 (fpm)" instead of
@@ -399,7 +410,8 @@ func toSiteInfo(s nginx.Site) SiteInfo {
 		ProxyTarget: s.ProxyTarget, ProxyWebSocket: s.ProxyWebSocket,
 		RedirectTarget: s.RedirectTarget, RedirectCode: s.RedirectCode,
 		RedirectKeepPath: s.RedirectKeepPath,
-		ConfigPath:       s.ConfigPath, Enabled: s.Enabled, CreatedAt: s.CreatedAt,
+		Hotlink:          s.Hotlink, HotlinkAllowEmpty: s.HotlinkAllowEmpty,
+		ConfigPath: s.ConfigPath, Enabled: s.Enabled, CreatedAt: s.CreatedAt,
 		PHPVersion: s.PHPVersion, PHPSocket: s.PHPSocket,
 	}
 	if s.PHPVersion != "" {

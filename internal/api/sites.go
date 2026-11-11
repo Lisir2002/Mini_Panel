@@ -118,6 +118,20 @@ func (s *Server) siteRedirectManager() (platform.SiteRedirectManager, string) {
 	return rm, ""
 }
 
+// siteHotlinkManager is the optional hotlink-protection interface. A provider
+// without it returns 403 capability with the reason below.
+func (s *Server) siteHotlinkManager() (platform.SiteHotlinkManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	hm, ok := m.(platform.SiteHotlinkManager)
+	if !ok || hm == nil {
+		return nil, "该平台的站点 Provider 没有实现防盗链"
+	}
+	return hm, ""
+}
+
 // handleSitesList is GET /api/v1/sites. Only files the panel wrote itself are
 // listed; a hand-written vhost in the same directory is somebody else's
 // configuration and is not reported as a panel site.
@@ -351,6 +365,39 @@ func (s *Server) handleSiteRedirect(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_redirect", "更新整站跳转失败："+err.Error())
+	}
+}
+
+// handleSiteHotlink is PUT /api/v1/sites/{name}/hotlink. The body is
+// {"enabled":true,"allow_empty":true}; enabled=false disables the fixed Referer
+// check. The provider refuses to enable it while a proxy or redirect owns the
+// site, then writes through test-before-reload.
+func (s *Server) handleSiteHotlink(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteHotlinkManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Enabled    bool `json:"enabled"`
+		AllowEmpty bool `json:"allow_empty"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetHotlink(chiParam(r, "name"), body.Enabled, body.AllowEmpty)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_hotlink", "更新防盗链失败："+err.Error())
 	}
 }
 

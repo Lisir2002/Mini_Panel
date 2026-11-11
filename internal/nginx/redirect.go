@@ -72,6 +72,9 @@ func (m *Manager) SetRedirect(name, target string, code int, keepPath bool) (Sit
 		if site.ProxyTarget != "" {
 			return Site{}, fmt.Errorf("%w：站点正在使用反向代理，location / 已由代理接管；先清除代理再启用整站跳转", ErrInvalid)
 		}
+		if site.Hotlink {
+			return Site{}, fmt.Errorf("%w：站点已启用防盗链，静态资源由本机处理；先关闭防盗链再启用整站跳转", ErrInvalid)
+		}
 	}
 	site.RedirectTarget, site.RedirectCode, site.RedirectKeepPath = target, code, keepPath
 	if err := m.applyConfig(site.ConfigPath, render(site)); err != nil {

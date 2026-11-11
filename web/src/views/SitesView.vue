@@ -3,8 +3,8 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七、八、九、十片：静态站点、站点证书、PHP 版本绑定、基础设置编辑、
-// 伪静态模板、反向代理与整站跳转。
+// M2 第三、四、六、七、八、九、十、十一：静态站点、站点证书、PHP 版本绑定、基础设置编辑、
+// 伪静态模板、反向代理、整站跳转与防盗链。
 // 这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
@@ -19,6 +19,9 @@ import { store } from "../store";
 //     页面在两边对话框里都提示先清空一边，后端也会拒绝并把文件保持原样。
 //   * 整站跳转只接受一个绝对 URL、301/302 与"保留路径"开关；配置是固定的一行 return。
 //     它同样占用 location /，与伪静态、反向代理三向互斥，页面和对话框都按同一句话提示。
+//   * 防盗链只接受"开 / 关"与"是否放行无 Referer 请求"；扩展名表、valid_referers 参数与
+//     403 都是后端常量。它是正则 location，可与伪静态共存；代理与整站跳转会让本机静态资源
+//     不可达，因此两边互斥，页面在三个对话框里给同一句提示。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
 //     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
 //     而不是等请求失败后才解释。
@@ -66,6 +69,10 @@ const proxyForm = ref({ target: "", websocket: false });
 const redirectOpen = ref(false);
 const redirectTarget = ref(null);
 const redirectForm = ref({ target: "", code: 301, keep_path: true });
+
+const hotlinkOpen = ref(false);
+const hotlinkTarget = ref(null);
+const hotlinkForm = ref({ enabled: false, allow_empty: true });
 
 function parseDomains(text) {
   return String(text || "")
@@ -386,6 +393,43 @@ async function saveRedirect() {
   } finally { busy.value = false; }
 }
 
+function hotlinkLabel(r) {
+  if (!r.hotlink) return "";
+  return "防盗链 · " + (r.hotlink_allow_empty ? "允许直接访问" : "仅本站来源");
+}
+
+function openHotlink(r) {
+  error.value = ""; msg.value = "";
+  hotlinkTarget.value = r;
+  hotlinkForm.value = {
+    enabled: !!r.hotlink,
+    allow_empty: r.hotlink ? !!r.hotlink_allow_empty : true,
+  };
+  hotlinkOpen.value = true;
+}
+
+async function saveHotlink() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const site = await api("/api/v1/sites/" + encodeURIComponent(hotlinkTarget.value.name) + "/hotlink",
+      { method: "PUT", body: JSON.stringify({ enabled: hotlinkForm.value.enabled, allow_empty: hotlinkForm.value.allow_empty }) });
+    if (site.hotlink) {
+      msg.value = site.name + " 已启用防盗链（" +
+        (site.hotlink_allow_empty ? "放行无 Referer 请求" : "只允许本站来源") +
+        "）；nginx 已通过 nginx -t 并重载。";
+    } else {
+      msg.value = site.name + " 已关闭防盗链，静态资源回到默认处理；nginx 已通过 nginx -t 并重载。";
+    }
+    hotlinkOpen.value = false;
+    await load();
+  } catch (e) {
+    // 400 invalid_site（与代理 / 整站跳转冲突）与 422 nginx_rejected 都带后端原文；
+    // 后端返回前没有写入任何文件，页面原样显示。
+    error.value = e.message;
+    await load();
+  } finally { busy.value = false; }
+}
+
 onMounted(load);
 </script>
 
@@ -482,6 +526,9 @@ onMounted(load);
                 跳转 {{ r.redirect_code || 301 }} · <code class="mp-code">{{ r.redirect_target }}</code>
                 <span v-if="r.redirect_keep_path"> · 保留路径</span>
               </div>
+              <div v-if="r.hotlink" class="mp-muted mp-tiny">
+                防盗链 · {{ r.hotlink_allow_empty ? "允许直接访问" : "仅本站来源" }}
+              </div>
             </td>
             <td>
               <span class="mp-tag on" v-if="r.enabled">已启用</span>
@@ -507,7 +554,7 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:385px;white-space:nowrap">
+            <td style="width:430px;white-space:nowrap">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
@@ -515,6 +562,9 @@ onMounted(load);
               </el-button>
               <el-button size="small" text type="primary" @click="openRedirect(r)">
                 {{ r.redirect_target ? "跳转" : "整站跳转" }}
+              </el-button>
+              <el-button size="small" text type="primary" @click="openHotlink(r)">
+                {{ r.hotlink ? "防盗链" : "防盗" }}
               </el-button>
               <el-button size="small" text type="primary" :disabled="!phpAvailable && !r.php_version" @click="openPHP(r)">
                 PHP
@@ -597,6 +647,8 @@ onMounted(load);
           :title="'该站点正在使用伪静态模板（' + rewriteLabel(proxyTarget) + '）：两者都占用 location /。后端会拒绝保存代理；请先把伪静态切回“默认”，再启用代理。'" />
         <el-alert v-if="proxyTarget?.redirect_target" type="info" :closable="false" style="margin-bottom:10px"
           title="该站点正在整站跳转：两者都占用 location /。后端会拒绝保存代理；请先在“整站跳转”对话框里清空跳转目标。" />
+        <el-alert v-if="proxyTarget?.hotlink" type="info" :closable="false" style="margin-bottom:10px"
+          title="该站点已启用防盗链：静态资源由本机处理。后端会拒绝保存代理；请先在“防盗链”对话框里关闭。" />
         <el-form label-position="top" @submit.prevent="saveProxy">
           <el-form-item label="上游 URL（http:// 或 https://，可带端口与路径前缀）">
             <el-input v-model="proxyForm.target" placeholder="http://127.0.0.1:8080" maxlength="255" />
@@ -621,7 +673,7 @@ onMounted(load);
         <template #footer>
           <el-button size="small" :disabled="busy" @click="proxyOpen = false">取消</el-button>
           <el-button size="small" type="primary" :loading="busy"
-            :disabled="!!proxyForm.target.trim() && (!!rewriteLabel(proxyTarget) || !!proxyTarget?.redirect_target)" @click="saveProxy">
+            :disabled="!!proxyForm.target.trim() && (!!rewriteLabel(proxyTarget) || !!proxyTarget?.redirect_target || !!proxyTarget?.hotlink)" @click="saveProxy">
             {{ proxyForm.target.trim() ? "保存" : "清除代理" }}
           </el-button>
         </template>
@@ -632,6 +684,8 @@ onMounted(load);
           :title="'该站点正在使用伪静态模板（' + rewriteLabel(redirectTarget) + '）：两者都占用 location /。后端会拒绝保存跳转；请先把伪静态切回“默认”。'" />
         <el-alert v-if="redirectTarget?.proxy_target" type="info" :closable="false" style="margin-bottom:10px"
           :title="'该站点已启用反向代理：两者都占用 location /。后端会拒绝保存跳转；请先在“代理”对话框里清空上游 URL。'" />
+        <el-alert v-if="redirectTarget?.hotlink" type="info" :closable="false" style="margin-bottom:10px"
+          title="该站点已启用防盗链：静态资源由本机处理。后端会拒绝保存跳转；请先在“防盗链”对话框里关闭。" />
         <el-form label-position="top" @submit.prevent="saveRedirect">
           <el-form-item label="跳转目标（http:// 或 https:// 绝对 URL）">
             <el-input v-model="redirectForm.target" placeholder="https://new.example.com" maxlength="255" />
@@ -666,8 +720,47 @@ onMounted(load);
         <template #footer>
           <el-button size="small" :disabled="busy" @click="redirectOpen = false">取消</el-button>
           <el-button size="small" type="primary" :loading="busy"
-            :disabled="!!redirectForm.target.trim() && (!!rewriteLabel(redirectTarget) || !!redirectTarget?.proxy_target)" @click="saveRedirect">
+            :disabled="!!redirectForm.target.trim() && (!!rewriteLabel(redirectTarget) || !!redirectTarget?.proxy_target || !!redirectTarget?.hotlink)" @click="saveRedirect">
             {{ redirectForm.target.trim() ? "保存" : "清除跳转" }}
+          </el-button>
+        </template>
+      </el-dialog>
+
+      <el-dialog v-model="hotlinkOpen" :title="'防盗链 · ' + (hotlinkTarget?.name || '')" width="min(620px, 94vw)">
+        <el-alert v-if="hotlinkTarget?.proxy_target" type="info" :closable="false" style="margin-bottom:10px"
+          title="该站点正在使用反向代理：静态资源不在本机，防盗链无从生效。后端会拒绝启用；请先在“代理”对话框里清空上游 URL。" />
+        <el-alert v-if="hotlinkTarget?.redirect_target" type="info" :closable="false" style="margin-bottom:10px"
+          title="该站点正在整站跳转：静态资源由目标站点提供。后端会拒绝启用；请先在“整站跳转”对话框里清空跳转目标。" />
+        <el-form label-position="top" @submit.prevent="saveHotlink">
+          <el-form-item label="静态资源 Referer 校验">
+            <el-switch v-model="hotlinkForm.enabled" active-text="启用" inactive-text="关闭" />
+            <div class="mp-hint" style="margin-top:6px">
+              启用后写入一个固定的正则 location，覆盖图片、样式、脚本、字体与影音扩展名
+              （jpg / png / webp / svg / css / js / woff2 / mp4 / mp3 等）；扩展名表和
+              <code class="mp-code">valid_referers</code> 参数都在后端常量里，页面不提供自定义片段。
+            </div>
+          </el-form-item>
+          <el-form-item>
+            <el-checkbox v-model="hotlinkForm.allow_empty" :disabled="!hotlinkForm.enabled">
+              放行不带 Referer 的请求（地址栏直接打开、命令行与隐私浏览器）
+            </el-checkbox>
+            <div class="mp-hint">
+              勾选时写入 <code class="mp-code">valid_referers none blocked server_names;</code>；
+              不勾选时只写 <code class="mp-code">server_names</code>，每个静态资源请求都必须带本站来源。
+              命中
+              <code class="mp-code">$invalid_referer</code> 的请求返回 403。
+            </div>
+            <div class="mp-hint">
+              防盗链与反向代理、整站跳转互斥（后两者让本机静态资源块不可达）；伪静态模板与 PHP
+              绑定不受影响。保存仍走 <code class="mp-code">nginx -t</code> → reload，失败会恢复原配置。
+            </div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="hotlinkOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy"
+            :disabled="hotlinkForm.enabled && (!!hotlinkTarget?.proxy_target || !!hotlinkTarget?.redirect_target)" @click="saveHotlink">
+            {{ hotlinkForm.enabled ? "保存" : (hotlinkTarget?.hotlink ? "关闭防盗链" : "保存") }}
           </el-button>
         </template>
       </el-dialog>

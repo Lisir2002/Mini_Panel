@@ -193,6 +193,9 @@ func (m *Manager) SetProxy(name, target string, websocket bool) (Site, error) {
 		if site.RedirectTarget != "" {
 			return Site{}, fmt.Errorf("%w：站点正在整站跳转，location / 已由跳转规则接管；先清除跳转再启用反向代理", ErrInvalid)
 		}
+		if site.Hotlink {
+			return Site{}, fmt.Errorf("%w：站点已启用防盗链，静态资源由本机处理；先关闭防盗链再启用反向代理", ErrInvalid)
+		}
 	}
 	site.ProxyTarget, site.ProxyWebSocket = target, websocket
 	if err := m.applyConfig(site.ConfigPath, render(site)); err != nil {

@@ -31,6 +31,7 @@ type fakeSites struct {
 	rewriteErr   error
 	proxyErr     error
 	redirectErr  error
+	hotlinkErr   error
 	created      int
 	deleted      int
 	tlsSets      int
@@ -42,6 +43,7 @@ type fakeSites struct {
 	rewriteSets  int
 	proxySets    int
 	redirectSets int
+	hotlinkSets  int
 	lastCertLen  int
 }
 
@@ -173,6 +175,21 @@ func (f *fakeSites) SetRedirect(name, target string, code int, keepPath bool) (p
 	s.RedirectKeepPath = keepPath
 	f.sites[name] = s
 	f.redirectSets++
+	return s, nil
+}
+
+func (f *fakeSites) SetHotlink(name string, enabled, allowEmpty bool) (platform.SiteInfo, error) {
+	if f.hotlinkErr != nil {
+		return platform.SiteInfo{}, f.hotlinkErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	s.Hotlink = enabled
+	s.HotlinkAllowEmpty = enabled && allowEmpty
+	f.sites[name] = s
+	f.hotlinkSets++
 	return s, nil
 }
 

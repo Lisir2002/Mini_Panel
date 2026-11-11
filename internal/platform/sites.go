@@ -48,8 +48,13 @@ type SiteInfo struct {
 	RedirectTarget   string `json:"redirect_target,omitempty"`
 	RedirectCode     int    `json:"redirect_code,omitempty"`
 	RedirectKeepPath bool   `json:"redirect_keep_path,omitempty"`
-	PHPVersion       string `json:"php_version,omitempty"`
-	PHPSocket        string `json:"php_socket,omitempty"`
+	// Hotlink is the fixed Referer check for static assets; HotlinkAllowEmpty
+	// says whether requests without a Referer are allowed through. Both are
+	// omitted until hotlink protection is enabled.
+	Hotlink           bool   `json:"hotlink,omitempty"`
+	HotlinkAllowEmpty bool   `json:"hotlink_allow_empty,omitempty"`
+	PHPVersion        string `json:"php_version,omitempty"`
+	PHPSocket         string `json:"php_socket,omitempty"`
 	// PHPSocketState is the live state of PHPSocket (listening / idle / absent /
 	// not_socket / unknown), computed on every read. It is not persisted: "the
 	// site points at 8.3" and "php8.3-fpm is answering" are two separate facts,
@@ -138,6 +143,14 @@ type SiteProxyManager interface {
 // fixed `return` line. Clearing (empty target) is always allowed.
 type SiteRedirectManager interface {
 	SetRedirect(name, target string, code int, keepPath bool) (SiteInfo, error)
+}
+
+// SiteHotlinkManager is the optional hotlink-protection half of a site writer.
+// The operator only chooses whether it is on and whether a missing Referer is
+// allowed; the extension list, valid_referers arguments and rejection status are
+// fixed by the provider. Disabling is always allowed.
+type SiteHotlinkManager interface {
+	SetHotlink(name string, enabled, allowEmpty bool) (SiteInfo, error)
 }
 
 // SiteTLSManager is the optional certificate side of a site writer. Manual
