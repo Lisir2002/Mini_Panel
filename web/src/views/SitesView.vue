@@ -3,8 +3,9 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五：静态站点、站点证书、PHP 版本绑定、
-// 基础设置编辑、伪静态模板、反向代理、整站跳转、防盗链、访问密码、真实 IP 解析、按路径跳转表与流量限制。
+// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五、十六：静态站点、站点证书、
+// PHP 版本绑定、基础设置编辑、伪静态模板、反向代理、整站跳转、防盗链、访问密码、真实 IP 解析、
+// 按路径跳转表、流量限制与分组 / 备注 / 搜索。
 // 这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
@@ -36,6 +37,9 @@ import { store } from "../store";
 //     由于 nginx 要求 limit_*_zone 落在 http 上下文，后端会在同一次"写文件 → nginx -t → reload"
 //     事务里同时写站点 vhost 与一张面板自有的 http 级表文件，任一步失败两个文件一起回滚；本机
 //     nginx.conf 若没有通配 include，后端返回带理由的 400，页面原样显示，不假装限流已生效。
+//   * 分组与备注是唯一一项完全不碰 nginx 的站点控制：它只写进面板自己的 SQLite（site_meta 表），
+//     列表按站点名 join 回来，既不进 vhost 也不进 marker，所以没有 nginx -t、没有 422。站点必须是
+//     Provider 当前列出的站点，否则后端 404；搜索与分组过滤都在已加载的列表上做，不额外打后端。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
 //     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
 //     而不是等请求失败后才解释。
@@ -111,6 +115,53 @@ const limitStatuses = [
   { value: "429", label: "429 Too Many Requests" },
   { value: "503", label: "503 Service Unavailable" },
 ];
+
+// 分组 / 备注是面板侧元数据，不碰 nginx；搜索与分组过滤在已经 join 过 group/note
+// 的列表上做即时过滤，不需要再打一次后端。
+const metaOpen = ref(false);
+const metaTarget = ref(null);
+const metaForm = ref({ group: "", note: "" });
+const search = ref("");
+const groupFilter = ref("");
+
+const groups = computed(() => {
+  const set = new Set();
+  for (const r of rows.value) if (r.group) set.add(r.group);
+  return [...set].sort();
+});
+
+const filteredRows = computed(() => {
+  const q = search.value.trim().toLowerCase();
+  return rows.value.filter((r) => {
+    if (groupFilter.value && r.group !== groupFilter.value) return false;
+    if (!q) return true;
+    const hay = [r.name, r.group, r.note, ...(r.domains || [])].join(" ").toLowerCase();
+    return hay.includes(q);
+  });
+});
+
+function openMeta(r) {
+  metaTarget.value = r;
+  metaForm.value = { group: r.group || "", note: r.note || "" };
+  metaOpen.value = true;
+}
+
+async function saveMeta() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const body = { group: metaForm.value.group.trim(), note: metaForm.value.note.trim() };
+    await api("/api/v1/sites/" + encodeURIComponent(metaTarget.value.name) + "/meta",
+      { method: "PUT", body: JSON.stringify(body) });
+    msg.value = (body.group || body.note)
+      ? metaTarget.value.name + " 的分组 / 备注已保存（仅面板记录，不影响 nginx）"
+      : metaTarget.value.name + " 的分组与备注已清除";
+    metaOpen.value = false;
+    await load();
+  } catch (e) {
+    // 400 分组/备注超长或含控制字符、404 站点不是面板管理的，都带后端原文。
+    error.value = e.message;
+  } finally { busy.value = false; }
+}
 
 function blankRedirectPathRule() {
   return { path: "", target: "", code: 301 };
@@ -776,9 +827,17 @@ onMounted(load);
         <el-button type="primary" size="small" :loading="busy" @click="create">创建站点</el-button>
       </el-form>
 
-      <div class="mp-row" style="margin:14px 0 10px">
+      <div class="mp-row" style="margin:14px 0 10px;align-items:center;gap:10px;flex-wrap:wrap">
         <el-button size="small" :loading="busy" @click="load">刷新</el-button>
-        <span class="mp-muted mp-tiny">共 {{ rows.length }} 个由面板管理的站点</span>
+        <el-input v-model="search" size="small" placeholder="搜索站点名 / 域名 / 分组 / 备注"
+          clearable style="max-width:260px" />
+        <el-select v-model="groupFilter" size="small" placeholder="全部分组" clearable style="max-width:180px">
+          <el-option v-for="g in groups" :key="g" :label="g" :value="g" />
+        </el-select>
+        <span class="mp-muted mp-tiny">
+          共 {{ rows.length }} 个由面板管理的站点<span v-if="filteredRows.length !== rows.length">
+            · 过滤后 {{ filteredRows.length }} 个</span>
+        </span>
       </div>
 
       <table>
@@ -786,8 +845,13 @@ onMounted(load);
           <tr><th>站点</th><th>域名</th><th>根目录</th><th>状态</th><th>PHP</th><th>HTTPS</th><th>创建时间</th><th></th></tr>
         </thead>
         <tbody>
-          <tr v-for="r in rows" :key="r.name">
-            <td><b>{{ r.name }}</b><div class="mp-muted mp-tiny"><code class="mp-code">{{ r.config_path }}</code></div></td>
+          <tr v-for="r in filteredRows" :key="r.name">
+            <td>
+              <b>{{ r.name }}</b>
+              <span v-if="r.group" class="mp-tag" :title="'分组：' + r.group">{{ r.group }}</span>
+              <div v-if="r.note" class="mp-muted mp-tiny mp-note-cell" :title="r.note">{{ r.note }}</div>
+              <div class="mp-muted mp-tiny"><code class="mp-code">{{ r.config_path }}</code></div>
+            </td>
             <td><span class="mp-clip" :title="r.domains.join(' ')">{{ r.domains.join(" · ") }}</span></td>
             <td>
               <code class="mp-code">{{ r.root }}</code>
@@ -840,7 +904,7 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:720px;white-space:nowrap">
+            <td style="width:820px;white-space:nowrap">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
@@ -859,6 +923,9 @@ onMounted(load);
               <el-button size="small" text type="primary" @click="openRealIP(r)">真实 IP</el-button>
               <el-button size="small" text type="primary" @click="openLimit(r)">
                 {{ r.limits ? "限流" : "流量限制" }}
+              </el-button>
+              <el-button size="small" text type="primary" @click="openMeta(r)">
+                {{ r.group || r.note ? "分组备注" : "分组/备注" }}
               </el-button>
               <el-button size="small" text type="primary" :disabled="!phpAvailable && !r.php_version" @click="openPHP(r)">
                 PHP
@@ -1114,6 +1181,32 @@ onMounted(load);
         </template>
       </el-dialog>
 
+      <el-dialog v-model="metaOpen" :title="'分组 / 备注 · ' + (metaTarget?.name || '')" width="min(600px, 94vw)">
+        <el-form label-position="top" @submit.prevent="saveMeta">
+          <el-form-item label="分组（可留空）">
+            <el-input v-model="metaForm.group" maxlength="64" placeholder="如 电商 / 测试站 / 客户 A"
+              style="width:260px" />
+            <div class="mp-hint" style="margin-top:4px">
+              单行标签，最长 64 个字符。分组只影响这个列表的展示与筛选，不会写进 nginx。
+            </div>
+          </el-form-item>
+          <el-form-item label="备注（可留空）">
+            <el-input v-model="metaForm.note" type="textarea" :rows="3" maxlength="500" show-word-limit
+              placeholder="给自己看的说明，例如“双 11 后要扩容”" />
+            <div class="mp-hint" style="margin-top:4px">
+              最长 500 个字符，可换行。备注存在面板数据库里，不进 vhost、不进站点标记，删除站点时一并清除。
+              两项都留空并保存即清除该站点的分组与备注。
+            </div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="metaOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy" @click="saveMeta">
+            {{ metaForm.group.trim() || metaForm.note.trim() ? "保存" : (metaTarget?.group || metaTarget?.note ? "清除" : "保存") }}
+          </el-button>
+        </template>
+      </el-dialog>
+
       <el-dialog v-model="hotlinkOpen" :title="'防盗链 · ' + (hotlinkTarget?.name || '')" width="min(620px, 94vw)">
         <el-alert v-if="hotlinkTarget?.proxy_target" type="info" :closable="false" style="margin-bottom:10px"
           title="该站点正在使用反向代理：静态资源不在本机，防盗链无从生效。后端会拒绝启用；请先在“代理”对话框里清空上游 URL。" />
@@ -1312,7 +1405,9 @@ onMounted(load);
         例外，保留查询串且不占用 <code class="mp-code">location /</code>，所以能够与整站跳转、代理和
         伪静态共存。流量限制只收速率、突发、单 IP 连接数与超限状态码四个值，zone 名与键都由
         后端固定；它写 vhost 的同时会在同一次事务里维护一张面板自有的 http 级 zone 表，本机
-        nginx.conf 没有通配 include 时后端拒绝并说明原因。新建站点的根目录是 0755 的空目录，
+        nginx.conf 没有通配 include 时后端拒绝并说明原因。分组与备注是唯一不碰 nginx 的站点控制：
+        它只写进面板自己的 SQLite、列表按站点名 join 回来，不进 vhost 也不进 marker，删除站点时一并
+        清除；顶部的搜索框与分组下拉在这份已加载的列表上做即时过滤，不再打后端。新建站点的根目录是 0755 的空目录，
         放一个 <code class="mp-code">index.html</code>（或绑定 PHP 后放 index.php）就能访问。
       </div>
     </template>
@@ -1325,4 +1420,5 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--mp-l
 thead th { color: var(--mp-muted); font-weight: 500; white-space: nowrap; }
 tr:last-child th, tr:last-child td { border-bottom: 0; }
 .mp-code { white-space: pre-wrap; word-break: break-all; }
+.mp-note-cell { max-width: 340px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
 </style>

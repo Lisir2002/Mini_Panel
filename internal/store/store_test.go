@@ -397,3 +397,67 @@ func sessionRevoked(t *testing.T, st *Store, id string) int {
 	}
 	return r
 }
+
+func TestSiteMetaRoundTripAndClear(t *testing.T) {
+	st := open(t)
+	// Fresh store: the migration created the table, so ListSiteMeta succeeds and
+	// is empty rather than erroring on a missing table.
+	meta, err := st.ListSiteMeta()
+	if err != nil {
+		t.Fatalf("list empty meta: %v", err)
+	}
+	if len(meta) != 0 {
+		t.Fatalf("new store has %d annotations, want 0", len(meta))
+	}
+	if err := st.SaveSiteMeta("shop", "电商", "双 11 后扩容"); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := st.SaveSiteMeta("blog", "", "个人站"); err != nil {
+		t.Fatalf("save note-only: %v", err)
+	}
+	meta, err = st.ListSiteMeta()
+	if err != nil {
+		t.Fatalf("list meta: %v", err)
+	}
+	if meta["shop"].Group != "电商" || meta["shop"].Note != "双 11 后扩容" {
+		t.Errorf("shop meta = %+v", meta["shop"])
+	}
+	if meta["blog"].Group != "" || meta["blog"].Note != "个人站" {
+		t.Errorf("blog meta = %+v, want empty group / note set", meta["blog"])
+	}
+
+	// Saving empty on both sides deletes the row rather than storing blanks.
+	if err := st.SaveSiteMeta("shop", "", ""); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	meta, _ = st.ListSiteMeta()
+	if _, ok := meta["shop"]; ok {
+		t.Errorf("clear left a row for shop")
+	}
+	if _, ok := meta["blog"]; !ok {
+		t.Errorf("clear deleted an unrelated site's row")
+	}
+
+	// Explicit delete on site removal.
+	if err := st.DeleteSiteMeta("blog"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	meta, _ = st.ListSiteMeta()
+	if len(meta) != 0 {
+		t.Errorf("after delete, %d rows remain, want 0", len(meta))
+	}
+}
+
+func TestSiteMetaUpsertReplaces(t *testing.T) {
+	st := open(t)
+	if err := st.SaveSiteMeta("shop", "a", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveSiteMeta("shop", "b", ""); err != nil {
+		t.Fatal(err)
+	}
+	meta, _ := st.ListSiteMeta()
+	if len(meta) != 1 || meta["shop"].Group != "b" || meta["shop"].Note != "" {
+		t.Errorf("upsert result = %+v, want one row group=b note empty", meta["shop"])
+	}
+}

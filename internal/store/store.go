@@ -21,7 +21,7 @@ import (
 // schemaVersion is the shape this binary expects. Migrations only ever move
 // forward: v1 is left exactly as it shipped, and anything that becomes obsolete
 // afterwards is undone by a later version rather than by editing history.
-const schemaVersion = 3
+const schemaVersion = 4
 
 type Store struct{ db *sql.DB }
 
@@ -239,6 +239,24 @@ CREATE TABLE settings(
 		if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_ref
 			ON sessions(ref) WHERE ref<>''`); err != nil {
 			return fmt.Errorf("unique index on sessions.ref: %w", err)
+		}
+		return nil
+	case 4:
+		// Panel-side annotations for sites: a grouping label and a free-text
+		// note, one row per site the operator has actually annotated. This is
+		// deliberately NOT nginx state — it never touches a vhost or the
+		// marker, so it lives here keyed by the panel's own site name, not in
+		// the provider. Rows are only ever joined against sites the provider
+		// currently reports, so a leftover row after a site was deleted shows
+		// nothing; handleSiteDelete still clears it on the happy path to keep
+		// the table from accreting. Every step is re-runnable for the same
+		// reason v3 is.
+		if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS site_meta(
+			name TEXT PRIMARY KEY,
+			grp  TEXT NOT NULL DEFAULT '',
+			note TEXT NOT NULL DEFAULT '',
+			updated_at INTEGER NOT NULL DEFAULT 0)`); err != nil {
+			return err
 		}
 		return nil
 	default:
@@ -474,6 +492,60 @@ func (s *Store) hasColumn(table, column string) (bool, error) {
 		}
 	}
 	return false, rows.Err()
+}
+
+// ---- site annotations (panel-side group / note) --------------------------
+
+// SiteMeta is the operator's own annotation for one panel-managed site. It is
+// never derived from nginx config: the provider has no idea it exists, and the
+// API joins it onto the site list by name.
+type SiteMeta struct {
+	Name  string
+	Group string
+	Note  string
+}
+
+// ListSiteMeta returns every annotation row keyed by site name. Sites with no
+// row are simply absent; the caller treats "absent" and "empty" identically.
+func (s *Store) ListSiteMeta() (map[string]SiteMeta, error) {
+	rows, err := s.db.Query(`SELECT name,grp,note FROM site_meta`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]SiteMeta{}
+	for rows.Next() {
+		var m SiteMeta
+		if err := rows.Scan(&m.Name, &m.Group, &m.Note); err != nil {
+			return nil, err
+		}
+		out[m.Name] = m
+	}
+	return out, rows.Err()
+}
+
+// SaveSiteMeta stores one site's annotation, or clears it entirely when both
+// fields are empty (so the table stays proportional to what was annotated).
+// The caller has already validated lengths/control characters and confirmed the
+// site exists; nothing here re-checks that.
+func (s *Store) SaveSiteMeta(name, group, note string) error {
+	if group == "" && note == "" {
+		_, err := s.db.Exec(`DELETE FROM site_meta WHERE name=?`, name)
+		return err
+	}
+	_, err := s.db.Exec(`INSERT INTO site_meta(name,grp,note,updated_at) VALUES(?,?,?,?)
+		ON CONFLICT(name) DO UPDATE SET grp=excluded.grp, note=excluded.note,
+		updated_at=excluded.updated_at`, name, group, note, time.Now().Unix())
+	return err
+}
+
+// DeleteSiteMeta drops a site's annotation, called when the provider deletes
+// the site so the table does not accrete rows for names that no longer exist.
+// A leftover row would still show nothing (the list joins against live provider
+// sites), but clearing it keeps the table honest about what is annotated.
+func (s *Store) DeleteSiteMeta(name string) error {
+	_, err := s.db.Exec(`DELETE FROM site_meta WHERE name=?`, name)
+	return err
 }
 
 func b2i(b bool) int {

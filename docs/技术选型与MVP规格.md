@@ -81,24 +81,24 @@
   （`internal/platform/platform_linux.go:319 resolvePHPBinding()`）先按现场探测确认版本确有
   fpm，再把 socket 交给 `internal/nginx` 写进 vhost；**不创建 per-site pool**。
   第七片没有扩大 `SiteManager`，而是新增可选的
-  `internal/platform/sites.go:144 SiteSettingsManager`（`SetBasics`），由
+  `internal/platform/sites.go:151 SiteSettingsManager`（`SetBasics`），由
   `internal/platform/platform_linux.go:198` 接线到 nginx 的 `SetBasics`。这样旧 Provider 不必
   实现一个它做不到的写入口，页面也能从缺失的接口得出"本机不能编辑站点"，而不是画一个点了
-  没反应的按钮。第八片同样走可选接口：`internal/platform/sites.go:167 SiteRewriteManager`
+  没反应的按钮。第八片同样走可选接口：`internal/platform/sites.go:174 SiteRewriteManager`
   （`SetRewrite` / `RewritePresets`），由 `internal/platform/platform_linux.go:209` / `:220`
   接线；模板集本身在 `internal/nginx/rewrite.go:54 RewritePresets()`，是编译进二进制的封闭
   词汇表，列表也由后端返回，页面不硬编码，因而不会与白名单漂移。第九片沿用同一模式：
-  `internal/platform/sites.go:172 SiteProxyManager`（`SetProxy`），由
+  `internal/platform/sites.go:179 SiteProxyManager`（`SetProxy`），由
   `internal/platform/platform_linux.go:234` 接线到 `internal/nginx/proxy.go:177 SetProxy()`；
   反向代理的输入是一个经 `normalizeProxy`（`internal/nginx/proxy.go:138`）校验并规范化的 URL
   与一个 WebSocket 布尔值，指令由 `proxyLocationBody`（`internal/nginx/proxy.go:157`）
   固定生成；Provider 不实现该接口时端点返回 403 `capability` 并带上同一句理由，不假装
   写入路径存在。第十片同样新增可选接口
-  `internal/platform/sites.go:185 SiteRedirectManager`（`SetRedirect`），由
+  `internal/platform/sites.go:192 SiteRedirectManager`（`SetRedirect`），由
   `internal/platform/platform_linux.go:245` 接线到 `internal/nginx/redirect.go:56 SetRedirect()`；
   跳转与反向代理共用 `parseUpstreamURL`（`internal/nginx/proxy.go:54`）做 URL 校验，
   指令由 `redirectLocationBody`（`internal/nginx/redirect.go:45`）固定生成。第十一片再新增
-  `internal/platform/sites.go:201 SiteHotlinkManager`（`SetHotlink`），由
+  `internal/platform/sites.go:208 SiteHotlinkManager`（`SetHotlink`），由
   `internal/platform/platform_linux.go:271` 接线到 `internal/nginx/hotlink.go:34 SetHotlink()`；
   它只携带两个布尔值，扩展名表与 `valid_referers` 形式分别由
   `hotlinkExtensionPattern`（`internal/nginx/hotlink.go:9`）与
@@ -106,28 +106,28 @@
   拼配置的机会。这样 `location /` 的三种所有者（伪静态模板、反向代理、整站跳转）各自都有
   明确的写入接口，任何一边缺失都不会让页面凭空多出一个按钮；防盗链是正则 location，
   不加入 `location /` 的竞争，但也有独立接口与独立的缺失理由。第十二片新增
-  `internal/platform/sites.go:210 SiteAuthManager`（`SetAuth`），由
+  `internal/platform/sites.go:217 SiteAuthManager`（`SetAuth`），由
   `internal/platform/platform_linux.go:282` 接线到 `internal/nginx/auth.go:158 SetAuth()`；
   接口只收用户名与口令，摘要格式由 `authHash`（`internal/nginx/auth.go:48`）固定，
   口令文件路径由 `authPath`（`internal/nginx/auth.go:39`）在 nginx 包内推导，
   平台层与 HTTP 层都不接触摘要或文件路径。它是 server 级指令，因此没有与
   `location /` 的所有者互斥，也不需要为每个站点功能各加一个 `location /` 互斥开关。
-  第十三片再新增 `internal/platform/sites.go:218 SiteRealIPManager`（`SetRealIP`），由
+  第十三片再新增 `internal/platform/sites.go:225 SiteRealIPManager`（`SetRealIP`），由
   `internal/platform/platform_linux.go:293` 接线到 `internal/nginx/realip.go:113 SetRealIP()`；
   接口只收可信代理地址/网段与两个固定 header 名称，地址校验与 `set_real_ip_from` /
   `real_ip_header` 的渲染都在 nginx 包内，平台层与 HTTP 层不能拼配置。它同样是 server
   级指令，不参与 `location /` 的所有者互斥。第十四片再新增
-  `internal/platform/sites.go:193 SiteRedirectPathManager`（`SetRedirectPaths`），由
+  `internal/platform/sites.go:200 SiteRedirectPathManager`（`SetRedirectPaths`），由
   `internal/platform/platform_linux.go:256` 接线到 `internal/nginx/pathredirect.go:92 SetRedirectPaths()`；
-  平台侧的中立规则 `SiteRedirectRule`（`internal/platform/sites.go:94`）在 `toSiteInfo`
+  平台侧的中立规则 `SiteRedirectRule`（`internal/platform/sites.go:101`）在 `toSiteInfo`
   （`internal/platform/platform_linux.go:477`）一侧原样往返。路径与目标的校验、`location =`
   块的渲染和 `$is_args$args` 常量全部在 nginx 包内完成（`internal/nginx/pathredirect.go:29` /
   `:78`），目标复用整站跳转的 `parseUpstreamURL`，平台层与 HTTP 层同样没有拼配置的机会。
   它与整站跳转一样不是 `location /` 的所有者——只往 vhost 里追加精确例外块，因此不需要
   参与那三种所有者的互斥。
-  第十五片再新增 `internal/platform/sites.go:228 SiteTrafficLimitManager`（`SetLimits`），由
+  第十五片再新增 `internal/platform/sites.go:235 SiteTrafficLimitManager`（`SetLimits`），由
   `internal/platform/platform_linux.go:304` 接线到 `internal/nginx/limits.go:459 SetLimits()`；
-  平台侧的中立值 `SiteTrafficLimit`（`internal/platform/sites.go:104`）只带速率字符串、突发、
+  平台侧的中立值 `SiteTrafficLimit`（`internal/platform/sites.go:111`）只带速率字符串、突发、
   连接数与状态码四个字段，在 `toSiteInfo`（`internal/platform/platform_linux.go:496`）一侧原样往返。
   速率形状、数值边界与状态码白名单全由 `normalizeTrafficLimit`（`internal/nginx/limits.go:79`）
   判定，zone 名由 `limitZoneName`（`internal/nginx/limits.go:124`）从站点名派生，调用方点不了名。
@@ -139,6 +139,17 @@
   `httpIncludeDirs`（`internal/nginx/limits.go:235`）读本机 nginx.conf 里它自己用的通配
   `include` 推导；本机没有这种 include 时明确拒绝，而不是把配置写进 nginx 读不到的位置。
   它是 server 级指令、不占用 `location /`，因此不参与那三种所有者的互斥。
+  第十六片（分组 / 备注 / 搜索）刻意**不新增任何 Provider 可选接口**：前面每一片都往
+  `internal/platform/sites.go` 加一个 `Set*` 接口，是因为它们各自都要改一份 nginx 配置，
+  改配置的能力必须按 Provider 分别有无、缺失时页面要能给出"这台没实现"的理由。分组与备注
+  恰恰不改 nginx，它是纯面板数据，因此落点从 Provider 上移到了 store 与 HTTP 层：
+  `internal/store/store.go:510 ListSiteMeta()` / `:531 SaveSiteMeta()` / `:546 DeleteSiteMeta()`
+  直接操作 `site_meta` 表，`internal/api/sites.go:230 mergeSiteMeta()` 在列表读取时按站点名把
+  标注 join 进 `platform.SiteInfo` 的 `Group` / `Note` 两个字段（`internal/platform/sites.go:82`
+  / `:83`，Provider 自己永远留空）。门槛因此变成"平台能不能列站点"而不是"有没有某个写入接口"：
+  `handleSiteMeta` 复用 `siteManager()` 这道 site 能力闸门，再拿 `Provider.List()` 核对站点名，
+  未管理返回 404——这条存在性校验是本片唯一的诚实性红线，取代了写入类片子里那套 `nginx -t`
+  回滚纪律，因为它没有配置文件可回滚。搜索与分组过滤留在前端，对已经 join 过的列表做即时过滤。
 * `internal/acme` 是 M2 第五片新增的包：它只负责一件事——用 `golang.org/x/crypto/acme`
   走完 RFC 8555 的 HTTP-01 签发（`internal/acme/acme.go:125 Issue()`），并把 token 写进
   调用方给的 webroot。它不知道 nginx、不知道站点、不碰面板配置；证书装进 vhost 由
@@ -335,12 +346,12 @@
    `/healthz` 永远可达。**持有合法 `mp_session` 后任何路径都可访问**——这是有意的：SPA 的导航、
    刷新与深链必须落在原路径上，把它们全部改写到一个魔法路径会拿可用的界面换一个勾。
    因此**入口不能缓解 XSS，也不能缓解 Cookie 泄露**，任何"安全入口保护登录后的面板"的表述都是
-   错的；`entranceGate` 的注释（`internal/api/server.go:198-216`）已经把这段结论写死，
+   错的；`entranceGate` 的注释（`internal/api/server.go:199-217`）已经把这段结论写死，
    文档与 README 必须原样表达这条边界。**"登录后逐路径校验入口"是 M1 待办**（见
    `docs/里程碑.md`），在它实现之前不得写成现状。真正的访问控制 = 监听地址 + 会话令牌与有效期
    + `panel.ip_allowlist` + CSRF + 登录锁定。
    伪装响应的**形态**也是一条决定：中性 HTML 错误页，只含状态码文本，不含产品名与版本
-   （`internal/api/server.go:291 disguise()` 的注释）。不用 Go 默认 `http.Error` 的
+   （`internal/api/server.go:292 disguise()` 的注释）。不用 Go 默认 `http.Error` 的
    `text/plain`，因为"404 Not Found"那 10 个字节本身就是运行环境指纹，而这条响应的目的正是
    让探测者学不到东西；也不冒充 nginx 的错误页——这个进程就是 web server，一张普通 404 是
    事实，冒充别人的错误页在事故响应时误导运维的程度不亚于误导扫描器。页面里内联
@@ -539,7 +550,7 @@ M2 第二片补上了一条曾经记在本表里的缺口：**`doctor` 打印的
 | 面板自签证书生成、SAN 跟随本机地址重签 | `grep -rn "EnsureSelfSignedTLS" --include='*_test.go' .` 为空 | 代码 `internal/sec/tls.go:26`；`make doctor` 的证书行、`minipanel init` 的实际输出 |
 | `-wal` / `-shm` 的 0600 | `TestFilePermissionsAreOwnerOnly` 只 `os.Stat` 主库文件 | 代码 `internal/store/store.go:46-57` 的三元素循环 |
 | 面板证书与私钥的 0600 | `internal/sec` 只有一个测试文件且不碰证书 | 代码 `internal/sec/tls.go:74-86` |
-| `444`（挂断型）伪装真的会断连 | `disguise()` 的 Hijacker 分支只在配置 444 时走到，M0 测试跑的是 404 | 代码 `internal/api/server.go:291` |
+| `444`（挂断型）伪装真的会断连 | `disguise()` 的 Hijacker 分支只在配置 444 时走到，M0 测试跑的是 404 | 代码 `internal/api/server.go:292` |
 | ACME 只对 Pebble 跑过端到端，没有对 Let's Encrypt 生产环境真签过 | `grep -rn "pebble" --include='*_test.go' .` 只命中 `internal/acme/pebble_test.go`；它默认跳过（`pebble` 不在 PATH 时 `t.Skip`），CI 不会自动跑 | 协议流程由 `internal/acme` 的 9 个单元用例覆盖；端到端复核命令写在 README「如何验证」；生产签发仍受 80 端口可达与域名解析两个外部条件约束 |
 | DNS-01 / 通配符签发没有实现，也没有测试 | `grep -rn "DNS01\|dns-01\|Wildcard" --include='*.go' internal/` 只应命中通配符拒绝逻辑，不应有 DNS 客户端 | 代码在写任何配置之前拒绝（`internal/acme/acme.go` 的 `normalizeDomains` + `internal/platform/platform_linux.go` 的 `obtainACME`），HTTP 返回 `422 acme_unsupported`；通配符站点只能上传证书 |
 | 前端"灰 + 理由"的实际渲染 | 仓库里没有 UI 自动化：`make web` 编译前端并断言产物只有一个文件，`make check-ui` 断言能力 key 全覆盖与端点全覆盖，但**"页面画出来对不对"这一步仍然靠人**（真实浏览器的 puppeteer 脚本刻意不入仓库，它依赖本机 chrome） | `make check-ui` 的三条 + `make check-honesty` 保证理由必然存在；每轮里程碑手工跑一遍浏览器断言并在 README"如何验证"里记下条数 |

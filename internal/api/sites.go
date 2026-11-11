@@ -4,8 +4,11 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Lisir2002/Mini_Panel/internal/platform"
+	"github.com/Lisir2002/Mini_Panel/internal/store"
 )
 
 // Site management is the third slice of M2: static sites first, then the PHP
@@ -193,9 +196,51 @@ func (s *Server) siteTrafficLimitManager() (platform.SiteTrafficLimitManager, st
 	return lm, ""
 }
 
+// normalizeSiteMeta validates the panel-side group label and free-text note.
+// Neither reaches nginx — this only guards what goes into the store, so the
+// bounds are about keeping the UI list sane, not about config injection. A
+// group is a single short line; a note may wrap but is capped and stripped of
+// control characters. Empty on both sides means "clear the annotation".
+func normalizeSiteMeta(group, note string) (string, string, error) {
+	group = strings.TrimSpace(group)
+	note = strings.TrimSpace(note)
+	if utf8.RuneCountInString(group) > 64 {
+		return "", "", errors.New("分组名称最长 64 个字符")
+	}
+	for _, r := range group {
+		if unicode.IsControl(r) {
+			return "", "", errors.New("分组名称不能包含换行或控制字符")
+		}
+	}
+	if utf8.RuneCountInString(note) > 500 {
+		return "", "", errors.New("备注最长 500 个字符")
+	}
+	for _, r := range note {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			return "", "", errors.New("备注不能包含控制字符")
+		}
+	}
+	return group, note, nil
+}
+
+// mergeSiteMeta joins the stored annotations onto the provider's site rows by
+// name. A provider site with no annotation row keeps its empty group/note; an
+// annotation for a site the provider no longer reports is simply never joined
+// (and handleSiteDelete clears it on the happy path).
+func mergeSiteMeta(items []platform.SiteInfo, meta map[string]store.SiteMeta) {
+	for i := range items {
+		if m, ok := meta[items[i].Name]; ok {
+			items[i].Group = m.Group
+			items[i].Note = m.Note
+		}
+	}
+}
+
 // handleSitesList is GET /api/v1/sites. Only files the panel wrote itself are
 // listed; a hand-written vhost in the same directory is somebody else's
-// configuration and is not reported as a panel site.
+// configuration and is not reported as a panel site. The panel-side group and
+// note annotations are joined from the store here, so a site the operator filed
+// under a group shows that group even though nothing about it lives in nginx.
 func (s *Server) handleSitesList(w http.ResponseWriter, r *http.Request) {
 	m, why := s.siteManager()
 	if m == nil {
@@ -210,6 +255,12 @@ func (s *Server) handleSitesList(w http.ResponseWriter, r *http.Request) {
 	if items == nil {
 		items = []platform.SiteInfo{}
 	}
+	meta, err := s.Store.ListSiteMeta()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "store", "读取站点分组备注失败")
+		return
+	}
+	mergeSiteMeta(items, meta)
 	writeJSON(w, http.StatusOK, map[string]any{"total": len(items), "items": items})
 }
 
@@ -649,9 +700,17 @@ func (s *Server) handleSiteDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "capability", why)
 		return
 	}
-	site, err := m.Delete(chiParam(r, "name"))
+	name := chiParam(r, "name")
+	site, err := m.Delete(name)
 	switch {
 	case err == nil:
+		// Drop the site's panel-side annotation with it. This is best-effort:
+		// the deletion already succeeded and a leftover row would show nothing
+		// anyway (the list joins against live provider sites), but we clear it
+		// so the table stays honest about what is actually annotated.
+		if derr := s.Store.DeleteSiteMeta(name); derr != nil && s.Log != nil {
+			s.Log.Warn("clear site annotation after delete", "site", name, "error", derr)
+		}
 		writeJSON(w, http.StatusOK, site)
 	case errors.Is(err, platform.ErrSiteMissing):
 		writeErr(w, http.StatusNotFound, "not_found", err.Error())
@@ -662,4 +721,59 @@ func (s *Server) handleSiteDelete(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_write", "删除站点失败："+err.Error())
 	}
+}
+
+// handleSiteMeta is PUT /api/v1/sites/{name}/meta. The body is
+// {"group":"电商","note":"双 11 后要扩容"}; empty group and empty note clear the
+// annotation. This is the one site control that is pure panel data: it never
+// touches a vhost or `nginx -t`, because a label and a note are not nginx
+// configuration. The site must still be one the provider reports, so the
+// annotation cannot be attached to a name the panel does not manage — the
+// handler checks that against the provider's list before writing.
+func (s *Server) handleSiteMeta(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Group string `json:"group"`
+		Note  string `json:"note"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	name := chiParam(r, "name")
+	group, note, err := normalizeSiteMeta(body.Group, body.Note)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+		return
+	}
+	// Confirm the provider actually manages this site before storing an
+	// annotation keyed by its name; otherwise a mistyped name would quietly
+	// accumulate a row nothing ever lists.
+	items, err := m.List()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "store", "读取站点列表失败")
+		return
+	}
+	var target *platform.SiteInfo
+	for i := range items {
+		if items[i].Name == name {
+			target = &items[i]
+			break
+		}
+	}
+	if target == nil {
+		writeErr(w, http.StatusNotFound, "not_found", platform.ErrSiteMissing.Error())
+		return
+	}
+	if err := s.Store.SaveSiteMeta(name, group, note); err != nil {
+		writeErr(w, http.StatusInternalServerError, "site_meta", "保存站点分组备注失败："+err.Error())
+		return
+	}
+	target.Group = group
+	target.Note = note
+	writeJSON(w, http.StatusOK, target)
 }

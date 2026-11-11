@@ -74,6 +74,13 @@ type SiteInfo struct {
 	// site points at 8.3" and "php8.3-fpm is answering" are two separate facts,
 	// and this is the second one.
 	PHPSocketState string `json:"php_socket_state,omitempty"`
+	// Group and Note are the operator's panel-side annotations, keyed by site
+	// name in the store and joined onto the list by the HTTP layer. The provider
+	// itself never sets them (nginx knows nothing about them), so every write
+	// response comes back with these empty and the front end re-reads the list
+	// to refresh them.
+	Group string `json:"group,omitempty"`
+	Note  string `json:"note,omitempty"`
 }
 
 // SiteTLSInfo is the platform-neutral certificate state of one site.

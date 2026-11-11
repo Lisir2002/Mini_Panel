@@ -187,8 +187,10 @@ paths:
         /api/v1/capabilities 里 site 那一项的 reason（本机没有 nginx / 面板不是
         root / 检测到 Apache 而写 Provider 目前只有 nginx），不在这里另写一套说法。
         每行是 {name, domains, root, config_path, enabled, created_at, tls?,
-        index?, php_version?, php_socket?, php_socket_state?}；enabled 在
-        sites-enabled 布局里等价于软链接存在，conf.d 布局里恒为 true。index 只在
+        index?, php_version?, php_socket?, php_socket_state?, group?, note?}；enabled 在
+        sites-enabled 布局里等价于软链接存在，conf.d 布局里恒为 true。group 与 note 是
+        面板侧的分组与备注，来自 SQLite 的 site_meta 表按站点名 join，不进 vhost 也不进
+        marker，省略表示该站点没有被标注（详见 /api/v1/sites/{name}/meta）。index 只在
         操作者自定义了默认文档时出现，缺省表示面板内置列表（绑定 PHP 时为
         index.php index.html index.htm，否则 index.html index.htm）。tls 只在启用
         HTTPS 后出现，字段为
@@ -739,6 +741,45 @@ paths:
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { description: 面板没有管理这个站点 }
         "422": { description: nginx 拒绝，已回滚（nginx_rejected） }
+  /api/v1/sites/{name}/meta:
+    put:
+      tags: [site]
+      summary: 设置或清除站点的分组与备注（面板侧元数据）
+      description: |
+        M2 第十六片：请求体 {group, note}。这是唯一一项纯面板数据、完全不碰 nginx
+        的站点控制——分组名与备注既不进 vhost 也不进站点标记 marker，因此没有
+        `nginx -t`、没有 reload、没有 422；它们存在面板自己的 SQLite（site_meta 表，
+        按站点名建主键），列表接口再按名 join 回每一行。group 是单行标签（最长 64 个
+        字符，禁止换行与控制字符），note 是可换行的自由文本（最长 500 个字符，禁止
+        控制字符，允许 \\n 与 \\t）。group 与 note 同时为空表示清除标注（删除该行）。
+        站点必须是 Provider 当前列出的站点：写入前用 Provider 列表核对名字，未管理的
+        名字返回 404，避免把标注挂在不存在的站点上。它不需要任何能力位图门槛以外的
+        前提——只要平台能列站点就能标注（列不出站点的平台同样 403 capability）。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                group:
+                  type: string
+                  maxLength: 64
+                  description: 分组标签；单行，禁止换行/控制字符；与 note 同时为空表示清除
+                note:
+                  type: string
+                  maxLength: 500
+                  description: 备注；可换行，禁止控制字符（\\n、\\t 除外）
+      responses:
+        "200": { description: 已保存，返回带 group/note 的站点行 }
+        "400": { description: 分组或备注超长/含控制字符（invalid_site） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
   /api/v1/sites/{name}/tls:
     post:
       tags: [site]
