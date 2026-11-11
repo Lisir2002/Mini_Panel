@@ -28,6 +28,7 @@ type fakeSites struct {
 	acmeErr      error
 	phpErr       error
 	settingsErr  error
+	rewriteErr   error
 	created      int
 	deleted      int
 	tlsSets      int
@@ -36,6 +37,7 @@ type fakeSites struct {
 	phpSets      int
 	phpClears    int
 	settingsSets int
+	rewriteSets  int
 	lastCertLen  int
 }
 
@@ -65,6 +67,7 @@ func (f *fakeSites) Create(spec platform.SiteSpec) (platform.SiteInfo, error) {
 	}
 	s := platform.SiteInfo{
 		Name: spec.Name, Domains: spec.Domains, Root: root, Index: spec.Index,
+		Rewrite:    spec.Rewrite,
 		ConfigPath: "/etc/nginx/sites-available/minipanel-" + spec.Name + ".conf",
 		Enabled:    true, CreatedAt: "2026-11-11T00:00:00Z",
 	}
@@ -131,6 +134,31 @@ func (f *fakeSites) SetBasics(name string, domains []string, root string, index 
 	f.sites[name] = s
 	f.settingsSets++
 	return s, nil
+}
+
+// SetRewrite mirrors the provider contract: the id is stored on the row and
+// returned to the caller. The real PHP-dependency check lives in nginx; these
+// tests only need a provider that records the call.
+func (f *fakeSites) SetRewrite(name, preset string) (platform.SiteInfo, error) {
+	if f.rewriteErr != nil {
+		return platform.SiteInfo{}, f.rewriteErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	s.Rewrite = preset
+	f.sites[name] = s
+	f.rewriteSets++
+	return s, nil
+}
+
+func (f *fakeSites) RewritePresets() []platform.RewritePreset {
+	return []platform.RewritePreset{
+		{ID: "none", Label: "默认（无重写）", Description: "静态查找"},
+		{ID: "wordpress", Label: "WordPress", Description: "回退到 index.php", RequiresPHP: true},
+		{ID: "spa", Label: "单页应用（SPA）", Description: "回退到 index.html"},
+	}
 }
 
 func (f *fakeSites) SetSelfSigned(name string, redirect bool) (platform.SiteInfo, error) {

@@ -196,7 +196,9 @@ paths:
         error?}；acme=true 的证书由面板自动续期，手工上传与自签证书不会以这种方式出现。
         php_version 非空表示站点已绑定到该 fpm 版本，php_socket 是平台从现场探测推导出的
         unix socket，php_socket_state 是这次读取时 socket 的真实状态（listening / idle /
-        absent / not_socket / unknown），不是持久化的承诺。
+        absent / not_socket / unknown），不是持久化的承诺。rewrite 是本地模板库里的规则 id
+        （none / wordpress / laravel / thinkphp / spa）；none 或省略表示默认的
+        try_files $uri $uri/ =404。
       responses:
         "200": { description: 返回 total 与 items }
         "403": { $ref: "#/components/responses/CSRF" }
@@ -214,6 +216,10 @@ paths:
         本机探测到且带 fpm 后端的版本，平台把版本解析成 socket 后才写配置，版本不存在
         或只有 cli/cgi 时返回 422 php_unavailable，且不会创建站点。选择版本还要求
         php_version_switch 为 available；静态站点不受该能力影响。
+        rewrite 省略或为 none 表示默认静态查找；wordpress / laravel / thinkphp 需要同时
+        绑定 PHP，否则返回 400 invalid_site（避免 nginx 把 index.php 当文本返回）；spa
+        可用于静态站点，回退到 /index.html。规则内容来自二进制内置模板，不接受调用方
+        提交配置片段。
         写入协议是"先测试后生效"：写配置 → nginx -t → 只有通过才 reload。任何一步
         失败都会恢复改动前的文件，因此响应为 422 nginx_rejected 时 nginx 里看到的
         仍然是上一份配置。成功的响应是 201 + 站点行。
@@ -237,12 +243,28 @@ paths:
                   maxItems: 10
                   items: { type: string }
                   description: 可省略；默认文档文件名列表，按顺序写入 vhost
+                rewrite: { type: string, description: 可省略；内置模板 id（none / wordpress / laravel / thinkphp / spa） }
                 php_version: { type: string, description: 可省略；必须是现场探测到带 fpm 的版本，如 8.3 }
       responses:
         "201": { description: 已创建并 reload }
         "400": { description: 站点参数不合法（invalid_site） }
         "409": { description: 同名站点已存在（site_exists） }
         "422": { description: nginx 拒绝（nginx_rejected）或 PHP 版本不可绑定（php_unavailable），均已回滚 }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/sites/rewrite-presets:
+    get:
+      tags: [site]
+      summary: 列出内置伪静态模板
+      description: |
+        M2 第八片：返回本二进制内的固定模板集，每一项为
+        {id, label, description, requires_php}。列表不联网、不从磁盘读取，也不接受上传；
+        这是 §8.1 对"在线规则库"的拒绝在接口上的落点。requires_php=true 的模板只能用于
+        已绑定 PHP 的站点；静态站点选择它会返回 400 invalid_site，而不是写出一份把
+        index.php 当文本返回的配置。
+        站点写入不可用时返回 403 capability，message 取 /api/v1/capabilities 的 site 理由。
+      responses:
+        "200": { description: 返回 items }
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { $ref: "#/components/responses/Disguised" }
   /api/v1/sites/{name}:
@@ -321,7 +343,9 @@ paths:
         选择版本要求 php_version_switch 为 available；清空绑定不受该能力限制，否则删除
         php-fpm 之后就再也没有办法把站点解绑。响应是更新后的站点行，含 php_version /
         php_socket / php_socket_state；state 不是 listening 时站点会 502，需要先启动
-        对应版本的 php-fpm。
+        对应版本的 php-fpm。若站点正在使用 wordpress / laravel / thinkphp 伪静态模板，
+        清空 PHP 会被拒绝（400 invalid_site），因为模板的回退目标是 index.php；先切回
+        none 或 spa 再解绑。
       parameters:
         - name: name
           in: path
@@ -342,6 +366,40 @@ paths:
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { description: 面板没有管理这个站点 }
         "422": { description: 版本不可绑定（php_unavailable）或 nginx 拒绝（nginx_rejected），已回滚 }
+  /api/v1/sites/{name}/rewrite:
+    put:
+      tags: [site]
+      summary: 设置站点的伪静态模板（none 关闭）
+      description: |
+        M2 第八片：请求体 {preset}，preset 必须是 GET /api/v1/sites/rewrite-presets
+        返回的 id 之一（none / wordpress / laravel / thinkphp / spa）；none 表示恢复默认的
+        try_files $uri $uri/ =404。服务端只把白名单 id 映射成固定 nginx 片段，不接受调用方
+        提交 try_files 或任何配置文本。
+        wordpress / laravel / thinkphp 需要站点当前已绑定 PHP；静态站点请求这些模板返回
+        400 invalid_site。反方向同样受保护：已使用 PHP 模板的站点在清空 PHP 绑定时会被
+        拒绝（PUT .../php），必须先切回 none 或 spa，避免 index.php 被当作文本返回。
+        写入仍走"写配置 → nginx -t → 通过才 reload"；失败恢复上一份配置，响应 422
+        nginx_rejected。成功响应是更新后的站点行，含 rewrite 字段。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [preset]
+              properties:
+                preset: { type: string, enum: [none, wordpress, laravel, thinkphp, spa] }
+      responses:
+        "200": { description: 已生效，返回更新后的站点行 }
+        "400": { description: 模板未知或站点未绑定 PHP（invalid_site） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx 拒绝，已回滚（nginx_rejected） }
   /api/v1/sites/{name}/tls:
     post:
       tags: [site]

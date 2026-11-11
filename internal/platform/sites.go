@@ -18,6 +18,7 @@ type SiteSpec struct {
 	Domains    []string `json:"domains"`
 	Root       string   `json:"root"`
 	Index      []string `json:"index,omitempty"`
+	Rewrite    string   `json:"rewrite,omitempty"`
 	PHPVersion string   `json:"php_version,omitempty"`
 }
 
@@ -31,9 +32,13 @@ type SiteInfo struct {
 	TLS        *SiteTLSInfo `json:"tls,omitempty"`
 	// Index is the site's custom document-index list; absent means the panel's
 	// default (index.php first for PHP sites, otherwise index.html/index.htm).
-	Index      []string `json:"index,omitempty"`
-	PHPVersion string   `json:"php_version,omitempty"`
-	PHPSocket  string   `json:"php_socket,omitempty"`
+	Index []string `json:"index,omitempty"`
+	// Rewrite is the id of a bundled rewrite template ("none" for the default
+	// static lookup). The set is exposed by SiteRewriteManager so the UI and
+	// the provider cannot drift.
+	Rewrite    string `json:"rewrite,omitempty"`
+	PHPVersion string `json:"php_version,omitempty"`
+	PHPSocket  string `json:"php_socket,omitempty"`
 	// PHPSocketState is the live state of PHPSocket (listening / idle / absent /
 	// not_socket / unknown), computed on every read. It is not persisted: "the
 	// site points at 8.3" and "php8.3-fpm is answering" are two separate facts,
@@ -86,6 +91,25 @@ type SitePHPManager interface {
 // missing interface instead of showing a form that writes nothing.
 type SiteSettingsManager interface {
 	SetBasics(name string, domains []string, root string, index []string) (SiteInfo, error)
+}
+
+// RewritePreset is the platform-neutral view of one locally bundled rewrite
+// template. RequiresPHP tells the UI (and the server-side validator) that the
+// template's fallback is a PHP script, which must never be served as text.
+type RewritePreset struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+	RequiresPHP bool   `json:"requires_php"`
+}
+
+// SiteRewriteManager is the optional "rewrite templates" half of a site
+// writer. The template set is read from the provider rather than duplicated in
+// the front end, so adding a template cannot produce a UI option the backend
+// rejects (or a backend template with no way to select it).
+type SiteRewriteManager interface {
+	SetRewrite(name, preset string) (SiteInfo, error)
+	RewritePresets() []RewritePreset
 }
 
 // SiteTLSManager is the optional certificate side of a site writer. Manual

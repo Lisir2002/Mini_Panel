@@ -3,14 +3,16 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七片：静态站点、站点证书、PHP 版本绑定与基础设置编辑。这一页的边界
-// 与后端能力位图是同一句话，不另写一套：
+// M2 第三、四、六、七、八片：静态站点、站点证书、PHP 版本绑定、基础设置编辑与伪静态模板。
+// 这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
 //   * 编辑对话框替换域名、根目录与默认文档。域名变更时后端先用现有证书校验新域名集合，
 //     覆盖不了就返回 422 invalid_tls 且不写文件——页面原样显示理由，不假装保存成功。
 //   * php_version_switch 只列出 php_fpm_versions；选择后由后端把版本解析成 socket。
 //     socket 当前不是 listening 时，页面直接说"站点会 502"，不把配置写入说成后端可用。
+//   * 伪静态列表来自 GET /sites/rewrite-presets，不是前端硬编码；模板内容固定在二进制里。
+//     wordpress / laravel / thinkphp 需要已绑定 PHP，静态站点会被后端拒绝。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
 //     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
 //     而不是等请求失败后才解释。
@@ -46,6 +48,11 @@ const editOpen = ref(false);
 const editTarget = ref(null);
 const editForm = ref({ domains: "", root: "", index: "" });
 
+const rewritePresets = ref([]);
+const rewriteOpen = ref(false);
+const rewriteTarget = ref(null);
+const rewriteForm = ref({ preset: "none" });
+
 function parseDomains(text) {
   return String(text || "")
     .split(/[\s,，;；]+/)
@@ -64,7 +71,14 @@ function parseIndex(text) {
 async function load() {
   error.value = "";
   if (!available.value) return;
-  try { state.value = await api("/api/v1/sites"); }
+  try {
+    const [sites, presets] = await Promise.all([
+      api("/api/v1/sites"),
+      api("/api/v1/sites/rewrite-presets"),
+    ]);
+    state.value = sites;
+    rewritePresets.value = presets.items || [];
+  }
   catch (e) { error.value = e.message; }
 }
 
@@ -250,6 +264,37 @@ async function saveEdit() {
   } finally { busy.value = false; }
 }
 
+function rewritePreset(id) {
+  return rewritePresets.value.find((p) => p.id === id) || null;
+}
+
+function rewriteLabel(r) {
+  if (!r.rewrite || r.rewrite === "none") return "";
+  return rewritePreset(r.rewrite)?.label || r.rewrite;
+}
+
+function openRewrite(r) {
+  error.value = ""; msg.value = "";
+  rewriteTarget.value = r;
+  rewriteForm.value = { preset: r.rewrite || "none" };
+  rewriteOpen.value = true;
+}
+
+async function saveRewrite() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const site = await api("/api/v1/sites/" + encodeURIComponent(rewriteTarget.value.name) + "/rewrite",
+      { method: "PUT", body: JSON.stringify({ preset: rewriteForm.value.preset }) });
+    msg.value = site.name + " 的伪静态已更新；nginx 已通过 nginx -t 并重载。";
+    rewriteOpen.value = false;
+    await load();
+  } catch (e) {
+    // 静态站点选择 PHP 模板会得到 400 invalid_site；后端没有写文件，原样显示。
+    error.value = e.message;
+    await load();
+  } finally { busy.value = false; }
+}
+
 onMounted(load);
 </script>
 
@@ -258,8 +303,8 @@ onMounted(load);
     <h3>网站</h3>
     <p class="mp-note">
       管理面板自己创建的站点；可以在创建时或之后绑定一个本机探测到的 PHP fpm 版本，留空则是
-      <b>静态站点</b>。站点的域名、根目录与默认文档可随时编辑。每一次创建、编辑、删除、
-      PHP 切换或证书变更都是"先测试后生效"：写配置 →
+      <b>静态站点</b>。站点的域名、根目录、默认文档与伪静态模板可随时编辑。每一次创建、编辑、删除、
+      PHP 切换、伪静态或证书变更都是"先测试后生效"：写配置 →
       <code class="mp-code">nginx -t</code> → 只有通过才 reload；任何一步失败都会恢复上一份配置与证书。
       只列出面板自己写出的 vhost（文件内带标记），手工写的配置不会被列出来，也不会被删除。
     </p>
@@ -337,6 +382,7 @@ onMounted(load);
             <td>
               <code class="mp-code">{{ r.root }}</code>
               <div v-if="r.index?.length" class="mp-muted mp-tiny">index {{ r.index.join(" ") }}</div>
+              <div v-if="rewriteLabel(r)" class="mp-muted mp-tiny">伪静态 · {{ rewriteLabel(r) }}</div>
             </td>
             <td>
               <span class="mp-tag on" v-if="r.enabled">已启用</span>
@@ -362,8 +408,9 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:225px;white-space:nowrap">
+            <td style="width:280px;white-space:nowrap">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
+              <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" :disabled="!phpAvailable && !r.php_version" @click="openPHP(r)">
                 PHP
               </el-button>
@@ -412,6 +459,30 @@ onMounted(load);
         </template>
       </el-dialog>
 
+      <el-dialog v-model="rewriteOpen" :title="'伪静态 · ' + (rewriteTarget?.name || '')" width="min(560px, 94vw)">
+        <el-alert v-if="rewriteTarget && !rewriteTarget.php_version" type="info" :closable="false" style="margin-bottom:10px"
+          title="当前是静态站点：需要 PHP 的模板（WordPress / Laravel / ThinkPHP）不可选，避免 nginx 把 index.php 当文本返回。先绑定 PHP 再回来选择。" />
+        <el-form label-position="top" @submit.prevent="saveRewrite">
+          <el-form-item label="规则模板">
+            <el-select v-model="rewriteForm.preset" style="width:100%">
+              <el-option v-for="p in rewritePresets" :key="p.id" :label="p.label" :value="p.id"
+                :disabled="p.requires_php && !rewriteTarget?.php_version" />
+            </el-select>
+            <div class="mp-hint" style="margin-top:6px">
+              {{ rewritePreset(rewriteForm.preset)?.description || "" }}
+            </div>
+            <div class="mp-hint">
+              模板内容固定在面板二进制内，不接受自定义 try_files 或配置片段；保存仍走
+              <code class="mp-code">nginx -t</code> → reload，失败会恢复原来的规则。
+            </div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="rewriteOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy" @click="saveRewrite">应用</el-button>
+        </template>
+      </el-dialog>
+
       <el-dialog v-model="phpOpen" :title="'PHP · ' + (phpTarget?.name || '')" width="min(520px, 94vw)">
         <el-alert v-if="!phpAvailable" type="info" :closable="false" style="margin-bottom:10px"
           :title="phpSwitchFeat?.reason || '本机没有可绑定的 php-fpm 版本。'" />
@@ -428,6 +499,10 @@ onMounted(load);
             <div v-if="phpForm.version && phpTarget?.php_version === phpForm.version && !phpSocketOk(phpTarget)" class="mp-hint">
               当前 socket 状态：{{ phpSocketWords(phpTarget) }}；保存后站点会返回 502，先启动
               PHP {{ phpForm.version }} 的 fpm。
+            </div>
+            <div v-if="phpTarget && rewritePreset(phpTarget.rewrite)?.requires_php" class="mp-hint">
+              当前站点使用 {{ rewriteLabel(phpTarget) }} 伪静态模板，回退目标是 index.php；清空 PHP
+              会被后端拒绝。先把伪静态切回“默认”或“单页应用”，再解绑。
             </div>
           </el-form-item>
         </el-form>
@@ -487,8 +562,10 @@ onMounted(load);
         证书来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符证书仍需上传（DNS-01
         尚未交付）；手工上传与自签证书不会被自动替换。PHP 版本绑定使用各版本已有的 fpm socket，
         不创建独立 pool；多版本安装/卸载仍是后续片，能力位图里的
-        <code class="mp-code">php</code> 仍为 degraded。站点的域名、根目录与默认文档可以
-        随时编辑，域名变更受现有证书覆盖范围约束。新建站点的根目录是 0755 的空目录，
+        <code class="mp-code">php</code> 仍为 degraded。站点的域名、根目录、默认文档与伪静态模板可以
+        随时编辑，域名变更受现有证书覆盖范围约束。伪静态模板由本地二进制提供
+        （WordPress / Laravel / ThinkPHP / SPA），不接受自定义配置片段；需要 PHP 的模板只能用于
+        已绑定 PHP 的站点。新建站点的根目录是 0755 的空目录，
         放一个 <code class="mp-code">index.html</code>（或绑定 PHP 后放 index.php）就能访问。
       </div>
     </template>

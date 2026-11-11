@@ -427,7 +427,7 @@ func renderServer(s Site, tlsOn bool) string {
 		b.WriteString("    ssl_session_cache shared:SSL:10m;\n")
 	}
 	b.WriteString("\n    location / {\n")
-	b.WriteString("        try_files $uri $uri/ =404;\n")
+	b.WriteString("        " + rewriteLocation(s) + "\n")
 	b.WriteString("    }\n")
 	if s.PHPVersion != "" {
 		// try_files keeps a missing script from reaching php-fpm as a request

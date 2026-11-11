@@ -180,6 +180,10 @@ type Site struct {
 	// (or index.php first when PHP is bound); a non-empty list is rendered
 	// verbatim, in order.
 	Index []string `json:"index,omitempty"`
+	// Rewrite is the id of one locally bundled rewrite template ("none" when
+	// the site uses the default try_files). It is a closed vocabulary, never a
+	// config fragment supplied by a request.
+	Rewrite string `json:"rewrite,omitempty"`
 	// PHPVersion and PHPSocket name the fpm backend this site's .php location
 	// points at. The socket is supplied by the platform layer, which derives it
 	// from a discovered installation; it is never taken from an HTTP request.
@@ -194,6 +198,7 @@ type Spec struct {
 	Domains    []string `json:"domains"`
 	Root       string   `json:"root"`
 	Index      []string `json:"index,omitempty"`
+	Rewrite    string   `json:"rewrite,omitempty"`
 	PHPVersion string   `json:"php_version,omitempty"`
 	PHPSocket  string   `json:"php_socket,omitempty"`
 }
@@ -204,6 +209,7 @@ type markerPayload struct {
 	Root       string     `json:"root"`
 	CreatedAt  string     `json:"created_at"`
 	Index      []string   `json:"index,omitempty"`
+	Rewrite    string     `json:"rewrite,omitempty"`
 	TLS        *markerTLS `json:"tls,omitempty"`
 	PHPVersion string     `json:"php_version,omitempty"`
 	PHPSocket  string     `json:"php_socket,omitempty"`
@@ -384,7 +390,7 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 	s := Site{
 		Name: payload.Name, Domains: payload.Domains, Root: payload.Root,
 		ConfigPath: p, CreatedAt: payload.CreatedAt, Index: payload.Index,
-		PHPVersion: payload.PHPVersion, PHPSocket: payload.PHPSocket,
+		Rewrite: payload.Rewrite, PHPVersion: payload.PHPVersion, PHPSocket: payload.PHPSocket,
 	}
 	s.TLS = m.tlsFromMarker(payload)
 	if lp := m.Layout.LinkPath(payload.Name); lp != "" {
@@ -412,6 +418,9 @@ func parseMarker(body string) (markerPayload, bool) {
 		if validateIndex(p.Index, p.PHPVersion != "") != nil {
 			return markerPayload{}, false
 		}
+		if validateRewrite(p.Rewrite, p.PHPVersion != "") != nil {
+			return markerPayload{}, false
+		}
 		return p, p.Name != "" && len(p.Domains) > 0 && p.Root != ""
 	}
 	return markerPayload{}, false
@@ -436,12 +445,16 @@ func (m *Manager) Create(spec Spec) (Site, error) {
 	}
 	root = filepath.Clean(root)
 	index := normalizeIndex(spec.Index)
+	rewrite := normalizeRewrite(spec.Rewrite)
 	phpVersion := strings.TrimSpace(spec.PHPVersion)
 	phpSocket := strings.TrimSpace(spec.PHPSocket)
 	if err := validatePHP(phpVersion, phpSocket); err != nil {
 		return Site{}, err
 	}
 	if err := validateIndex(index, phpVersion != ""); err != nil {
+		return Site{}, err
+	}
+	if err := validateRewrite(rewrite, phpVersion != ""); err != nil {
 		return Site{}, err
 	}
 
@@ -459,7 +472,7 @@ func (m *Manager) Create(spec Spec) (Site, error) {
 	site := Site{
 		Name: spec.Name, Domains: domains, Root: root, Index: index,
 		ConfigPath: confPath, Enabled: true, CreatedAt: createdAt,
-		PHPVersion: phpVersion, PHPSocket: phpSocket,
+		Rewrite: rewrite, PHPVersion: phpVersion, PHPSocket: phpSocket,
 	}
 
 	// The document root is operator data, but creating it is part of creating
@@ -546,6 +559,11 @@ func (m *Manager) SetPHP(name, version, socket string) (Site, error) {
 		return Site{}, ErrNotFound
 	}
 	if err := validateIndex(site.Index, version != ""); err != nil {
+		return Site{}, err
+	}
+	// A PHP-dependent rewrite template cannot survive a switch back to static:
+	// its fallback target is index.php, which nginx would then serve as text.
+	if err := validateRewrite(site.Rewrite, version != ""); err != nil {
 		return Site{}, err
 	}
 	site.PHPVersion, site.PHPSocket = version, socket
@@ -729,6 +747,7 @@ func render(s Site) string {
 	payload, _ := json.Marshal(markerPayload{
 		Name: s.Name, Domains: s.Domains, Root: s.Root, CreatedAt: s.CreatedAt,
 		Index:      s.Index,
+		Rewrite:    s.Rewrite,
 		TLS:        markerFromTLS(s.Name, s.TLS),
 		PHPVersion: s.PHPVersion, PHPSocket: s.PHPSocket,
 	})

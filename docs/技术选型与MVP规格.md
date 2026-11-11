@@ -78,13 +78,16 @@
   不写任何东西、不装任何东西。`internal/platform` 依赖它，而不是反过来。
   第六片只加了一个纯函数 `internal/php/php.go:352 FPMVersions()`：从探测结果里筛出带 fpm 的
   版本，作为 `php_fpm_versions` 与页面选择器的唯一来源。站点版本绑定在平台层
-  （`internal/platform/platform_linux.go:190 resolvePHPBinding()`）先按现场探测确认版本确有
+  （`internal/platform/platform_linux.go:215 resolvePHPBinding()`）先按现场探测确认版本确有
   fpm，再把 socket 交给 `internal/nginx` 写进 vhost；**不创建 per-site pool**。
   第七片没有扩大 `SiteManager`，而是新增可选的
   `internal/platform/sites.go:87 SiteSettingsManager`（`SetBasics`），由
   `internal/platform/platform_linux.go:178` 接线到 nginx 的 `SetBasics`。这样旧 Provider 不必
   实现一个它做不到的写入口，页面也能从缺失的接口得出"本机不能编辑站点"，而不是画一个点了
-  没反应的按钮。
+  没反应的按钮。第八片同样走可选接口：`internal/platform/sites.go:110 SiteRewriteManager`
+  （`SetRewrite` / `RewritePresets`），由 `internal/platform/platform_linux.go:189` / `:200`
+  接线；模板集本身在 `internal/nginx/rewrite.go:54 RewritePresets()`，是编译进二进制的封闭
+  词汇表，列表也由后端返回，页面不硬编码，因而不会与白名单漂移。
 * `internal/acme` 是 M2 第五片新增的包：它只负责一件事——用 `golang.org/x/crypto/acme`
   走完 RFC 8555 的 HTTP-01 签发（`internal/acme/acme.go:125 Issue()`），并把 token 写进
   调用方给的 webroot。它不知道 nginx、不知道站点、不碰面板配置；证书装进 vhost 由
@@ -111,10 +114,10 @@
   平台实现再对它**当场验证过的**部分调用 `Allow()`，或调用 `Degrade()` 说清"主路径能做、缺的是哪一半"。
   默认拒绝，而不是默认允许。
   **实际状态**：`Allow()` 在生产代码里有五处——`internal/platform/detect.go:75` 点亮任何主机都成立的
-  `audit`，`internal/platform/platform_linux.go:450` / `:451` / `:457` 在"nginx 可识别、进程是 root、
-  `SiteACMEManager` 可用"时点亮 `site` / `site_write` / `ssl`，`:554` 在探测到带 fpm 的 PHP 版本
+  `audit`，`internal/platform/platform_linux.go:476` / `:477` / `:483` 在"nginx 可识别、进程是 root、
+  `SiteACMEManager` 可用"时点亮 `site` / `site_write` / `ssl`，`:580` 在探测到带 fpm 的 PHP 版本
   且站点可写时点亮 `php_version_switch`。生产代码里的 `Degrade()` 有四处：
-  `platform_linux.go:446` / `:447`（nginx 在但不是 root）与 `:538` / `:548`（PHP 有运行时但缺后端 /
+  `platform_linux.go:472` / `:473`（nginx 在但不是 root）与 `:564` / `:574`（PHP 有运行时但缺后端 /
   `php` 主路径仍缺安装卸载）。因此 `available` 不是只有 `audit`：`site`、`site_write`、`ssl`、
   `php_version_switch` 会在条件成立的主机上进入这一档；`php`、`database`、`firewall` 等仍停在
   `degraded` / `unavailable`。
@@ -281,12 +284,12 @@
    `/healthz` 永远可达。**持有合法 `mp_session` 后任何路径都可访问**——这是有意的：SPA 的导航、
    刷新与深链必须落在原路径上，把它们全部改写到一个魔法路径会拿可用的界面换一个勾。
    因此**入口不能缓解 XSS，也不能缓解 Cookie 泄露**，任何"安全入口保护登录后的面板"的表述都是
-   错的；`entranceGate` 的注释（`internal/api/server.go:204-245`）已经把这段结论写死，
+   错的；`entranceGate` 的注释（`internal/api/server.go:191-209`）已经把这段结论写死，
    文档与 README 必须原样表达这条边界。**"登录后逐路径校验入口"是 M1 待办**（见
    `docs/里程碑.md`），在它实现之前不得写成现状。真正的访问控制 = 监听地址 + 会话令牌与有效期
    + `panel.ip_allowlist` + CSRF + 登录锁定。
    伪装响应的**形态**也是一条决定：中性 HTML 错误页，只含状态码文本，不含产品名与版本
-   （`internal/api/server.go:281 disguise()` 的注释）。不用 Go 默认 `http.Error` 的
+   （`internal/api/server.go:284 disguise()` 的注释）。不用 Go 默认 `http.Error` 的
    `text/plain`，因为"404 Not Found"那 10 个字节本身就是运行环境指纹，而这条响应的目的正是
    让探测者学不到东西；也不冒充 nginx 的错误页——这个进程就是 web server，一张普通 404 是
    事实，冒充别人的错误页在事故响应时误导运维的程度不亚于误导扫描器。页面里内联
@@ -387,8 +390,8 @@ bcrypt 口令哈希、有效会话 ID 和整份审计记录：会话 ID 泄露�
 反应的按钮，或者一整块被藏起来的已交付功能。
 
 因此这条纪律是**测试强制**的，不是文档口径（M2 第一片是它的正面样本：`internal/php` 当场探到
-PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:509`
-起读现场，`:538` 报的是"检测到了什么、缺哪个后端"。第六片把"站点能绑定到某个已有版本"
+PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:535`
+起读现场，`:564` 报的是"检测到了什么、缺哪个后端"。第六片把"站点能绑定到某个已有版本"
 交付了，`php_version_switch` 才允许在"站点可写 + 探测到 fpm"时 `available`；
 但 `php` 本身仍是 `degraded`，多版本安装/卸载与 `php_ext_source` 没有写入路径）：
 
@@ -485,7 +488,7 @@ M2 第二片补上了一条曾经记在本表里的缺口：**`doctor` 打印的
 | 面板自签证书生成、SAN 跟随本机地址重签 | `grep -rn "EnsureSelfSignedTLS" --include='*_test.go' .` 为空 | 代码 `internal/sec/tls.go:26`；`make doctor` 的证书行、`minipanel init` 的实际输出 |
 | `-wal` / `-shm` 的 0600 | `TestFilePermissionsAreOwnerOnly` 只 `os.Stat` 主库文件 | 代码 `internal/store/store.go:46-57` 的三元素循环 |
 | 面板证书与私钥的 0600 | `internal/sec` 只有一个测试文件且不碰证书 | 代码 `internal/sec/tls.go:74-86` |
-| `444`（挂断型）伪装真的会断连 | `disguise()` 的 Hijacker 分支只在配置 444 时走到，M0 测试跑的是 404 | 代码 `internal/api/server.go:275` |
+| `444`（挂断型）伪装真的会断连 | `disguise()` 的 Hijacker 分支只在配置 444 时走到，M0 测试跑的是 404 | 代码 `internal/api/server.go:286` |
 | ACME 只对 Pebble 跑过端到端，没有对 Let's Encrypt 生产环境真签过 | `grep -rn "pebble" --include='*_test.go' .` 只命中 `internal/acme/pebble_test.go`；它默认跳过（`pebble` 不在 PATH 时 `t.Skip`），CI 不会自动跑 | 协议流程由 `internal/acme` 的 9 个单元用例覆盖；端到端复核命令写在 README「如何验证」；生产签发仍受 80 端口可达与域名解析两个外部条件约束 |
 | DNS-01 / 通配符签发没有实现，也没有测试 | `grep -rn "DNS01\|dns-01\|Wildcard" --include='*.go' internal/` 只应命中通配符拒绝逻辑，不应有 DNS 客户端 | 代码在写任何配置之前拒绝（`internal/acme/acme.go` 的 `normalizeDomains` + `internal/platform/platform_linux.go` 的 `obtainACME`），HTTP 返回 `422 acme_unsupported`；通配符站点只能上传证书 |
 | 前端"灰 + 理由"的实际渲染 | 仓库里没有 UI 自动化：`make web` 编译前端并断言产物只有一个文件，`make check-ui` 断言能力 key 全覆盖与端点全覆盖，但**"页面画出来对不对"这一步仍然靠人**（真实浏览器的 puppeteer 脚本刻意不入仓库，它依赖本机 chrome） | `make check-ui` 的三条 + `make check-honesty` 保证理由必然存在；每轮里程碑手工跑一遍浏览器断言并在 README"如何验证"里记下条数 |

@@ -149,7 +149,7 @@ func (l linuxSites) Create(spec SiteSpec) (SiteInfo, error) {
 	}
 	s, err := l.m.Create(nginx.Spec{
 		Name: spec.Name, Domains: spec.Domains, Root: spec.Root, Index: spec.Index,
-		PHPVersion: version, PHPSocket: socket,
+		Rewrite: spec.Rewrite, PHPVersion: version, PHPSocket: socket,
 	})
 	if err != nil {
 		return SiteInfo{}, mapNginxErr(err)
@@ -181,6 +181,31 @@ func (l linuxSites) SetBasics(name string, domains []string, root string, index 
 		return SiteInfo{}, mapNginxErr(err)
 	}
 	return toSiteInfo(s), nil
+}
+
+// SetRewrite replaces the locally bundled rewrite template. The nginx package
+// owns the allow-list and the PHP-dependency check; the adapter only maps the
+// result back to the platform-neutral row.
+func (l linuxSites) SetRewrite(name, preset string) (SiteInfo, error) {
+	s, err := l.m.SetRewrite(name, preset)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
+// RewritePresets is the same list the provider will accept. The UI reads it
+// from here instead of hard-coding labels, so a stale front end cannot offer a
+// template that the server rejects.
+func (l linuxSites) RewritePresets() []RewritePreset {
+	src := nginx.RewritePresets()
+	out := make([]RewritePreset, 0, len(src))
+	for _, p := range src {
+		out = append(out, RewritePreset{
+			ID: p.ID, Label: p.Label, Description: p.Description, RequiresPHP: p.RequiresPHP,
+		})
+	}
+	return out
 }
 
 // resolvePHPBinding is the only version→socket translation. It returns empty
@@ -348,6 +373,7 @@ func mapACMEErr(err error) error {
 func toSiteInfo(s nginx.Site) SiteInfo {
 	out := SiteInfo{
 		Name: s.Name, Domains: s.Domains, Root: s.Root, Index: s.Index,
+		Rewrite:    s.Rewrite,
 		ConfigPath: s.ConfigPath, Enabled: s.Enabled, CreatedAt: s.CreatedAt,
 		PHPVersion: s.PHPVersion, PHPSocket: s.PHPSocket,
 	}

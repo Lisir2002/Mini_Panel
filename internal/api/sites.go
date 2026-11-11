@@ -74,6 +74,21 @@ func (s *Server) siteSettingsManager() (platform.SiteSettingsManager, string) {
 	return sm, ""
 }
 
+// siteRewriteManager is the optional rewrite-template interface. The template
+// list comes from the provider rather than a front-end constant, so the
+// selector can only offer ids the server will accept.
+func (s *Server) siteRewriteManager() (platform.SiteRewriteManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	rm, ok := m.(platform.SiteRewriteManager)
+	if !ok || rm == nil {
+		return nil, "该平台的站点 Provider 没有实现伪静态模板"
+	}
+	return rm, ""
+}
+
 // handleSitesList is GET /api/v1/sites. Only files the panel wrote itself are
 // listed; a hand-written vhost in the same directory is somebody else's
 // configuration and is not reported as a panel site.
@@ -108,6 +123,7 @@ func (s *Server) handleSiteCreate(w http.ResponseWriter, r *http.Request) {
 		Domains    []string `json:"domains"`
 		Root       string   `json:"root"`
 		Index      []string `json:"index"`
+		Rewrite    string   `json:"rewrite"`
 		PHPVersion string   `json:"php_version"`
 	}
 	if err := decodeBody(r, &body); err != nil {
@@ -131,7 +147,7 @@ func (s *Server) handleSiteCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	site, err := m.Create(platform.SiteSpec{
 		Name: body.Name, Domains: body.Domains, Root: body.Root, Index: body.Index,
-		PHPVersion: phpVersion,
+		Rewrite: body.Rewrite, PHPVersion: phpVersion,
 	})
 	switch {
 	case err == nil:
@@ -187,6 +203,56 @@ func (s *Server) handleSiteUpdate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_write", "更新站点失败："+err.Error())
+	}
+}
+
+// handleSiteRewritePresets is GET /api/v1/sites/rewrite-presets. The list is
+// bundled in the binary, not downloaded: the design explicitly rejects an
+// online template library, and the provider is the single source for both the
+// selector and the validator.
+func (s *Server) handleSiteRewritePresets(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteRewriteManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	items := m.RewritePresets()
+	if items == nil {
+		items = []platform.RewritePreset{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+// handleSiteRewrite is PUT /api/v1/sites/{name}/rewrite. The body is
+// {"preset":"wordpress"}; "none" removes the template. The provider validates
+// the id against its bundled set and refuses a PHP-dependent template on a
+// static site, then rewrites the vhost through test-before-reload. A failed
+// write leaves the previous template serving.
+func (s *Server) handleSiteRewrite(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteRewriteManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Preset string `json:"preset"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetRewrite(chiParam(r, "name"), body.Preset)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_rewrite", "更新伪静态失败："+err.Error())
 	}
 }
 
