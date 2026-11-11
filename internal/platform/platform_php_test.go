@@ -28,6 +28,9 @@ func TestDetectPHPFieldsMatchDiscovery(t *testing.T) {
 	if got, want := strings.Join(caps.PHPVersions, ","), strings.Join(php.Versions(installs), ","); got != want {
 		t.Errorf("php_versions = %q, discovery says %q", got, want)
 	}
+	if got, want := strings.Join(caps.PHPFPMVersions, ","), strings.Join(php.FPMVersions(installs), ","); got != want {
+		t.Errorf("php_fpm_versions = %q, discovery says %q", got, want)
+	}
 	fpm, cgi := php.Modes(installs)
 	want := []PHPRuntimeMode{}
 	if fpm {
@@ -176,9 +179,10 @@ func TestDetectPHPFromRootedHosts(t *testing.T) {
 			if tc.wantInReason != "" && !strings.Contains(caps.Reason(FeatPHP), tc.wantInReason) {
 				t.Errorf("reason %q does not name %q", caps.Reason(FeatPHP), tc.wantInReason)
 			}
-			// A fake root has no running fpm, so the reason must still name the
-			// write path that has not shipped instead of implying it works.
-			if len(caps.PHPModes) > 0 && !strings.Contains(caps.Reason(FeatPHP), "M2 交付") {
+			// A fake root has no running fpm, and this host has no writable site
+			// provider, so the reason must still say what part of PHP is missing
+			// instead of implying the whole runtime is finished.
+			if len(caps.PHPModes) > 0 && !strings.Contains(caps.Reason(FeatPHP), "多版本安装") {
 				t.Errorf("reason %q claims a handler without saying what is missing", caps.Reason(FeatPHP))
 			}
 		})

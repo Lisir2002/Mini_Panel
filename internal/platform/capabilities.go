@@ -161,6 +161,11 @@ type Capabilities struct {
 	// was the bug — nothing stopped a key being off in one map and absent from
 	// the other.
 	Features map[string]Feature `json:"features"`
+
+	// PHPFPMVersions lists only the discovered versions that expose fpm. It is
+	// the selector source for site binding: PHPVersions may include a cli-only
+	// install, which has no socket a vhost can use.
+	PHPFPMVersions []string `json:"php_fpm_versions"`
 }
 
 // State reports the state of a key. An unknown key reports unavailable rather
@@ -234,4 +239,9 @@ const (
 	FeatAudit        = "audit"
 	FeatSSHManager   = "ssh_manager"
 	FeatFilePerms    = "file_posix_perms"
+	// FeatPHPVersionSwitch is the site-level half of PHP: binding a vhost to one
+	// installed fpm version. It is separate from FeatPHP because installing,
+	// removing and extending PHP are different write paths with different
+	// prerequisites.
+	FeatPHPVersionSwitch = "php_version_switch"
 )

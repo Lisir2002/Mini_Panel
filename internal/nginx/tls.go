@@ -406,7 +406,14 @@ func renderServer(s Site, tlsOn bool) string {
 	}
 	b.WriteString("    server_name " + strings.Join(s.Domains, " ") + ";\n\n")
 	b.WriteString("    root " + s.Root + ";\n")
-	b.WriteString("    index index.html index.htm;\n")
+	if s.PHPVersion != "" {
+		// index.php first: a directory that has both index.php and index.html is
+		// a PHP application, and serving the static file would silently skip the
+		// handler the operator just selected.
+		b.WriteString("    index index.php index.html index.htm;\n")
+	} else {
+		b.WriteString("    index index.html index.htm;\n")
+	}
 	if tlsOn {
 		b.WriteString("\n    ssl_certificate " + s.TLS.CertPath + ";\n")
 		b.WriteString("    ssl_certificate_key " + s.TLS.KeyPath + ";\n")
@@ -416,6 +423,18 @@ func renderServer(s Site, tlsOn bool) string {
 	b.WriteString("\n    location / {\n")
 	b.WriteString("        try_files $uri $uri/ =404;\n")
 	b.WriteString("    }\n")
+	if s.PHPVersion != "" {
+		// try_files keeps a missing script from reaching php-fpm as a request
+		// whose SCRIPT_FILENAME points at a file that does not exist. fastcgi_params
+		// is the distribution's standard file; SCRIPT_FILENAME is added explicitly
+		// because Debian's copy does not contain it.
+		b.WriteString("\n    location ~ \\.php$ {\n")
+		b.WriteString("        try_files $uri =404;\n")
+		b.WriteString("        include fastcgi_params;\n")
+		b.WriteString("        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n")
+		b.WriteString("        fastcgi_pass unix:" + s.PHPSocket + ";\n")
+		b.WriteString("    }\n")
+	}
 	b.WriteString("}\n")
 	return b.String()
 }

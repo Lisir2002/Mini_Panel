@@ -58,13 +58,15 @@ const MECH_GROUPS = [
   ["操作系统", ["os", "os_family", "os_version", "is_privileged"], (c) => (c.os || "—") + " / " + (c.os_family || "—"),
     (c) => (c.os_version || "") + (c.is_privileged ? " · 进程具备提权能力" : " · 未提权")],
   ["Web 服务", ["web_servers"], (c) => (c.web_servers || []).join(", ") || "未检测到", null],
-  ["PHP 运行时", ["php_modes", "php_versions"], (c) => (c.php_modes || []).join(", ") || "未检测到 fpm / cgi",
+  ["PHP 运行时", ["php_modes", "php_versions", "php_fpm_versions"], (c) => (c.php_modes || []).join(", ") || "未检测到 fpm / cgi",
     // 这一行必须两栏一起读：php_versions 有值而 php_modes 为空，就是"装了 PHP 但没有
-    // 能执行站点的后端"。上一版只把版本号裸贴在后面，读者会以为两句话在互相打脸。
+    // 能执行站点的后端"。php_fpm_versions 是站点选择器的来源，只含真正带 fpm 的版本。
     (c) => {
       const v = (c.php_versions || []).join(" ");
       if (!v) return "未检测到 PHP 运行时";
-      return "已检测到 " + v + ((c.php_modes || []).length ? "" : "，但没有能执行站点的 fpm/cgi 后端");
+      const fpm = (c.php_fpm_versions || []).join(" ");
+      return "已检测到 " + v + ((c.php_modes || []).length ? "" : "，但没有能执行站点的 fpm/cgi 后端") +
+        (fpm ? "；可绑定站点的 fpm 版本：" + fpm : "；没有可绑定站点的 fpm 版本");
     }],
   ["扩展安装手段", ["php_ext_install"], (c) => (c.php_ext_install || []).join(", ") || "不支持",
     () => "只是宿主上可用的安装手段，面板能不能用看下面第二张表"],

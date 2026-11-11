@@ -143,11 +143,62 @@ func (l linuxSites) List() ([]SiteInfo, error) {
 }
 
 func (l linuxSites) Create(spec SiteSpec) (SiteInfo, error) {
-	s, err := l.m.Create(nginx.Spec{Name: spec.Name, Domains: spec.Domains, Root: spec.Root})
+	version, socket, err := resolvePHPBinding(spec.PHPVersion)
+	if err != nil {
+		return SiteInfo{}, err
+	}
+	s, err := l.m.Create(nginx.Spec{
+		Name: spec.Name, Domains: spec.Domains, Root: spec.Root,
+		PHPVersion: version, PHPSocket: socket,
+	})
 	if err != nil {
 		return SiteInfo{}, mapNginxErr(err)
 	}
 	return toSiteInfo(s), nil
+}
+
+// SetPHP resolves the version against live discovery before touching nginx. A
+// version that exists only as cli, or not at all, is rejected here; the vhost
+// never points at a socket that cannot exist.
+func (l linuxSites) SetPHP(name, version string) (SiteInfo, error) {
+	v, socket, err := resolvePHPBinding(version)
+	if err != nil {
+		return SiteInfo{}, err
+	}
+	s, err := l.m.SetPHP(name, v, socket)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
+// resolvePHPBinding is the only version→socket translation. It returns empty
+// strings for "static site" and a typed error for anything discovery did not
+// prove, so the API can say "this host does not have PHP 8.2 (fpm)" instead of
+// writing a config that 502s.
+func resolvePHPBinding(version string) (string, string, error) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return "", "", nil
+	}
+	installs, _ := php.Discover()
+	for _, i := range installs {
+		if i.Version != version {
+			continue
+		}
+		if !i.Has(php.SAPIFPM) {
+			return "", "", fmt.Errorf("%w：PHP %s 没有 fpm 后端", ErrSitePHP, version)
+		}
+		socket := i.Socket
+		if socket == "" {
+			socket = php.SocketPath(version)
+		}
+		if socket == "" {
+			return "", "", fmt.Errorf("%w：PHP %s 的 fpm socket 路径无法确定", ErrSitePHP, version)
+		}
+		return version, socket, nil
+	}
+	return "", "", fmt.Errorf("%w：本机没有检测到 PHP %s", ErrSitePHP, version)
 }
 
 func (l linuxSites) Delete(name string) (SiteInfo, error) {
@@ -287,6 +338,10 @@ func toSiteInfo(s nginx.Site) SiteInfo {
 	out := SiteInfo{
 		Name: s.Name, Domains: s.Domains, Root: s.Root,
 		ConfigPath: s.ConfigPath, Enabled: s.Enabled, CreatedAt: s.CreatedAt,
+		PHPVersion: s.PHPVersion, PHPSocket: s.PHPSocket,
+	}
+	if s.PHPVersion != "" {
+		out.PHPSocketState = php.SocketStatus(s.PHPSocket)
 	}
 	if s.TLS != nil {
 		out.TLS = &SiteTLSInfo{
@@ -364,6 +419,7 @@ func (p linuxPlatform) Detect() (*Capabilities, error) {
 		}
 	}
 	_, siteErr := nginx.New(nginxRoot(), p.SiteRoot())
+	siteWritable := false
 	switch {
 	case !hasNginx && len(c.WebServers) > 0:
 		c.Deny(FeatWebSite, "本机检测到 Apache；站点写入 Provider 当前只实现了 nginx（M2 后续片）")
@@ -379,6 +435,7 @@ func (p linuxPlatform) Detect() (*Capabilities, error) {
 		c.Degrade(FeatWebSite, why, "以 root 身份运行面板（systemd 服务默认即为 root）", "minipanel doctor 的 site 行")
 		c.Degrade(featSiteWrite, why, "以 root 身份运行面板", "minipanel doctor 的 site 行")
 	default:
+		siteWritable = true
 		c.Allow(FeatWebSite)
 		c.Allow(featSiteWrite)
 		// All three certificate paths ship in this binary: self-signed, uploaded,
@@ -433,12 +490,14 @@ func (p linuxPlatform) Detect() (*Capabilities, error) {
 	// docs/里程碑.md requires site/php/ssl to be set from Detect() evidence only.
 	//
 	// The feature stays short of `available` regardless: discovering a runtime is
-	// not the same as serving a site through it, and the pool/vhost write path
-	// ships later in M2. What changed is that "short of" now says *what* is
-	// missing, from evidence — which is what docs/功能设计.md §4.1's `degraded`
-	// row is for.
+	// not the same as installing one or compiling an extension, and those write
+	// paths are still M2 work. What changed in this slice is that the *site*
+	// half — binding a vhost to one discovered fpm version — is implemented and
+	// gets its own capability, so "php" still being degraded does not hide the
+	// switch that does work.
 	installs, unreadable := php.Discover()
 	c.PHPVersions = php.Versions(installs)
+	c.PHPFPMVersions = php.FPMVersions(installs)
 	fpm, cgi := php.Modes(installs)
 	if fpm {
 		c.PHPModes = append(c.PHPModes, PHPModeFPM)
@@ -452,23 +511,39 @@ func (p linuxPlatform) Detect() (*Capabilities, error) {
 	if have("phpize") != "" {
 		c.PHPExtInstall = append(c.PHPExtInstall, ExtFromSource)
 	}
-	phpVerify := "重跑 minipanel doctor 的 php 行，或读 GET /api/v1/capabilities 的 php_modes / php_versions"
+	phpVerify := "重跑 minipanel doctor 的 php 行，或读 GET /api/v1/capabilities 的 php_modes / php_versions / php_fpm_versions"
 	phpSeen := "检测到 PHP " + strings.Join(c.PHPVersions, "、")
 	switch {
 	case len(installs) == 0:
 		// No runtime at all: this stays a plain denial, because there is no
 		// "main path works" claim to make and a static-site box is a valid answer.
-		c.Deny(FeatPHP, phpGap("本机未检测到可运行的 PHP", unreadable)+
-			"。站点创建与 fpm 配置生成在 M2 交付，纯静态站点不受影响")
+		c.Deny(FeatPHP, phpGap("本机未检测到可运行的 PHP；PHP 多版本安装/卸载在 M2 交付", unreadable)+
+			"。纯静态站点不受影响")
+		c.Deny(FeatPHPVersionSwitch, "本机未检测到 PHP，也没有可绑定站点的 php-fpm 后端")
 	case !fpm && !cgi:
 		// The sentence names only what discovery proved. It does not say "只有
 		// cli", because a version can be detected from its binary with no SAPI
 		// tree at all, and an over-specific reason is a new kind of lie.
 		c.Degrade(FeatPHP, phpGap(phpSeen+"，但没有检测到 fpm 或 cgi 后端，站点没有可执行 PHP 的处理器", unreadable),
 			"", phpVerify)
+		c.Deny(FeatPHPVersionSwitch, phpGap(phpSeen+"，但没有 fpm 后端，站点无法绑定 PHP 版本", unreadable))
 	default:
-		c.Degrade(FeatPHP, phpGap(phpSeen+" 的 "+phpModeWords(fpm, cgi)+"，版本与 pool 目录已可读；把站点绑定到某个版本的写入路径在 M2 交付", unreadable),
-			"", phpVerify)
+		// The site-level half is implemented; installing/removing versions and
+		// compiling extensions are not, which is why FeatPHP itself stays short.
+		bind := "站点可按版本绑定 fpm"
+		if !siteWritable {
+			bind = "但站点写入不可用，版本绑定暂时无处可写"
+		}
+		c.Degrade(FeatPHP, phpGap(phpSeen+" 的 "+phpModeWords(fpm, cgi)+"，版本与 pool 目录已可读；"+
+			bind+"；多版本安装/卸载与扩展编译安装仍未交付", unreadable), "", phpVerify)
+		switch {
+		case !siteWritable:
+			c.Deny(FeatPHPVersionSwitch, "PHP 版本切换需要可写的 nginx 站点 Provider；本机站点写入不可用")
+		case fpm:
+			c.Allow(FeatPHPVersionSwitch)
+		default:
+			c.Deny(FeatPHPVersionSwitch, phpGap(phpSeen+"，但没有 fpm 后端；cgi 不能按版本绑定到 unix socket", unreadable))
+		}
 	}
 
 	// Detection is a fact; the page that would manage it is M4 work. Allowing the

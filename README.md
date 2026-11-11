@@ -16,7 +16,7 @@ x/{crypto,sys,term}、modernc.org/sqlite 为 BSD-3-Clause，均与 GPL-3.0 兼�
 
 ---
 
-## 当前状态：M0 / M1 已完成；M2 进行中（站点、HTTPS 与 ACME 已交付）
+## 当前状态：M0 / M1 已完成；M2 进行中（站点、HTTPS/ACME 与 PHP 版本绑定已交付）
 
 M0 交付的是**面板自身**：身份、会话、安全入口、能力位图、审计日志，以及一个能直接验收
 整条安全链路的内嵌页面。
@@ -45,18 +45,19 @@ M1 的账号与会话页、前端工程化（Vue 3 + Vite + Element Plus）、�
 | 口令哈希 bcrypt cost 12、强度规则（长度≥10 且四类中三类） | `internal/sec/sec.go:20 HashPassword()`、`:55 ValidatePassword()` | `TestValidatePassword`、`TestPasswordHashIsSaltedAndVerifiable` |
 | 登录 / 登出 / 会话（`mp_session` HttpOnly + SameSite=Strict） | `internal/api/auth.go:59 handleLogin()`、`:254 setSessionCookies()` | `TestLogoutAndRevokeSessions`、`TestSessionEndpointReportsIdentity` |
 | 首个管理员引导（仅账号表为空时可用） | `internal/api/auth.go:170 handleSetup()` | `TestSetupOnlyWorksWhileNoUserExists`、`TestSetupRejectsWeakPasswordAndBadUsername` |
-| 安全入口闸门 + 伪装响应 | `internal/api/server.go:204 entranceGate()`、`:278 disguise()` | `TestEntranceGateDisguisesEverythingElse` |
-| 双提交 CSRF（`mp_csrf` Cookie ↔ `X-Mini-CSRF` 头） | `internal/api/server.go:378 csrf()` | `TestMutationsRequireCSRF` |
+| 安全入口闸门 + 伪装响应 | `internal/api/server.go:207 entranceGate()`、`:281 disguise()` | `TestEntranceGateDisguisesEverythingElse` |
+| 双提交 CSRF（`mp_csrf` Cookie ↔ `X-Mini-CSRF` 头） | `internal/api/server.go:384 csrf()` | `TestMutationsRequireCSRF` |
 | 按 IP+用户名 的登录失败锁定，退避翻倍、上限 1 小时 | `internal/api/auth.go:82` key 组装、`internal/sec/ratelimit.go:62 Fail()` | `TestLoginLockoutAfterNFailures`、`TestRateLimiter` |
 | TLS fail-closed 的凭据规则 | `internal/api/auth.go:51 credentialsAllowed()` | `TestCredentialsRefusedWithoutTLSThenListeningOnRoutableAddress` |
 | 面板自签证书，SAN 跟随本机地址自动重签 | `internal/sec/tls.go:26 EnsureSelfSignedTLS()`、`cmd/minipanel/main.go:352 certHosts()` | **无自动化测试**（M0 测试缺口，见 `docs/技术选型与MVP规格.md` §8.4）；可复核 `make doctor` 的证书行与 `minipanel init` 的实际输出 |
 | 两步验证 TOTP（RFC 6238，手写实现，无第三方 2FA 依赖） | `internal/sec/totp.go:35 TOTPCode()`、`internal/api/system.go:193 handleTOTPSetup()` | `TestTOTPVector`、`TestTOTPSetupEnableAndRequiredAtLogin` |
 | 审计日志：只追加、敏感参数入库前掩码、另存 `params_hash` | `internal/audit/audit.go:34 Write()`、`:80 List()`、`:113 Mask()` | `TestWriteListAndMasking`、`TestMaskCoversTheShapesCredentialsArriveIn`、`TestAuditRecordsMutationsWithMaskedSecrets` |
-| 能力位图与"禁用必须带理由"的契约 | `internal/platform/detect.go:18 newBase()`、`internal/platform/capabilities.go:202 Deny()` / `:208 Degrade()` / `:220 Allow()` | `TestDetectedCapabilitiesAreExplained`、`TestCapabilitiesAreSelfConsistent` |
+| 能力位图与"禁用必须带理由"的契约 | `internal/platform/detect.go:18 newBase()`、`internal/platform/capabilities.go:207 Deny()` / `:213 Degrade()` / `:225 Allow()` | `TestDetectedCapabilitiesAreExplained`、`TestCapabilitiesAreSelfConsistent` |
 | 平台抽象（Linux / Windows / 其他，构建标签分文件） | `internal/platform/paths.go:10 Platform` | `TestPathsAreAbsoluteAndConsistent`、`make build-all` |
-| PHP 现场探测（M2 第一、二片）：版本、SAPI、pool/socket 路径，以及**这两个路径此刻的状态**；`php` 一项的状态由它改写 | `internal/php/php.go:119 DiscoverIn()`、`internal/platform/platform_linux.go:336`（探测→位图）、`:363` / `:366` 两处 `Degrade()`、`cmd/minipanel/php.go:30 phpProbe()`。路径与状态是两次独立的读：`internal/php/php.go:270 DirStatus()`、`:286 SocketStatus()`、`:323 listeningSocketPaths()`（读内核表 `/proc/net/unix` 的 Path 列，不拨号、不连 socket） | `internal/php/php_test.go` 13 个用例，其中 `TestStatesOfTheReportedPaths` 真的起一个 listener 再关掉、`TestSocketStatusUsesThePathColumnVerbatim` 用伪造的内核表钉住列解析；`TestDetectPHPFieldsMatchDiscovery`、`TestDetectPHPExtInstallFromEvidence`、`TestDetectPHPFromRootedHosts`（4 个子用例）、`TestPHPCtlPathsAreTargetsAndStatesAreReads`；CLI 侧 `TestDoctorPHPCtlLineIsTheInterface`、`TestDoctorPHPRootedHostNamesTheVersion`、`TestDoctorTellsStoppedFpmApartFromRunningFpm`（停了 / 活着两种内核状态）、`TestSocketListeningWithoutFpmModeIsAContradiction`。以上全部在 `make check-honesty` 里 |
-| Nginx 站点写入（M2 第三片）：静态站点的创建、列出与删除；写配置 → `nginx -t` → 只有通过才 reload，任何一步失败整步回滚；只列/只删面板自己写出的 vhost | `internal/nginx/nginx.go:311 Create()`、`:444 Delete()`、`:239 List()`、`:500 render()`（先测试后生效与回滚都在这里）；平台缝 `internal/platform/platform_linux.go:95 Sites()`、`:82 WebServer()`；HTTP `internal/api/sites.go:46 handleSitesList()`、`:66 handleSiteCreate()`、`:103 handleSiteDelete()`；能力位图只在"nginx 配置目录可识别 + 进程是 root"时 `Allow`，否则 `Deny` / `Degrade` 并区分三种理由（没有 Web 服务器 / 只检测到 Apache / 非 root） | `internal/nginx` 9 个用例，其中 `TestCreateWritesConfigAndReloads` 钉住"先 `nginx -t` 再 reload"的命令顺序，`TestCreateRollsBackWhenTestFails`、`TestCreateRollsBackWhenReloadFails`、`TestDeleteRestoresWhenConfigTestFails` 钉住三条回滚路径，`TestListIgnoresForeignConfigs` 钉住"不列也不删别人的 vhost"；HTTP 侧 `internal/api/sites_test.go` 的 `TestSiteEndpointsCreateListDelete`、`TestSiteEndpointsRefuseWhenCapabilityIsUnavailable`、`TestSiteWritesAreAudited`；能力白名单从"只有 audit"改为"audit 无条件 + site/site_write 由 `siteWriterReady()` 现场问平台"（`internal/platform/capabilities_test.go:216`） |
-| 站点 HTTPS 与 ACME（M2 第四、五片）：自签证书生成、手工上传证书链与私钥、ACME HTTP-01 签发与到期前自动续期、关闭 HTTPS；校验配对 / 有效期 / 域名覆盖（通配符按精确 SAN）；证书与配置一起"先测试后生效"，失败同时回滚三者；删除站点时清理面板管理的证书。ACME 只支持 HTTP-01：域名要有 80 端口可达的 webroot，通配符仍需手工上传（DNS-01 未交付）；账号密钥在 `/etc/minipanel/acme/account.key`（0600），进程每 12 小时扫描一次，到期前 30 天自动续期 | `internal/nginx/tls.go:105 SetSelfSigned()`、`:124 SetCertificate()`、`:144 SetACMECertificate()`、`:163 ClearCertificate()`、`:195 setTLS()`（回滚）、`:293 validateCertificate()`、`:334 generateSelfSigned()`、`:379 renderRedirect()` / `:396 renderServer()`（80 端口块豁免 `/.well-known/acme-challenge/`）、`:442 PrepareACME()`（旧配置升级）；`internal/acme/acme.go:74 NewIssuer()`、`:111 RenewalDue()`、`:125 Issue()`、`:287 loadOrCreateAccountKey()`、`:342 writeChallenge()`；平台缝 `internal/platform/platform_linux.go:161`、`:169`、`:177`、`:190 ObtainACME()`、`:230 RenewDueACME()`、`:259 newACMEIssuer()`，证书目录 `:89`；HTTP `internal/api/site_tls.go:42 handleSiteTLSSet()`、`:84 siteACMEManager()`、`:108 handleSiteACME()`、`:128 handleSiteTLSClear()`；续期循环 `cmd/minipanel/main.go:300 startACMERenewal()`；审计中间件改为保留完整请求体 `internal/api/server.go:399`（旧实现只留 8 KiB，会截断证书上传） | `internal/nginx/tls_test.go` 9 个用例（自签渲染/列出、上传证书域名覆盖、`nginx -t` 与 reload 两条回滚、关闭 HTTPS 删文件、删除站点清证书、过期证书拒绝、ACME 来源标记与 challenge 豁免、旧 redirect 配置升级）、`internal/api/sites_tls_test.go` 11 个用例（自签、上传缺项、未知 mode、错误映射、`ssl=unavailable` 拒绝、CSRF、关闭、审计掩码与 >8 KiB 请求体完整到达 Provider、ACME 成功与错误映射、ACME CSRF）、`internal/acme` 9 个单元用例（通配符拒绝、续期窗口、账号密钥持久化与 0600、challenge 生命周期与符号链接拒绝、CSR SAN）+ 可选 Pebble 集成用例（真 ACME 服务端，连跑两次覆盖已有账号续签）；平台侧 `TestMapNginxErrDoesNotRepeatTheTLSReason`、`TestMapACMEErrKeepsTheSentinelOnce` 钉住错误文案只出现一次哨兵句 |
+| PHP 现场探测（M2 第一、二片）：版本、SAPI、pool/socket 路径，以及**这两个路径此刻的状态**；`php` 一项的状态由它改写 | `internal/php/php.go:119 DiscoverIn()`、`internal/platform/platform_linux.go:498`（探测→位图）、`:520` / `:527` 两处 `Deny()` / `Degrade()`、`cmd/minipanel/php.go:30 phpProbe()`。路径与状态是两次独立的读：`internal/php/php.go:270 DirStatus()`、`:286 SocketStatus()`、`:323 listeningSocketPaths()`（读内核表 `/proc/net/unix` 的 Path 列，不拨号、不连 socket） | `internal/php/php_test.go` 13 个用例，其中 `TestStatesOfTheReportedPaths` 真的起一个 listener 再关掉、`TestSocketStatusUsesThePathColumnVerbatim` 用伪造的内核表钉住列解析；`TestDetectPHPFieldsMatchDiscovery`、`TestDetectPHPExtInstallFromEvidence`、`TestDetectPHPFromRootedHosts`（4 个子用例）、`TestPHPCtlPathsAreTargetsAndStatesAreReads`；CLI 侧 `TestDoctorPHPCtlLineIsTheInterface`、`TestDoctorPHPRootedHostNamesTheVersion`、`TestDoctorTellsStoppedFpmApartFromRunningFpm`（停了 / 活着两种内核状态）、`TestSocketListeningWithoutFpmModeIsAContradiction`。以上全部在 `make check-honesty` 里 |
+| Nginx 站点写入（M2 第三片）：静态站点的创建、列出与删除；写配置 → `nginx -t` → 只有通过才 reload，任何一步失败整步回滚；只列/只删面板自己写出的 vhost | `internal/nginx/nginx.go:350 Create()`、`:540 Delete()`、`:274 List()`、`:596 render()`（先测试后生效与回滚都在这里）；平台缝 `internal/platform/platform_linux.go:95 Sites()`、`:87 WebServer()`；HTTP `internal/api/sites.go:65 handleSitesList()`、`:85 handleSiteCreate()`、`:189 handleSiteDelete()`；能力位图只在"nginx 配置目录可识别 + 进程是 root"时 `Allow`，否则 `Deny` / `Degrade` 并区分三种理由（没有 Web 服务器 / 只检测到 Apache / 非 root） | `internal/nginx` 9 个用例，其中 `TestCreateWritesConfigAndReloads` 钉住"先 `nginx -t` 再 reload"的命令顺序，`TestCreateRollsBackWhenTestFails`、`TestCreateRollsBackWhenReloadFails`、`TestDeleteRestoresWhenConfigTestFails` 钉住三条回滚路径，`TestListIgnoresForeignConfigs` 钉住"不列也不删别人的 vhost"；HTTP 侧 `internal/api/sites_test.go` 的 `TestSiteEndpointsCreateListDelete`、`TestSiteEndpointsRefuseWhenCapabilityIsUnavailable`、`TestSiteWritesAreAudited`；能力白名单从"只有 audit"改为"audit 无条件 + site/site_write 由 `siteWriterReady()` 现场问平台"（`internal/platform/capabilities_test.go:220`） |
+| 站点 HTTPS 与 ACME（M2 第四、五片）：自签证书生成、手工上传证书链与私钥、ACME HTTP-01 签发与到期前自动续期、关闭 HTTPS；校验配对 / 有效期 / 域名覆盖（通配符按精确 SAN）；证书与配置一起"先测试后生效"，失败同时回滚三者；删除站点时清理面板管理的证书。ACME 只支持 HTTP-01：域名要有 80 端口可达的 webroot，通配符仍需手工上传（DNS-01 未交付）；账号密钥在 `/etc/minipanel/acme/account.key`（0600），进程每 12 小时扫描一次，到期前 30 天自动续期 | `internal/nginx/tls.go:105 SetSelfSigned()`、`:124 SetCertificate()`、`:144 SetACMECertificate()`、`:163 ClearCertificate()`、`:195 setTLS()`（回滚）、`:293 validateCertificate()`、`:334 generateSelfSigned()`、`:379 renderRedirect()` / `:396 renderServer()`（80 端口块豁免 `/.well-known/acme-challenge/`）、`:461 PrepareACME()`（旧配置升级）；`internal/acme/acme.go:74 NewIssuer()`、`:111 RenewalDue()`、`:125 Issue()`、`:287 loadOrCreateAccountKey()`、`:342 writeChallenge()`；平台缝 `internal/platform/platform_linux.go:212`、`:220`、`:228`、`:241 ObtainACME()`、`:281 RenewDueACME()`、`:310 newACMEIssuer()`，证书目录 `:88`；HTTP `internal/api/site_tls.go:42 handleSiteTLSSet()`、`:84 siteACMEManager()`、`:108 handleSiteACME()`、`:128 handleSiteTLSClear()`；续期循环 `cmd/minipanel/main.go:300 startACMERenewal()`；审计中间件改为保留完整请求体 `internal/api/server.go:402`（旧实现只留 8 KiB，会截断证书上传） | `internal/nginx/tls_test.go` 9 个用例（自签渲染/列出、上传证书域名覆盖、`nginx -t` 与 reload 两条回滚、关闭 HTTPS 删文件、删除站点清证书、过期证书拒绝、ACME 来源标记与 challenge 豁免、旧 redirect 配置升级）、`internal/api/sites_tls_test.go` 11 个用例（自签、上传缺项、未知 mode、错误映射、`ssl=unavailable` 拒绝、CSRF、关闭、审计掩码与 >8 KiB 请求体完整到达 Provider、ACME 成功与错误映射、ACME CSRF）、`internal/acme` 9 个单元用例（通配符拒绝、续期窗口、账号密钥持久化与 0600、challenge 生命周期与符号链接拒绝、CSR SAN）+ 可选 Pebble 集成用例（真 ACME 服务端，连跑两次覆盖已有账号续签）；平台侧 `TestMapNginxErrDoesNotRepeatTheTLSReason`、`TestMapACMEErrKeepsTheSentinelOnce` 钉住错误文案只出现一次哨兵句 |
+| 站点 PHP 版本绑定（M2 第六片）：创建站点时选择本机已探测到的某个 PHP 版本，或对已有站点切换到另一个版本 / 清空回纯静态。**不创建 per-site pool，也不安装 PHP**——只把 vhost 的 `.php` location 接到该版本已有的 fpm socket 上；换绑同样走"写配置 → `nginx -t` → 通过才 reload"，失败恢复上一份配置。清空绑定是救援路径，不受能力位图拦截。`.php` 处理含 `try_files $uri =404`、显式 `SCRIPT_FILENAME` 与 `fastcgi_pass unix:<socket>`；socket 是否在听由 `php_socket_state` 单独报告，非 listening 时 UI 明说站点会 502 | `internal/nginx/nginx.go:218 validatePHP()`、`:471 SetPHP()`、`:494 applyConfig()`（先测试后生效与回滚）、`:596 render()`（marker 带 PHP 字段）；`.php` location 与 index 在 `internal/nginx/tls.go:409` / `:426`；版本选择来源 `internal/php/php.go:352 FPMVersions()`；平台缝 `internal/platform/platform_linux.go:163 SetPHP()`、`:179 resolvePHPBinding()`（写配置前现场确认版本确有 fpm）、`:500` 探测 `php_fpm_versions`、`:543 Allow(FeatPHPVersionSwitch)`；HTTP `internal/api/sites.go:50 sitePHPManager()`、`:85 handleSiteCreate()`（可选 `php_version`）、`:144 handleSitePHP()`（`PUT /api/v1/sites/{name}/php`）；能力字段 `internal/platform/capabilities.go:168 PHPFPMVersions`、`:246 FeatPHPVersionSwitch`；页面 `web/src/views/SitesView.vue` | `internal/nginx` 新增 4 个用例（`TestCreateWithPHPRendersHandlerAndMarker` 钉渲染与 marker 往返、`TestSetPHPSwitchesAndClears` 钉切换与清空、`TestSetPHPRollsBackWhenTestFails` 钉失败恢复、`TestPHPBindingIsValidated` 钉版本/socket 形状）；`internal/api/sites_php_test.go` 6 个用例（创建带 PHP、切换与清空、能力不可用时拒绝选择但放行清空、错误映射、CSRF、审计）；`internal/platform/phpsite_linux_test.go` 的 `TestResolvePHPBindingChecksDiscoveryBeforeConfig` 钉"写配置前先验证 fpm"；`internal/platform/platform_php_test.go` 的 `TestDetectPHPFieldsMatchDiscovery` 同时比对 `php_fpm_versions` |
 | 设置项白名单校验（IP 白名单 / 口令有效期 / basic_auth / trust_proxy） | `internal/api/system.go:78 editableSettings`、`:273 validateIPAllowlist()` | `TestSettingsAllowListAndValidation`、`TestIPAllowlistBlocksAuthenticatedSession` |
 | OpenAPI 规格与路由表一一对应 | `internal/api/server.go:92 routes()`、`internal/api/openapi/panel.yaml` | `TestOpenAPIContractMatchesRoutes`、`TestSpecDeclaresTheSecurityContract` |
 | 会话列表与撤销（单个 / 除本条以外全部） | `internal/api/sessions.go:40 handleSessionsList()`、`:81 handleSessionRevoke()`、`:120 handleSessionsRevokeOthers()` | `internal/api/m1_test.go` 的会话用例；行上的 id 是 `sessions.ref`，令牌不出响应 |
@@ -64,19 +65,21 @@ M1 的账号与会话页、前端工程化（Vue 3 + Vite + Element Plus）、�
 | 前端：Vue 3 + Vite + Element Plus，八页（概览 / 网站 / 本机能力 / 面板设置 / 会话 / CLI 对照 / 账号安全 / 审计日志） | 源码 `web/src/`（站点页 `web/src/views/SitesView.vue`），`make web` → 单个 `webui/dist/index.html`，`webui/embed.go:15 go:embed` | `make check-ui`（产物自包含、能力 key 全覆盖、规格端点都有出口）+ 上述接口用例 |
 | 文档自身的诚实：本文与 `docs/` 里的 `文件:行` 指针、点名的测试与子命令必须对得上代码 | `internal/docsync/citation_test.go` 3 个用例 | `make check-docs`；本轮实测条数见下方"如何验证" |
 
-**还没有做的（M2 其余部分与 M3+）**：PHP 版本绑定与扩展安装、DNS-01 / 通配符证书、
+**还没有做的（M2 其余部分与 M3+）**：PHP 多版本安装/卸载与扩展安装、DNS-01 / 通配符证书、
 Apache 站点写入、数据库、备份、计划任务、防火墙规则写入、服务启停、Web 终端、监控图表、
 文件权限管理、SSH/RDP 管理页。静态站点创建随 M2 第三片交付，自签与手工上传证书随第四片交付，
-ACME HTTP-01 与自动续期随第五片交付；覆盖范围仍只到 nginx + Linux + 80 端口可达的域名，
-PHP 绑站、DNS-01 通配符、Apache 没有写入路径。
+ACME HTTP-01 与自动续期随第五片交付，站点 PHP 版本绑定随第六片交付；覆盖范围仍只到
+nginx + Linux + 80 端口可达的域名，PHP 绑定只接本机已有的 fpm socket（不安装、不建 per-site
+pool），DNS-01 通配符、Apache 没有写入路径。
 这些在 UI 上不是"点击后无反应"，而是**灰掉并显示理由**，理由来自
 `GET /api/v1/capabilities` 的 `features[key].reason`（例如"数据库 Provider 在 M3 交付"）。
 清单与理由的起点是 `internal/platform/detect.go:50-66` 的拒绝表，一共 **16 项，每一项都自带
 一句理由**；平台实现可以按现场证据改写其中的状态，但不能改出"没理由"这一档——
 `capabilities.go` 的 `set()` 与测试会拦下任何"关掉了却没理由"的项。反方向也拦：
-`capabilities_test.go:179` 的**无条件白名单**声明这个版本只许 `audit` 永久 `available`，
-`site` / `site_write` / `ssl` 另走条件白名单（`capabilities_test.go:217 siteWriterReady()`、
-`:231 siteTLSReady()`）——只有平台当场证明 nginx 可写、且实现了 ACME 时才算可用。
+`capabilities_test.go:181` 的**无条件白名单**声明这个版本只许 `audit` 永久 `available`，
+`site` / `site_write` / `ssl` / `php_version_switch` 另走条件白名单（`capabilities_test.go:220 siteWriterReady()`、
+`:234 siteTLSReady()`、`:251 phpSwitchReady()`）——只有平台当场证明 nginx 可写、且实现了 ACME /
+探测到带 fpm 的 PHP 版本时才算可用。
 所以"探测到本机有 ufw / 有 PHP 二进制"绝不会被报成一项已交付功能
 （见下文能力位图一节与 `docs/技术选型与MVP规格.md` §8）。
 M2 的第一处改动在这里：`php` 一项不再照抄拒绝表，而是由 `internal/php` 的现场探测改写——
@@ -182,7 +185,7 @@ HTTP 测试永远看不见的缺陷——`minipanel init --port 29095 --bind 127
 服务端，并且是拒绝而不是降级。
 
 **2. 双提交 CSRF。** 非 GET/HEAD/OPTIONS 的请求必须带 `X-Mini-CSRF` 头，其值与服务端下发的
-`mp_csrf` Cookie 常量时间比较（`internal/api/server.go:378 csrf()`，Cookie 与头名集中在 `:41-46` 的常量块）。
+`mp_csrf` Cookie 常量时间比较（`internal/api/server.go:384 csrf()`，Cookie 与头名集中在 `:41-46` 的常量块）。
 `mp_csrf` 故意可被 JS 读取（它就是双提交的另一半，见 `internal/api/auth.go:254 setSessionCookies()`
 的注释），`mp_session` 是 HttpOnly + SameSite=Strict。
 *为什么*：SameSite 已经是主防线，双提交是纵深防御，同时给前端一个稳定的、非会话级的令牌可用于
@@ -199,13 +202,13 @@ HTTP 测试永远看不见的缺陷——`minipanel init --port 29095 --bind 127
 
 **4. 安全入口是未认证探测的伪装，不是鉴权层。** 配置入口后，未登录的请求访问入口之外的任何
 路径，都按 `panel.unauth_status` 应答（400/401/403/404，或 444 直接断开连接）。应答体是一张
-**中性的 HTML 错误页**，只有状态码文本，不含产品名与版本（`internal/api/server.go:278 disguise()`）。
+**中性的 HTML 错误页**，只有状态码文本，不含产品名与版本（`internal/api/server.go:281 disguise()`）。
 *为什么不是 `http.Error`*：Go 默认那 10 字节 `text/plain` 的 "404 Not Found" 本身就是运行环境
 指纹，而这条响应的全部意义是"探测者什么也学不到"；它同样**不伪装成 nginx 的错误页**——这个
 进程就是 web server，给一张普通 404 是事实，冒充别人的错误页在事故响应时误导运维的程度不亚于
 误导扫描器。`/healthz` 例外，监控探针不能被藏起来。直接 POST `/api/v1/login` 而没先访问过入口，
 同样按伪装应答——判断依据是访问入口时种下的 `mp_entrance` 标记 Cookie 与服务端配置值的常量时间
-比较（`internal/api/server.go:263 entranceMarked()`）。
+比较（`internal/api/server.go:266 entranceMarked()`）。
 
 **持有合法 `mp_session` 之后，接口与静态资源在入口之外照样能用**（`internal/api/server.go:215`
 的 `hasSession(r)` 分支，`hasSession` 在 `:258`）。这是**有意的**设计，不是遗漏：SPA 必须能在
@@ -221,13 +224,13 @@ HTTP 测试永远看不见的缺陷——`minipanel init --port 29095 --bind 127
   会话值能过闸门，但过不了会话查表，仍然拿到伪装响应。
 
 *为什么必须说清楚*：真正的访问控制是**监听地址 + 会话令牌与有效期 + 可选 IP 白名单**
-（`panel.ip_allowlist`，`internal/api/server.go:356 ipAllowed()`）+ CSRF + 登录锁定。入口路径写进
+（`panel.ip_allowlist`，`internal/api/server.go:359 ipAllowed()`）+ CSRF + 登录锁定。入口路径写进
 panel.json（0600）且被 `.gitignore` 排除，`GET /api/v1/settings` 也刻意不回显它的值（只说
 "已启用"），要看真值请用 `minipanel doctor`——伪装只在没人拿到配置文件的前提下成立。
 
 **5. 审计日志只追加。** `internal/audit` 包里**不存在删除或清空的方法**（`audit.go:78-80` 的注释
 与 `Write`/`List` 两个导出方法就是全部），接口面上也没有任何 `DELETE /audit`；每条写操作
-（成功或失败）都落一行（`internal/api/server.go:399 auditWrites()`）。口令、`token`、`key`、`pem`、
+（成功或失败）都落一行（`internal/api/server.go:402 auditWrites()`）。口令、`token`、`key`、`pem`、
 `cookie` 等敏感形状的字段入库前掩码成 `***`（`internal/audit/audit.go:113 Mask()`），同时保存一份
 对**未掩码原值**的 SHA-256 `params_hash`（`audit.go:48-56`）。
 *为什么*：能被被审计者抹掉的审计日志是装饰品；而 `params_hash` 让事后比对"这两次请求是不是同一个
@@ -253,10 +256,10 @@ panel.json（0600）且被 `.gitignore` 排除，`GET /api/v1/settings` 也刻�
 
 **9. 其它基线。** 响应头固定 `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、
 `Referrer-Policy: no-referrer`、`Cache-Control: no-store`，TLS 下追加 HSTS
-（`internal/api/server.go:169 securityHeaders()`）；`MinVersion: TLS 1.2`（`main.go:246`）。
+（`internal/api/server.go:173 securityHeaders()`）；`MinVersion: TLS 1.2`（`main.go:246`）。
 `X-Forwarded-For` 默认不信任，只有 `panel.trust_proxy=true` 时才解析，且启动时会打警告——
 开了它，扫描器就能伪造来源地址绕过按 IP 的锁定（`internal/api/server.go:54 var trustProxy`、
-`:478 clientIP()`）。请求体与审计缓冲都有上限（1 MiB / 64 KiB，`server.go:508`、`:412`），
+`:481 clientIP()`）。请求体与审计缓冲都有上限（1 MiB / 64 KiB，`server.go:512`、`:416`），
 没有全局 `WriteTimeout`（M4 的终端 WebSocket 会被它切断），只有
 `ReadHeaderTimeout`/`ReadTimeout`/`IdleTimeout`（`main.go:240-242`）。
 
@@ -301,16 +304,21 @@ panel.json（0600）且被 `.gitignore` 排除，`GET /api/v1/settings` 也刻�
 
 探测的规则是"只报本机当场验证过的"：`newBase()` 先把所有功能置为 `unavailable` 并填好理由
 （`internal/platform/detect.go:18`，拒绝表在 `:50`），平台实现只能对自己确实检查到的部分调
-`Allow()`。今天生产代码里的 `Allow()` 只有两处：
-`detect.go:74` 点亮任何主机都成立的 `audit`，以及 `internal/platform/platform_linux.go:382-389`
+`Allow()`。今天生产代码里的 `Allow()` 只有两处代码路径：
+`detect.go:75` 点亮任何主机都成立的 `audit`；`internal/platform/platform_linux.go:439-446`
 在"识别到 nginx + 进程是 root + SiteManager / SiteACMEManager 可用"时点亮
-`site`、`site_write`、`ssl`；条件不成立时同一段代码走
-`:379-380` 的 `Degrade()`（nginx 在但不是 root）或 `:369-376` 的 `Deny()`（没有 nginx /
-只有 Apache / 配置目录不可识别），三种理由分开写。探测到的其它事实（装了 ufw、跑着 sshd）
+`site`、`site_write`、`ssl`，同一段代码在探测到带 fpm 的 PHP 版本时点亮
+`php_version_switch`（`internal/platform/platform_linux.go:543`），站点写入不可用或没有 fpm 时 `Deny` 并分别给理由。
+条件不成立时同一段代码走 `internal/platform/platform_linux.go:434-436` 的 `Degrade()`（nginx 在但不是 root）或
+`internal/platform/platform_linux.go:424-432` 的 `Deny()`（没有 nginx / 只有 Apache / 配置目录不可识别），三种理由分开写。探测到的其它事实（装了 ufw、跑着 sshd）
 只写进 `Capabilities` 的描述字段，绝不成了一项能力。
-`php` 仍是由证据改写**状态**的样本：`internal/platform/platform_linux.go:440` 的
+`php` 仍是由证据改写**状态**的样本：`internal/platform/platform_linux.go:498` 的
 `php.Discover()` 是本机现场探测，装了运行时却没有 fpm/cgi 后端时落到
-`:467` 的 `Degrade(FeatPHP, …)`；什么都没装时走 `:461` 的 `Deny(FeatPHP, …)`。
+`internal/platform/platform_linux.go:527` 的 `Degrade(FeatPHP, …)`；什么都没装时走
+`internal/platform/platform_linux.go:520` 的 `Deny(FeatPHP, …)`。
+同一段探测把带 fpm 的版本另存为 `php_fpm_versions`（`internal/platform/platform_linux.go:500`
+的 `php.FPMVersions()`），供站点 PHP 选择器使用；`php_version_switch` 的 `Allow` 也在这一块
+（`internal/platform/platform_linux.go:543`）。
 理由里的后端名来自
 `internal/php/php.go:36` 起的 SAPI 常量表，测试在 `internal/php/php_test.go`：
 13 个用例跑假 root 树（`TestCLITreeWithoutFPM`、`TestStrayConfigDirIsNotARuntime`、
@@ -326,8 +334,8 @@ panel.json（0600）且被 `.gitignore` 排除，`GET /api/v1/settings` 也刻�
 矛盾时 doctor 打印一行提示。
 Linux 上 `ufw`/`firewall-cmd`/`nft` 都没装与装了但没有写入 Provider，是**两句不同的理由**
 ——原文分别是 `"未检测到 ufw / firewall-cmd / nft 任一后端，本机没有可管理的防火墙"`
-（`internal/platform/platform_linux.go:404`）与 `"当前版本只读展示后端状态；规则写入 Provider 在 M4 交付"`
-（`:406`），`:400-402` 的注释写的就是这条区分："no firewall software on this host" 与
+（`internal/platform/platform_linux.go:461`）与 `"当前版本只读展示后端状态；规则写入 Provider 在 M4 交付"`
+（`:463`），`:457-460` 的注释写的就是这条区分："no firewall software on this host" 与
 "firewall present, write provider not shipped yet" 必须由 UI 区分开。Windows 的差异同样体现在位图里：PHP 只有 `php-cgi.exe`
 的 FastCGI 进程池（没有 php-fpm）、扩展只能装与 PHP 版本 × TS/NTS × VC 运行库 × 位数完全匹配的
 预编译 DLL、reload 只有 `restart_only`、防火墙是 WFP、计划任务走 `schtasks`
@@ -423,16 +431,16 @@ darwin/arm64、windows/amd64、freebsd/amd64 是**重点目标**（四个 OS 都
 | 命令 | 实测结果 |
 | --- | --- |
 | `make vet` | `go vet ./...` 无输出 |
-| `make test` | **全绿（12 个包有测试，本轮 `-count=1` 逐包计时）**：`internal/api` 38.7s、`cmd/minipanel` 3.9s、`internal/acme` 2.2s、`internal/sec` 1.1s、`internal/docsync` 0.77s、`internal/lockout` 0.51s、`internal/store` 0.51s、`internal/audit` 0.19s、`internal/platform` 0.14s、`internal/nginx` 0.03s、`internal/php` 0.04s、`internal/config` 0.003s；`webui` 与 `internal/build` 无测试文件（零依赖单文件前端，它的契约由后端返回的字段名约束）。`cmd/minipanel` 的 17 个用例分布在 `main_test.go`（11）、`lockout_test.go`（2）与 `php_test.go`（4），见上文"CLI 子命令"；`internal/acme` 的 9 个单元用例总是运行，第 10 个 Pebble 集成用例只在 PATH 里有 `pebble` 时运行。曾经约 1/5 概率飘红的入口字母表矛盾**已由源码侧修掉**：`go test -count=60`/`-count=200 -run TestEntranceShape ./internal/sec/` 本轮都 ok；历史、原因与防回归口径见 `docs/技术选型与MVP规格.md` §8.3 |
+| `make test` | **全绿（12 个包有测试，本轮 `-count=1` 逐包计时）**：`internal/api` 42.2s、`internal/acme` 4.0s、`cmd/minipanel` 3.3s、`internal/sec` 1.0s、`internal/docsync` 0.73s、`internal/lockout` 0.55s、`internal/store` 0.35s、`internal/audit` 0.15s、`internal/platform` 0.11s、`internal/nginx` 0.03s、`internal/php` 0.03s、`internal/config` 0.01s；`webui` 与 `internal/build` 无测试文件（零依赖单文件前端，它的契约由后端返回的字段名约束）。`cmd/minipanel` 的 17 个用例分布在 `main_test.go`（11）、`lockout_test.go`（2）与 `php_test.go`（4），见上文"CLI 子命令"；`internal/acme` 的 9 个单元用例总是运行，第 10 个 Pebble 集成用例只在 PATH 里有 `pebble` 时运行。曾经约 1/5 概率飘红的入口字母表矛盾**已由源码侧修掉**：`go test -count=60`/`-count=200 -run TestEntranceShape ./internal/sec/` 本轮都 ok；历史、原因与防回归口径见 `docs/技术选型与MVP规格.md` §8.3 |
 | `make fmt` | `gofmt -s -l .` 执行前后都为空，且没有任何 `.go` 的 mtime 变化——**fmt 不产生 diff 是预期状态** |
 | `make check-contract` | `ok … internal/api 0.004s`（`TestOpenAPIContractMatchesRoutes` + `TestSpecDeclaresTheSecurityContract`） |
 | `make check-honesty` | 四条 `go test`，本轮全部 `ok`：`internal/platform`（`TestDetectedCapabilitiesAreExplained`、`TestCapabilityStatesAreSymmetric`、`TestPathsAreAbsoluteAndConsistent`，M2 第一片再加 `TestDetectPHPFieldsMatchDiscovery`、`TestDetectPHPExtInstallFromEvidence`、`TestDetectPHPFromRootedHosts` 及其四个子用例，第二片再加 `TestPHPCtlPathsAreTargetsAndStatesAreReads`）、`internal/php`（`TestStatesOfTheReportedPaths` 现场 bind 一个 unix socket 再关掉、`TestSocketStatusUsesThePathColumnVerbatim` 用伪造的 `/proc/net/unix` 钉列解析）、`cmd/minipanel`（`-run 'TestDoctor\|TestSocketListeningWithoutFpmModeIsAContradiction'` 实测跑 5 条：`TestDoctorAndThePageReadTheSameRows` 与 PHP 的 4 条）、`internal/api`（`TestCapabilitiesAreSelfConsistent`，同一规则从 HTTP 面再述一遍）。PHP 这些归进这道门禁而不是普通单测，是因为它们断言的正是"位图不许抄表、必须由现场证据得出"，以及"路径与路径的状态不许说成同一件事" |
 | `make check-ui` | `ok … internal/api 0.083s`（`TestUIBundleIsASingleSelfContainedFile`：产物只有一个文件、没有入口外的资源引用；`TestUIDeclaresEveryCapabilityKey`：17 个能力 key 全在前端字典里；`TestUIReachesEveryDocumentedEndpoint`：规格里每个端点都有页面调用它） |
-| `make check-docs` | `ok … internal/docsync 0.64s`——三个用例：`TestCitationsPointInsideRealFiles` 核对每一个 `文件:行` 指针所指的文件存在、行号在文件内、区间没写反，并且**不接受指针落在空行或只剩 `}` 的行上**；`TestAnchoredCitationsSayWhatTheyClaim` 对写了符号名的指针确认那个符号确实就在所指行上（找不到就打印它真正在第几行）；`TestNamedTestsAndCommandsExist` 要求文档点名的 `TestXxx` 与 README 点名的 `minipanel <子命令>` 真的存在。本轮实测：**550 个行号指针 0 个越界、225 个带符号锚点的指针全部落在所指行上、82 个标识符与 8 个子命令全部存在**；它自愿放弃的部分（前一行已收尾、无法判定归属的裸 `:行`）连在哪一行都打印出来，本轮 0 处。覆盖面不会悄悄缩水：任何一个用例核对数为 0 就直接 `t.Fatal`。它第一轮跑就抓到 4 处真实文档说谎——3 个起点大于终点的反向区间，和 1 个仓库里从来没有过的测试名（三份文档都把它当作 check-honesty 的一条引用；真实用例是 `TestCapabilityStatesAreSymmetric`）；补上"空行/收尾括号不算落点""裸指针可继承上一行的文件（附录里的条目是折着写的）"之后又抓到 15 处行号漂移，逐条改掉，并把 `docs/技术选型与MVP规格.md` 里"main_test.go 277 行、8 个用例"这种同样过期的计数改成实测的 489 行、11 个用例。M2 第二片又红了一次，而且是同一类：`internal/platform/platform_linux.go` 里 `Versions()` 上方那段注释改写后整个文件后半部分平移 7 行，`cmd/minipanel/main.go` 的 doctor JSON 加了 2 个 key 之后 600 行以后平移 6 行，于是四份文档里数十处 `文件:行` 指针集体失准，另有一条跨文档指针（`功能设计.md` 引 `里程碑.md` 的未排期段）落在新空行上。逐条重新测行号后改掉，没有按偏移量批量加，因为"整个文件平移同一个数"这件事在某些位置并不成立：同一次改动里，`internal/platform/platform_linux.go` 的接口断言与 `rooted()` 那些行完全没动，从 `Versions()` 开始往下才平移 7 行。M2 第四、五片又红了一次：`internal/nginx/tls.go` 加 ACME 安装与 `PrepareACME`、`cmd/minipanel/main.go` 加续期循环、`internal/api/site_tls.go` 加 ACME handler，合计让四份文档里 35 个指针落到空行/收尾括号、17 个带符号锚点的指针指错行；同样是逐条重测，不是整体加偏移。防误报规则写在 `notALineRef`：`0.0.0.0:29080`、`https://IP:29080` 里的冒号是端口，不是行号 |
-| 真实浏览器跑网站页（本轮 Playwright + 本机 chromium，脚本不入仓库） | **M2 第五片重跑通过**——网站页新增了 ACME 选项与 `自动续期` 标记，所以这一轮必须重跑。脚本用 Playwright + 本机 chromium，390×900 移动视口，对象是一台临时 scratch 面板（`MINI_PANEL_ROOT=/tmp`，nginx 用真实的 `/etc/nginx`，ACME 目录指向本地 Pebble）。本轮覆盖：登录 → 网站页两行（一行 ACME，一行通配符）、ACME 行显示 `HTTPS · ACME` 与 `自动续期`、打开证书对话框看到 HTTP-01 说明、通配符行的 ACME 单选灰掉并显示原因、能力页 `ssl` 显示可用。控制台没有未知错误；登录前的 `/api/v1/session` 404 是伪装响应，按预期过滤 |
-| `make build && ./bin/minipanel version` | `Mini Panel 0.1.0-m0 (commit db013aa, built 2026-11-11T05:42:41Z)`；产物 13,701,282 字节。commit / built 由 Makefile 从 `git rev-parse --short HEAD`（取不到就写 `none`，`Makefile:21`）与 UTC 当前时间（`Makefile:22`）注入，`Makefile:24-27` 的 `-ldflags -X $(MODULE)/internal/build.{Version,Commit,BuildDate}` 落到 `internal/build`，**每次构建都会变**，不是可以对表的常量 |
-| `make build-all` | 8 个产物全部产出，12.52–14.32 MB（`-s -w` + ldflags），末行打印 `build-all OK`；`CGO_ENABLED=0` 见 `go version -m bin/minipanel` |
-| `make doctor` | 打印平台、路径（`MINI_PANEL_ROOT=./data`，不动系统路径）、**schema v3**、用户/会话/审计计数、数据库大小、证书、监听与未认证响应、**锁死风险**（只列 armed 行）与**未开放能力及理由**（`backup(备份任务与归档管理在 M6 交付)`、`cron(计划任务调度器在 M6 交付)` 与 `internal/platform/detect.go:57-58` 原文一致）。这一行列出的是**全部非 available 的 13 条**，本轮全部是 `unavailable`：`site`、`site_write`、`ssl`、`audit` 已因"nginx 可识别 + 进程是 root + ACME 实现可用"进入 `available`；`php` 在本机没有运行时，所以是 `unavailable` 而不是 `degraded`（装了 PHP 的机器会由 `internal/php` 的现场探测改写为 `degraded` 并带上它自己的理由）。本轮在同一台 scratch 实例上实测：armed 的锁死风险只有面板证书一行（TLS 开着但证书尚未生成），unavailable 列表与 `internal/platform/detect.go:50-66` 的原文一致 |
+| `make check-docs` | `ok … internal/docsync 0.64s`——三个用例：`TestCitationsPointInsideRealFiles` 核对每一个 `文件:行` 指针所指的文件存在、行号在文件内、区间没写反，并且**不接受指针落在空行或只剩 `}` 的行上**；`TestAnchoredCitationsSayWhatTheyClaim` 对写了符号名的指针确认那个符号确实就在所指行上（找不到就打印它真正在第几行）；`TestNamedTestsAndCommandsExist` 要求文档点名的 `TestXxx` 与 README 点名的 `minipanel <子命令>` 真的存在。本轮实测：**594 个行号指针 0 个越界、255 个带符号锚点的指针全部落在所指行上、87 个标识符与 8 个子命令全部存在**；它自愿放弃的部分（前一行已收尾、无法判定归属的裸 `:行`）连在哪一行都打印出来，本轮 0 处。覆盖面不会悄悄缩水：任何一个用例核对数为 0 就直接 `t.Fatal`。它第一轮跑就抓到 4 处真实文档说谎——3 个起点大于终点的反向区间，和 1 个仓库里从来没有过的测试名（三份文档都把它当作 check-honesty 的一条引用；真实用例是 `TestCapabilityStatesAreSymmetric`）；补上"空行/收尾括号不算落点""裸指针可继承上一行的文件（附录里的条目是折着写的）"之后又抓到 15 处行号漂移，逐条改掉，并把 `docs/技术选型与MVP规格.md` 里"main_test.go 277 行、8 个用例"这种同样过期的计数改成实测的 489 行、11 个用例。M2 第二片又红了一次，而且是同一类：`internal/platform/platform_linux.go` 里 `Versions()` 上方那段注释改写后整个文件后半部分平移 7 行，`cmd/minipanel/main.go` 的 doctor JSON 加了 2 个 key 之后 600 行以后平移 6 行，于是四份文档里数十处 `文件:行` 指针集体失准，另有一条跨文档指针（`功能设计.md` 引 `里程碑.md` 的未排期段）落在新空行上。逐条重新测行号后改掉，没有按偏移量批量加，因为"整个文件平移同一个数"这件事在某些位置并不成立：同一次改动里，`internal/platform/platform_linux.go` 的接口断言与 `rooted()` 那些行完全没动，从 `Versions()` 开始往下才平移 7 行。M2 第四、五片又红了一次：`internal/nginx/tls.go` 加 ACME 安装与 `PrepareACME`、`cmd/minipanel/main.go` 加续期循环、`internal/api/site_tls.go` 加 ACME handler，合计让四份文档里 35 个指针落到空行/收尾括号、17 个带符号锚点的指针指错行；同样是逐条重测，不是整体加偏移。M2 第六片再红一次：`internal/nginx/nginx.go` 插入 `SetPHP` / `applyConfig`、`internal/platform/platform_linux.go` 插入 `resolvePHPBinding` 与 `php_fpm_versions` 探测、`internal/api/sites.go` 插入 `handleSitePHP`，四份文档里 26 个指针落到空行/收尾括号、17 个带符号锚点指错行，逐条重测改掉后才重新变绿。防误报规则写在 `notALineRef`：`0.0.0.0:29080`、`https://IP:29080` 里的冒号是端口，不是行号 |
+| 真实浏览器跑网站页（Playwright + 本机 chromium，脚本不入仓库） | **M2 第五片重跑通过**——网站页新增了 ACME 选项与 `自动续期` 标记，所以这一轮必须重跑。脚本用 Playwright + 本机 chromium，390×900 移动视口，对象是一台临时 scratch 面板（`MINI_PANEL_ROOT=/tmp`，nginx 用真实的 `/etc/nginx`，ACME 目录指向本地 Pebble）。本轮覆盖：登录 → 网站页两行（一行 ACME，一行通配符）、ACME 行显示 `HTTPS · ACME` 与 `自动续期`、打开证书对话框看到 HTTP-01 说明、通配符行的 ACME 单选灰掉并显示原因、能力页 `ssl` 显示可用。控制台没有未知错误；登录前的 `/api/v1/session` 404 是伪装响应，按预期过滤。**第六片的 PHP 选择器 / 绑定对话框没有重跑浏览器脚本**：沙箱里没有可绑定的 fpm 后端，这一片的 UI 由 `make check-ui` 与 `internal/api/sites_php_test.go` 覆盖，真实浏览器验证留到有 PHP 的主机 |
+| `make build && ./bin/minipanel version` | `Mini Panel 0.1.0-m0 (commit c8abc41, built 2026-11-11T10:44:12Z)`；产物 14,348,450 字节。commit / built 由 Makefile 从 `git rev-parse --short HEAD`（取不到就写 `none`，`Makefile:21`）与 UTC 当前时间（`Makefile:22`）注入，`Makefile:24-27` 的 `-ldflags -X $(MODULE)/internal/build.{Version,Commit,BuildDate}` 落到 `internal/build`，**每次构建都会变**，不是可以对表的常量 |
+| `make build-all` | 8 个产物全部产出，12.52–14.35 MB（`-s -w` + ldflags），末行打印 `build-all OK`；`CGO_ENABLED=0` 见 `go version -m bin/minipanel` |
+| `make doctor` | 打印平台、路径（`MINI_PANEL_ROOT=./data`，不动系统路径）、**schema v3**、用户/会话/审计计数、数据库大小、证书、监听与未认证响应、**锁死风险**（只列 armed 行）与**未开放能力及理由**（`backup(备份任务与归档管理在 M6 交付)`、`cron(计划任务调度器在 M6 交付)` 与 `internal/platform/detect.go:58-59` 原文一致）。这一行列出的是**全部非 available 的 13 条**，本轮全部是 `unavailable`（`site`、`site_write`、`ssl`、`audit` 四个已因"nginx 可识别 + 进程是 root + ACME 实现可用"进入 `available`，所以不在这一行里）；`php` 在本机没有运行时，所以是 `unavailable` 而不是 `degraded`（装了 PHP 的机器会由 `internal/php` 的现场探测改写为 `degraded` 并带上它自己的理由），同一台机器上的 `php_version_switch` 也因此是 `unavailable`。本轮在同一台 scratch 实例上实测：armed 的锁死风险只有面板证书一行（TLS 开着但证书尚未生成），unavailable 列表与 `internal/platform/detect.go:52-67` 的原文一致 |
 | 8 个组合逐条 `CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build`（linux/darwin/windows/freebsd × amd64/arm64） | **8/8 退出码 0**（本轮逐个跑，产物 17.8–19.6 MB，未加 `-s -w`；带 ldflags 的 `make build-all` 产物是 12.52–13.70 MB） |
 | `GOOS=linux\|windows\|darwin\|freebsd go vet ./internal/...` | 四个平台全部退出码 0、无输出 |
 | `go test ./cmd/minipanel/` | `ok … 2.5s`（`make test` 里同一包是 3.2s——这类计时每台机器每次都会飘，能对表的是包数与用例数，不是小数）——`init` 的 flag 真的落到 panel.json、未知 flag/位置参数/未知子命令报错、`--entrance -` 关闭入口、`reset-entrance` 同步 settings 镜像、`passwd` 校验与 `must_change_pw`、`-h` 不算失败、usage 与命令表一致、banner 显示在用值、`reset-ips` / `reset-2fa` 只写它们声称写的东西并且不谎报"需要重启"；`lockout_test.go` 再从对照表这一侧压两条：**表里引用的每个 `minipanel <命令>` 都必须真能被 dispatch、每个 `--flag` 都必须出现在 usage 里**，以及 `doctor --json` 的 `lockout_risks` 必须逐行等于 `lockout.OnlyArmed(lockout.Risks(...))`；`php_test.go` 再从 PHP 这一侧压四条：`php_ctl_versions` 必须逐字等于 `capabilities.php_versions`；三处 run 都不许出现"注意："那行（空 root、只有 cli 的 root、以及"装了 fpm 但 socket 只是没人听"的 root）；`php_pool_state` / `php_socket_state` 在没有版本的假 root 上必须是 `none`（不是 `absent`——没检查过的东西不能报成"检查了发现没有"）；装了 fpm 的假 root 上必须能区分"文件在但内核里没人听"与"内核里有进程在听"，而两侧对不上时那句"注意："必须出声 |
@@ -441,14 +449,14 @@ darwin/arm64、windows/amd64、freebsd/amd64 是**重点目标**（四个 OS 都
 | `go mod tidy -diff` | 无输出（`go.mod`/`go.sum` 已 tidy；因此不必执行 `make tidy`） |
 | `sed -n '5,12p' go.mod`；`grep -c '// indirect' go.mod` | 直接依赖 6 个（含 `golang.org/x/term v0.48.0`）、间接 15 个 |
 | `grep -rn "golang.org/x/term" --include='*.go' .` | 只有一处：`cmd/minipanel/main.go:41`——这个依赖只为隐藏口令输入而存在 |
-| `echo 'X' \| minipanel passwd admin`（管道） | 退出码 0，输出"已更新 admin 的口令，作废 0 个会话…"，**不打提示语**（没有终端可隐藏，`main.go:700`（`readLine` 调用点）） |
+| `echo 'X' \| minipanel passwd admin`（管道） | 退出码 0，输出"已更新 admin 的口令，作废 0 个会话…"，**不打提示语**（没有终端可隐藏，`main.go:737`（`readLine` 函数）） |
 | `minipanel passwd admin`（真 tty） | 只显示 `输入新口令: ` 与随后的换行；用 `pty.fork()` 造终端、只检查主端回流的字节，输入口令后在主端流里搜不到明文——回显确实被关掉了（`main.go:685 term.IsTerminal` → `:691 term.ReadPassword`）。这条现在是代码事实，不再只是文案 |
 | `grep -rnE "http\.(Get\|Post\|Client\|DefaultClient)\|net\.Dial\(" --include='*.go' . \| grep -v _test.go` | 空——**没有遥测** |
 | `grep -rn "runtime.GOOS" --include='*.go' . \| grep -v internal/platform` | 空——平台差异只靠构建标签 |
-| `grep -rn "\.Allow(" --include='*.go' internal/platform \| grep -v _test` | 五行：`internal/platform/detect.go:74` 点亮任何主机都成立的 `audit`；`internal/platform/platform_linux.go:382`、`:383`、`:389` 在 nginx 可写且 ACME 可用时点亮 `site` / `site_write` / `ssl`。也就是说**只有现场证据成立的那几项会被报成 available**，`php`、`database`、`firewall` 等仍然到不了这一档 |
+| `grep -rn "\.Allow(" --include='*.go' internal/platform \| grep -v _test` | 五行：`internal/platform/detect.go:75` 点亮任何主机都成立的 `audit`；`internal/platform/platform_linux.go:439`、`:440`、`:446` 在 nginx 可写且 ACME 可用时点亮 `site` / `site_write` / `ssl`，`:543` 在站点可写且探测到 fpm 版本时点亮 `php_version_switch`。也就是说**只有现场证据成立的那几项会被报成 available**，`php`、`database`、`firewall` 等仍然到不了这一档 |
 | `./bin/minipanel doctor` 的 PHP 行（有 PHP 的开发机实测） | `PHP          8.3，最新 8.3：pool /etc/php/8.3/fpm/pool.d 磁盘上还没有；socket /run/php/php8.3-fpm.sock 文件不存在——路径来自 PHPCtl，状态是此刻现场读的`。这一行不是读位图：`cmd/minipanel/php.go:30 phpProbe()` 先走 `platform.PHPCtl` 拿到两个**目标路径**，再把它们交给 `internal/php` 的 `DirStatus()` / `SocketStatus()` **单独读一遍此刻的状态**，`cmd/minipanel/php.go:96 phpSummary()` 把两次读拼成一句，`cmd/minipanel/php.go:124 phpBitmapMismatch()` 拿它和位图对四条规则。两侧矛盾时 doctor 多打一行"注意："，所以 `TestDoctorPHPCtlLineIsTheInterface`、`TestDoctorPHPRootedHostNamesTheVersion`、`TestDoctorTellsStoppedFpmApartFromRunningFpm` 都断言"没有注意行"，`TestSocketListeningWithoutFpmModeIsAContradiction` 断言该出声时一定出声。**这台机器没有 fpm 也没有在跑的 listener，所以上面实测到的两句都是"没有"**；"文件在但内核里没人听"和"内核里有进程在听"两种形状由 `TestDoctorTellsStoppedFpmApartFromRunningFpm` 用 rooted 假主机 + 现场起停的真 listener 覆盖，不是在本机实测出来的 |
-| `MINI_PANEL_ROOT=<假 Debian 树>` + 现场用 **python** 起一个 unix listener（有 PHP 的开发机实测） | 造一台"装了 fpm"的假主机（`etc/php/8.3/fpm/pool.d`、`usr/sbin/php-fpm8.3`、`run/php/`），listener 活着时 doctor 打 `pool … 在；socket … 内核里有进程在听`；`s.close()` 之后（python 不 unlink，文件留在原地）同一行变成 `pool … 在；socket … 文件在但内核里没人听，fpm 大概是停了`，两次都没有"注意："。这一条特意不用 Go 的 listener 造：判活读的是内核那本账，不是某个运行时退出时留下的痕迹。两次位图都仍是 `php[degraded](检测到 PHP 8.3 的 fpm，版本与 pool 目录已可读；把站点绑定到某个版本的写入路径在 M2 交付)`——socket 在听**不会**把 `php` 抬成 `available`，这条边界由 `TestSocketListeningWithoutFpmModeIsAContradiction` 的 fixture 形状与 §8 的白名单一起守着 |
-| `minipanel doctor --json`（本机实测） | `capabilities.features` 共 17 个 key：`available` 是 `audit` / `site` / `site_write` / `ssl` 四个（nginx 可写、ACME 可用），其余 13 个 `unavailable` 各带一句理由，没有 `degraded`（本机没装 PHP，所以 `php` 是 `unavailable`；装了 PHP 但没有 fpm/cgi 后端的机器会是 `degraded`，`fix_action` 为空——§4.2 不许这个字段带包名）。顶层 `php_ctl_versions` 逐字等于 `capabilities.php_versions`（本机为 `[]`），`php_modes` / `php_ext_install` 也是空数组。`php_pool_dir` / `php_socket` 是 `PHPCtl` 给的目标，`php_pool_state` / `php_socket_state` 是 `internal/php` 此刻读到的状态（没有任何版本时两者是 `none`，意思是"没有可检查的对象"，不是"检查了发现没有"） |
+| `MINI_PANEL_ROOT=<假 Debian 树>` + 现场用 **python** 起一个 unix listener（有 PHP 的开发机实测） | 造一台"装了 fpm"的假主机（`etc/php/8.3/fpm/pool.d`、`usr/sbin/php-fpm8.3`、`run/php/`），listener 活着时 doctor 打 `pool … 在；socket … 内核里有进程在听`；`s.close()` 之后（python 不 unlink，文件留在原地）同一行变成 `pool … 在；socket … 文件在但内核里没人听，fpm 大概是停了`，两次都没有"注意："。这一条特意不用 Go 的 listener 造：判活读的是内核那本账，不是某个运行时退出时留下的痕迹。两次位图都仍是 `php[degraded](检测到 PHP 8.3 的 fpm，版本与 pool 目录已可读；站点可按版本绑定 fpm；多版本安装/卸载与扩展编译安装仍未交付)`——socket 在听**不会**把 `php` 抬成 `available`，这条边界由 `TestSocketListeningWithoutFpmModeIsAContradiction` 的 fixture 形状与 §8 的白名单一起守着 |
+| `minipanel doctor --json`（本机实测） | `capabilities.features` 共 17 个 key：`available` 是 `audit` / `site` / `site_write` / `ssl` 四个（nginx 可写、ACME 可用），其余 13 个 `unavailable` 各带一句理由，没有 `degraded`（本机没装 PHP，所以 `php` 是 `unavailable`；装了 PHP 但没有 fpm/cgi 后端的机器会是 `degraded`，`fix_action` 为空——§4.2 不许这个字段带包名）。同一台机器没有 fpm，所以 `php_version_switch` 也在 `unavailable` 里；装了 fpm 且 nginx 可写的机器会把它报成 `available`。顶层 `php_ctl_versions` 逐字等于 `capabilities.php_versions`（本机为 `[]`），`php_modes` / `php_ext_install` / `php_fpm_versions` 也是空数组。`php_pool_dir` / `php_socket` 是 `PHPCtl` 给的目标，`php_pool_state` / `php_socket_state` 是 `internal/php` 此刻读到的状态（没有任何版本时两者是 `none`，意思是"没有可检查的对象"，不是"检查了发现没有"） |
 
 > 如果你把仓库放进自己的 git 远端，记得先确认 `webui/dist/index.html` 被跟踪：
 > `git ls-files webui/dist` 应该有输出，`git check-ignore -v webui/dist/index.html` 应该**没有**命中。
@@ -466,12 +474,12 @@ darwin/arm64、windows/amd64、freebsd/amd64 是**重点目标**（四个 OS 都
 | --- | --- | --- |
 | **M0 已完成** | 身份与会话、安全入口与伪装、TLS fail-closed、CSRF、登录锁定、TOTP、审计日志、能力位图契约、OpenAPI 契约测试、平台探测与路径抽象、内嵌 M0 页面、单二进制交叉编译 | `internal/platform/detect.go:35-45` 的注释即 M0 范围定义 |
 | **M1 账号与会话（已完成）** | 会话管理页（列表 + 撤销单个 / 其它全部）、前端工程化（Vue 3 + Vite + Element Plus，单文件产物仍进 `webui/dist`）、入口边界收紧（HTML 导航逐路径校验，`entranceGate()` 的 guided hop）、§6.3 三条自救缺口（`reset-ips` / 口令有效期执行点 / `reset-2fa`）、§3.10 的「CLI 对照」只读页（与 `doctor` 共用 `internal/lockout` 的一份计算） | 逐条状态与验收见 `docs/里程碑.md` M1 一节；`make check-ui` 与 `internal/api/m1_test.go`、`internal/api/lockout_test.go` |
-| **M2 站点、PHP 与站点证书** | Nginx/Apache 站点创建与配置生成、站点写入、PHP 多版本安装与版本切换、扩展安装、站点证书签发与部署；Windows 侧对应 php-cgi 进程池 | "站点创建与 Nginx 配置生成在 M2 交付"、"PHP 多版本安装在 M2 交付"、"PHP 版本切换在 M2 交付"、"PHP 扩展编译安装在 M2 交付"、"站点证书签发与部署随 Nginx Provider 在 M2 交付" |
+| **M2 站点、PHP 与站点证书** | Nginx/Apache 站点创建与配置生成、站点写入、PHP 多版本安装/卸载与版本切换、扩展安装、站点证书签发与部署；Windows 侧对应 php-cgi 进程池。版本切换已交付，但只绑定本机已有 fpm socket：不安装/卸载、不建 per-site pool | "站点创建与 Nginx 配置生成在 M2 交付"、"PHP 多版本安装在 M2 交付"、"PHP 版本切换需要可写的 nginx 站点 Provider 与 php-fpm 后端"、"PHP 扩展编译安装在 M2 交付"、"站点证书签发与部署随 Nginx Provider 在 M2 交付" |
 | **M3 数据库** | 数据库 Provider | "数据库 Provider 在 M3 交付" |
 | **M4 主机管理** | 防火墙规则写入、服务启停、Web 终端与录像审计、监控采集与图表、文件权限（随文件管理器）、SSH/RDP 访问管理页 | "防火墙规则写入在 M4 交付"、"服务启停在 M4 交付"、"Web 终端与录像审计在 M4 交付"、"监控采集与图表在 M4 交付"、"文件权限（属主/模式）管理随文件管理器在 M4 交付"、"SSH/RDP 访问管理页在 M4 交付" |
 | **M5 Windows 完整支持** | 不引入新功能：把散在 M0（探测/路径/位图）、M2（php-cgi 池、预编译 DLL）、M4（WFP 写入、SCM 启停、远程访问页）的 Windows 部分收敛成受支持的 GA——Windows 上的安装/升级/回滚、M2+M4 全部功能在 Windows CI 有断言、伪装与入口在 IIS-less 部署下可用 | 代码里**没有**以 "M5" 为理由的 Deny 文案（`grep -rn "M5" --include='*.go' .` 为空），M5 是项目定位；已存在的 Windows 约束逐条在 `internal/platform/platform_windows.go:45-101`。完成定义见 `docs/里程碑.md` M5 一节 |
-| **M6 计划任务与备份** | 计划任务调度器（内置 + `crontab`/`taskschd`）、备份任务与归档管理 | "计划任务调度器在 M6 交付"（`internal/platform/detect.go:58`）、"备份任务与归档管理在 M6 交付"（`:57`） |
-| 未排期（不占里程碑编号） | 子账号：把 `SessionUser` 的具体用户名变成富主体里的一个字段 | `internal/api/server.go:462` 的注释写着 "M6 (sub-accounts)"，但代码里既没有对应的 feature 名也没有 Deny 理由，所以本文档把它记为**未排期**、不占用 M6 编号（M6 只装调度器与备份这两件已有原文的事）；要正式排期，先在位图里给它一个条目 |
+| **M6 计划任务与备份** | 计划任务调度器（内置 + `crontab`/`taskschd`）、备份任务与归档管理 | "计划任务调度器在 M6 交付"（`internal/platform/detect.go:59`）、"备份任务与归档管理在 M6 交付"（`:58`） |
+| 未排期（不占里程碑编号） | 子账号：把 `SessionUser` 的具体用户名变成富主体里的一个字段 | `internal/api/server.go:465` 的注释写着 "M6 (sub-accounts)"，但代码里既没有对应的 feature 名也没有 Deny 理由，所以本文档把它记为**未排期**、不占用 M6 编号（M6 只装调度器与备份这两件已有原文的事）；要正式排期，先在位图里给它一个条目 |
 
 > Windows 的工作是**分布式的**：M0 就写进了探测/路径/能力位图，写操作分别随 M2（php-cgi 池、
 > 预编译 DLL）与 M4（WFP 防火墙 Provider、SCM 服务启停、远程访问页）交付；**M5 不是"再补一批

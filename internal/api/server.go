@@ -123,9 +123,12 @@ func (s *Server) routes() chi.Router {
 			// M2 third slice: static sites. GET lists only panel-owned configs;
 			// POST and DELETE go through csrf() and auditWrites() like every other
 			// write, and the provider runs `nginx -t` before it reloads.
+			// M2 sixth slice adds PUT .../php: binding a site to one detected fpm
+			// version, with the same test-before-reload and audit rules.
 			r.Get("/sites", s.handleSitesList)
 			r.Post("/sites", s.handleSiteCreate)
 			r.Delete("/sites/{name}", s.handleSiteDelete)
+			r.Put("/sites/{name}/php", s.handleSitePHP)
 			r.Post("/sites/{name}/tls", s.handleSiteTLSSet)
 			r.Delete("/sites/{name}/tls", s.handleSiteTLSClear)
 			r.Post("/sites/{name}/acme", s.handleSiteACME)

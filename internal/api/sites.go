@@ -3,15 +3,18 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/Lisir2002/Mini_Panel/internal/platform"
 )
 
-// Site management is the third slice of M2: static sites only. There is no
-// PHP binding, no certificate issuance and no domain editing yet, and the
-// capability bitmap says exactly that — `php` stays degraded, `ssl` stays
-// unavailable. The page renders from those states, so a site created here
-// cannot pretend to have a half-delivered feature attached to it.
+// Site management is the third slice of M2: static sites first, then the PHP
+// binding in the sixth slice. Domains are immutable for now and certificate
+// controls live in site_tls.go; the capability bitmap says exactly which half
+// exists (`php` stays degraded, `php_version_switch` is the site-level switch,
+// `ssl` covers all three certificate sources). The page renders from those
+// states, so a site created here cannot pretend to have a half-delivered
+// feature attached to it.
 //
 // Write discipline: the provider writes a config, runs `nginx -t`, and only
 // reloads when that passes. Every failure path restores the previous file
@@ -38,6 +41,22 @@ func (s *Server) siteManager() (platform.SiteManager, string) {
 		return nil, "站点写入 Provider 在当前主机上不可用"
 	}
 	return m, ""
+}
+
+// sitePHPManager is the optional PHP-binding interface. Clearing a binding
+// ("static") is allowed even when the bitmap no longer offers PHP — otherwise a
+// host that removed php-fpm after a site was bound would have no way to unbind
+// it. Choosing a version does require FeatPHPVersionSwitch to be available.
+func (s *Server) sitePHPManager() (platform.SitePHPManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	pm, ok := m.(platform.SitePHPManager)
+	if !ok || pm == nil {
+		return nil, "该平台的站点 Provider 没有实现 PHP 版本绑定"
+	}
+	return pm, ""
 }
 
 // handleSitesList is GET /api/v1/sites. Only files the panel wrote itself are
@@ -70,15 +89,34 @@ func (s *Server) handleSiteCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name    string   `json:"name"`
-		Domains []string `json:"domains"`
-		Root    string   `json:"root"`
+		Name       string   `json:"name"`
+		Domains    []string `json:"domains"`
+		Root       string   `json:"root"`
+		PHPVersion string   `json:"php_version"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
 		return
 	}
-	site, err := m.Create(platform.SiteSpec{Name: body.Name, Domains: body.Domains, Root: body.Root})
+	phpVersion := strings.TrimSpace(body.PHPVersion)
+	if phpVersion != "" {
+		if s.Caps == nil || !s.Caps.Has(platform.FeatPHPVersionSwitch) {
+			why := "PHP 版本绑定在当前主机上不可用"
+			if s.Caps != nil {
+				why = s.Caps.Reason(platform.FeatPHPVersionSwitch)
+			}
+			writeErr(w, http.StatusForbidden, "capability", why)
+			return
+		}
+		if _, ok := m.(platform.SitePHPManager); !ok {
+			writeErr(w, http.StatusForbidden, "capability", "该平台的站点 Provider 没有实现 PHP 版本绑定")
+			return
+		}
+	}
+	site, err := m.Create(platform.SiteSpec{
+		Name: body.Name, Domains: body.Domains, Root: body.Root,
+		PHPVersion: phpVersion,
+	})
 	switch {
 	case err == nil:
 		writeJSON(w, http.StatusCreated, site)
@@ -86,6 +124,8 @@ func (s *Server) handleSiteCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
 	case errors.Is(err, platform.ErrSiteExists):
 		writeErr(w, http.StatusConflict, "site_exists", err.Error())
+	case errors.Is(err, platform.ErrSitePHP):
+		writeErr(w, http.StatusUnprocessableEntity, "php_unavailable", err.Error())
 	case errors.Is(err, platform.ErrSiteRefused):
 		// The config did not survive `nginx -t`, or the reload was refused. The
 		// write has already been rolled back; this is a 422 because the request
@@ -93,6 +133,52 @@ func (s *Server) handleSiteCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_write", "创建站点失败："+err.Error())
+	}
+}
+
+// handleSitePHP is PUT /api/v1/sites/{name}/php. The body is
+// {"php_version":"8.3"}; an empty string switches the site back to static.
+// The provider resolves the version to a socket against live discovery, then
+// rewrites the vhost through test-before-reload, so a failed switch leaves the
+// previous binding serving.
+func (s *Server) handleSitePHP(w http.ResponseWriter, r *http.Request) {
+	m, why := s.sitePHPManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		PHPVersion string `json:"php_version"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	version := strings.TrimSpace(body.PHPVersion)
+	if version != "" {
+		if s.Caps == nil || !s.Caps.Has(platform.FeatPHPVersionSwitch) {
+			why := "PHP 版本绑定在当前主机上不可用"
+			if s.Caps != nil {
+				why = s.Caps.Reason(platform.FeatPHPVersionSwitch)
+			}
+			writeErr(w, http.StatusForbidden, "capability", why)
+			return
+		}
+	}
+	site, err := m.SetPHP(chiParam(r, "name"), version)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSitePHP):
+		writeErr(w, http.StatusUnprocessableEntity, "php_unavailable", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_php", "切换站点 PHP 版本失败："+err.Error())
 	}
 }
 

@@ -9,10 +9,15 @@ import (
 // The nginx writer and any future Apache/IIS provider convert to and from
 // these, so internal/api never imports a provider package and the selector
 // stays "ask the platform".
+//
+// PHPVersion is the version the operator selected. The provider resolves it to
+// a socket after checking that the version really exposes fpm; the API never
+// supplies a path.
 type SiteSpec struct {
-	Name    string   `json:"name"`
-	Domains []string `json:"domains"`
-	Root    string   `json:"root"`
+	Name       string   `json:"name"`
+	Domains    []string `json:"domains"`
+	Root       string   `json:"root"`
+	PHPVersion string   `json:"php_version,omitempty"`
 }
 
 type SiteInfo struct {
@@ -23,6 +28,13 @@ type SiteInfo struct {
 	Enabled    bool         `json:"enabled"`
 	CreatedAt  string       `json:"created_at"`
 	TLS        *SiteTLSInfo `json:"tls,omitempty"`
+	PHPVersion string       `json:"php_version,omitempty"`
+	PHPSocket  string       `json:"php_socket,omitempty"`
+	// PHPSocketState is the live state of PHPSocket (listening / idle / absent /
+	// not_socket / unknown), computed on every read. It is not persisted: "the
+	// site points at 8.3" and "php8.3-fpm is answering" are two separate facts,
+	// and this is the second one.
+	PHPSocketState string `json:"php_socket_state,omitempty"`
 }
 
 // SiteTLSInfo is the platform-neutral certificate state of one site.
@@ -54,6 +66,14 @@ type SiteManager interface {
 // tells the truth about that host.
 type SiteProvider interface {
 	Sites() (SiteManager, bool)
+}
+
+// SitePHPManager is the optional version-binding half of a site writer. It is
+// separate from SiteManager because switching PHP is a second kind of write
+// (rewrite the handler, test, reload) with a host-dependent precondition: the
+// requested version must expose fpm on this machine.
+type SitePHPManager interface {
+	SetPHP(name, version string) (SiteInfo, error)
 }
 
 // SiteTLSManager is the optional certificate side of a site writer. Manual
@@ -100,6 +120,7 @@ var (
 	ErrSiteInvalid     = errors.New("站点参数不合法")
 	ErrSiteRefused     = errors.New("写入被 nginx 拒绝，已回滚")
 	ErrSiteTLSInvalid  = errors.New("站点证书不合法")
+	ErrSitePHP         = errors.New("该 PHP 版本不能绑定到站点")
 	ErrACMEUnsupported = errors.New("ACME HTTP-01 不支持该站点")
 	ErrACMEFailed      = errors.New("ACME 签发失败")
 )

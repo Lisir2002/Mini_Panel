@@ -3,24 +3,30 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四片：静态站点与站点证书。这一页的边界与后端能力位图是同一句话，不另写一套：
+// M2 第三、四、六片：静态站点、站点证书与 PHP 版本绑定。这一页的边界与后端能力位图
+// 是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
-//   * 这里创建的是纯静态站点：没有 PHP 绑定。ssl 可用时证书有三条来源：ACME
-//     HTTP-01 自动签发与续期、手工上传、自签。通配符只能用上传，因为 HTTP-01 无法
-//     验证 *.example.com——页面在 ACME 选项旁直接说明，而不是等请求失败后才解释。
+//   * php_version_switch 只列出 php_fpm_versions；选择后由后端把版本解析成 socket。
+//     socket 当前不是 listening 时，页面直接说"站点会 502"，不把配置写入说成后端可用。
+//   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
+//     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
+//     而不是等请求失败后才解释。
 //   * 删除只删配置、软链接与面板管理的证书；网站根目录故意保留——删 vhost 不是删数据。
 const state = ref(null);
 const error = ref("");
 const msg = ref("");
 const busy = ref(false);
-const form = ref({ name: "", domains: "", root: "" });
+const form = ref({ name: "", domains: "", root: "", php_version: "" });
 
 const siteFeat = computed(() => store.caps?.features?.site || null);
 const siteWriteFeat = computed(() => store.caps?.features?.site_write || null);
 const sslFeat = computed(() => store.caps?.features?.ssl || null);
+const phpSwitchFeat = computed(() => store.caps?.features?.php_version_switch || null);
+const phpVersions = computed(() => store.caps?.php_fpm_versions || []);
 const available = computed(() => siteFeat.value?.state === "available" && siteWriteFeat.value?.state === "available");
 const tlsAvailable = computed(() => ["available", "degraded"].includes(sslFeat.value?.state));
+const phpAvailable = computed(() => phpSwitchFeat.value?.state === "available" && phpVersions.value.length > 0);
 const feats = computed(() => [siteFeat.value, siteWriteFeat.value].filter(Boolean));
 const rows = computed(() => state.value?.items || []);
 
@@ -29,6 +35,10 @@ const tlsTarget = ref(null);
 const tlsForm = ref({ mode: "acme", redirect: true, cert_pem: "", key_pem: "" });
 const hasWildcard = computed(() => (tlsTarget.value?.domains || []).some((d) => d.startsWith("*.")));
 const acmeUsable = computed(() => !hasWildcard.value && ["available", "degraded"].includes(sslFeat.value?.state));
+
+const phpOpen = ref(false);
+const phpTarget = ref(null);
+const phpForm = ref({ version: "" });
 
 function parseDomains(text) {
   return String(text || "")
@@ -50,9 +60,16 @@ async function create() {
     const body = { name: form.value.name.trim(), domains: parseDomains(form.value.domains) };
     const root = form.value.root.trim();
     if (root) body.root = root;
+    if (form.value.php_version) body.php_version = form.value.php_version;
     const site = await api("/api/v1/sites", { method: "POST", body: JSON.stringify(body) });
-    msg.value = "已创建 " + site.name + "，nginx 已通过 nginx -t 并重载。";
-    form.value = { name: "", domains: "", root: "" };
+    let php = "";
+    if (site.php_version) {
+      php = site.php_socket_state === "listening"
+        ? "，已绑定 PHP " + site.php_version
+        : "，已绑定 PHP " + site.php_version + "，但 " + phpSocketWords(site) + "，站点会返回 502";
+    }
+    msg.value = "已创建 " + site.name + "，nginx 已通过 nginx -t 并重载" + php + "。";
+    form.value = { name: "", domains: "", root: "", php_version: "" };
     await load();
   } catch (e) {
     // 后端已经把 nginx -t 的输出带回来了（422 nginx_rejected），原样显示，
@@ -144,6 +161,47 @@ function tlsLabel(r) {
   return r.tls.self_signed ? "HTTPS · 自签" : "HTTPS · 已上传";
 }
 
+function phpSocketOk(r) {
+  return r.php_socket_state === "listening";
+}
+
+function phpSocketWords(r) {
+  switch (r.php_socket_state) {
+    case "idle": return "socket 存在但无人监听";
+    case "absent": return "socket 不存在（fpm 未启动或未安装）";
+    case "not_socket": return "同名文件不是 socket";
+    case "unknown": return "无法读取内核 socket 表";
+    default: return r.php_socket_state || "状态未知";
+  }
+}
+
+function openPHP(r) {
+  error.value = ""; msg.value = "";
+  phpTarget.value = r;
+  phpForm.value = { version: r.php_version || "" };
+  phpOpen.value = true;
+}
+
+async function savePHP() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const site = await api("/api/v1/sites/" + encodeURIComponent(phpTarget.value.name) + "/php",
+      { method: "PUT", body: JSON.stringify({ php_version: phpForm.value.version }) });
+    if (site.php_version) {
+      const warn = site.php_socket_state === "listening" ? "" :
+        "；注意：" + phpSocketWords(site) + "，站点会返回 502，先启动对应版本的 php-fpm。";
+      msg.value = site.name + " 已绑定 PHP " + site.php_version + "；nginx 已通过 nginx -t 并重载" + warn;
+    } else {
+      msg.value = site.name + " 已切回静态站点；.php 请求不再交给 php-fpm。";
+    }
+    phpOpen.value = false;
+    await load();
+  } catch (e) {
+    error.value = e.message;
+    await load();
+  } finally { busy.value = false; }
+}
+
 onMounted(load);
 </script>
 
@@ -151,7 +209,8 @@ onMounted(load);
   <div class="mp-card">
     <h3>网站</h3>
     <p class="mp-note">
-      管理面板自己创建的 <b>静态站点</b>。每一次创建、删除或证书变更都是"先测试后生效"：写配置 →
+      管理面板自己创建的站点；可以在创建时或之后绑定一个本机探测到的 PHP fpm 版本，留空则是
+      <b>静态站点</b>。每一次创建、删除、PHP 切换或证书变更都是"先测试后生效"：写配置 →
       <code class="mp-code">nginx -t</code> → 只有通过才 reload；任何一步失败都会恢复上一份配置与证书。
       只列出面板自己写出的 vhost（文件内带标记），手工写的配置不会被列出来，也不会被删除。
     </p>
@@ -177,6 +236,10 @@ onMounted(load);
         :title="sslFeat.reason">
         <div v-if="sslFeat.fix_action" class="mp-muted mp-tiny">操作路径：{{ sslFeat.fix_action }}<span v-if="sslFeat.verify"> · 复核：{{ sslFeat.verify }}</span></div>
       </el-alert>
+      <el-alert v-if="phpSwitchFeat && !phpAvailable" type="info" :closable="false" style="margin-bottom:8px"
+        :title="'站点 PHP 版本绑定不可用：' + (phpSwitchFeat.reason || '后端未给出理由（缺陷，请报告）')">
+        <div v-if="phpSwitchFeat.fix_action" class="mp-muted mp-tiny">补齐：{{ phpSwitchFeat.fix_action }}<span v-if="phpSwitchFeat.verify"> · 复核：{{ phpSwitchFeat.verify }}</span></div>
+      </el-alert>
 
       <el-form label-position="top" @submit.prevent="create">
         <div class="mp-row" style="align-items:flex-start;gap:12px;flex-wrap:wrap">
@@ -190,7 +253,16 @@ onMounted(load);
         <el-form-item label="网站根目录（可省略，默认 <站点根目录>/<站点名>）">
           <el-input v-model="form.root" placeholder="留空即可" style="max-width:420px" />
         </el-form-item>
-        <el-button type="primary" size="small" :loading="busy" @click="create">创建静态站点</el-button>
+        <el-form-item label="PHP 版本（可省略，留空为纯静态）">
+          <el-select v-model="form.php_version" placeholder="纯静态" style="width:260px" :disabled="!phpAvailable">
+            <el-option label="纯静态（不执行 PHP）" value="" />
+            <el-option v-for="v in phpVersions" :key="v" :label="'PHP ' + v + '（fpm）'" :value="v" />
+          </el-select>
+          <div v-if="!phpAvailable" class="mp-hint" style="margin-top:4px">
+            {{ phpSwitchFeat?.reason || '本机没有可绑定的 php-fpm 版本。' }}
+          </div>
+        </el-form-item>
+        <el-button type="primary" size="small" :loading="busy" @click="create">创建站点</el-button>
       </el-form>
 
       <div class="mp-row" style="margin:14px 0 10px">
@@ -200,7 +272,7 @@ onMounted(load);
 
       <table>
         <thead>
-          <tr><th>站点</th><th>域名</th><th>根目录</th><th>状态</th><th>HTTPS</th><th>创建时间</th><th></th></tr>
+          <tr><th>站点</th><th>域名</th><th>根目录</th><th>状态</th><th>PHP</th><th>HTTPS</th><th>创建时间</th><th></th></tr>
         </thead>
         <tbody>
           <tr v-for="r in rows" :key="r.name">
@@ -212,6 +284,18 @@ onMounted(load);
               <span class="mp-tag flat" v-else>未启用</span>
             </td>
             <td>
+              <span v-if="r.php_version" class="mp-tag" :class="phpSocketOk(r) ? 'on' : 'partial'">
+                PHP {{ r.php_version }}
+              </span>
+              <span v-else class="mp-tag flat">静态</span>
+              <div v-if="r.php_version && !phpSocketOk(r)" class="mp-muted mp-tiny">
+                {{ phpSocketWords(r) }} · 站点会 502
+              </div>
+              <div v-else-if="r.php_version" class="mp-muted mp-tiny">
+                <code class="mp-code">{{ r.php_socket }}</code>
+              </div>
+            </td>
+            <td>
               <span class="mp-tag" :class="r.tls?.enabled ? 'on' : 'flat'">{{ tlsLabel(r) }}</span>
               <div v-if="r.tls?.enabled && r.tls.not_after" class="mp-muted mp-tiny">
                 到期 {{ r.tls.not_after }}<span v-if="r.tls.redirect"> · 80→443</span>
@@ -219,7 +303,10 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:150px;white-space:nowrap">
+            <td style="width:170px;white-space:nowrap">
+              <el-button size="small" text type="primary" :disabled="!phpAvailable && !r.php_version" @click="openPHP(r)">
+                PHP
+              </el-button>
               <el-button size="small" text type="primary" :disabled="!tlsAvailable" @click="openTLS(r)">
                 {{ r.tls?.enabled ? "更换证书" : "启用 HTTPS" }}
               </el-button>
@@ -237,9 +324,34 @@ onMounted(load);
               </el-popconfirm>
             </td>
           </tr>
-          <tr v-if="!rows.length"><td colspan="7" class="mp-muted">还没有由面板创建的站点。</td></tr>
+          <tr v-if="!rows.length"><td colspan="8" class="mp-muted">还没有由面板创建的站点。</td></tr>
         </tbody>
       </table>
+
+      <el-dialog v-model="phpOpen" :title="'PHP · ' + (phpTarget?.name || '')" width="min(520px, 94vw)">
+        <el-alert v-if="!phpAvailable" type="info" :closable="false" style="margin-bottom:10px"
+          :title="phpSwitchFeat?.reason || '本机没有可绑定的 php-fpm 版本。'" />
+        <el-form label-position="top" @submit.prevent="savePHP">
+          <el-form-item label="执行 PHP 的版本">
+            <el-select v-model="phpForm.version" style="width:100%">
+              <el-option label="静态（不执行 PHP）" value="" />
+              <el-option v-for="v in phpVersions" :key="v" :label="'PHP ' + v + '（fpm）'" :value="v" />
+            </el-select>
+            <div class="mp-hint" style="margin-top:6px">
+              只会写入该版本的 unix socket 到 vhost；面板不创建 php-fpm 池，也不启动服务。
+              保存后 nginx 先 <code class="mp-code">-t</code> 再 reload，失败会恢复原绑定。
+            </div>
+            <div v-if="phpForm.version && phpTarget?.php_version === phpForm.version && !phpSocketOk(phpTarget)" class="mp-hint">
+              当前 socket 状态：{{ phpSocketWords(phpTarget) }}；保存后站点会返回 502，先启动
+              PHP {{ phpForm.version }} 的 fpm。
+            </div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="phpOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy" @click="savePHP">应用</el-button>
+        </template>
+      </el-dialog>
 
       <el-dialog v-model="tlsOpen" :title="'HTTPS · ' + (tlsTarget?.name || '')" width="min(640px, 94vw)">
         <el-alert v-if="sslFeat && sslFeat.state !== 'available'" type="info" :closable="false" style="margin-bottom:10px"
@@ -289,9 +401,10 @@ onMounted(load);
 
       <div class="mp-hint">
         证书来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符证书仍需上传（DNS-01
-        尚未交付）；手工上传与自签证书不会被自动替换。PHP 版本绑定与域名编辑是 M2 的后续片，
-        能力位图里的 <code class="mp-code">php</code> 仍为 degraded。新建站点的根目录是 0755
-        的空目录，放一个 <code class="mp-code">index.html</code> 就能访问。
+        尚未交付）；手工上传与自签证书不会被自动替换。PHP 版本绑定使用各版本已有的 fpm socket，
+        不创建独立 pool；多版本安装/卸载与域名编辑仍是后续片，能力位图里的
+        <code class="mp-code">php</code> 仍为 degraded。新建站点的根目录是 0755 的空目录，
+        放一个 <code class="mp-code">index.html</code>（或绑定 PHP 后放 index.php）就能访问。
       </div>
     </template>
   </div>

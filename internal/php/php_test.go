@@ -521,3 +521,23 @@ func hasAny(installs []Install, sapi string) bool {
 	}
 	return false
 }
+
+// TestFPMVersionsExcludesCLIAndCGI is the selector's safety property: only an
+// fpm install has a socket a vhost can point at. Offering a cli/cgi version
+// would produce a config that is syntactically valid and guaranteed to 502.
+func TestFPMVersionsExcludesCLIAndCGI(t *testing.T) {
+	installs := []Install{
+		{Version: "8.1", SAPIs: []string{SAPICLI}},
+		{Version: "8.2", SAPIs: []string{SAPICLI, SAPICGI}},
+		{Version: "8.3", SAPIs: []string{SAPICLI, SAPIFPM}},
+		{Version: "8.4", SAPIs: []string{SAPIFPM}},
+	}
+	got := FPMVersions(installs)
+	want := []string{"8.3", "8.4"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("FPMVersions = %v, want %v", got, want)
+	}
+	if got := FPMVersions(nil); len(got) != 0 {
+		t.Errorf("FPMVersions(nil) = %v, want empty", got)
+	}
+}

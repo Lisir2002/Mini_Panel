@@ -4,6 +4,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Lisir2002/Mini_Panel/internal/php"
 )
 
 // TestCapabilityStatesAreSymmetric covers the four-state contract
@@ -83,7 +85,7 @@ func TestCapabilityStatesAreSymmetric(t *testing.T) {
 // Linux and Windows path, what decides the state, and the test that pins it.
 func declaredFeatures() []string {
 	return []string{
-		FeatWebSite, featSiteWrite, FeatPHP, featPHPVersionSwitch, FeatPHPSourceExt,
+		FeatWebSite, featSiteWrite, FeatPHP, FeatPHPVersionSwitch, FeatPHPSourceExt,
 		FeatSSL, FeatDatabase, FeatBackup, FeatFirewall, featFirewallWrite,
 		featServiceWrite, FeatCron, FeatTerminal, FeatMonitor, FeatAudit,
 		FeatSSHManager, FeatFilePerms,
@@ -178,9 +180,10 @@ func TestDetectedCapabilitiesAreExplained(t *testing.T) {
 	// whose predicate holds but which is not available fails too.
 	implemented := map[string]bool{FeatAudit: true}
 	conditional := map[string]func(*Capabilities) bool{
-		FeatWebSite:   siteWriterReady,
-		featSiteWrite: siteWriterReady,
-		FeatSSL:       siteTLSReady,
+		FeatWebSite:          siteWriterReady,
+		featSiteWrite:        siteWriterReady,
+		FeatSSL:              siteTLSReady,
+		FeatPHPVersionSwitch: phpSwitchReady,
 	}
 	for name, f := range c.Features {
 		if f.State != StateAvailable {
@@ -239,6 +242,18 @@ func siteTLSReady(*Capabilities) bool {
 	}
 	_, ok = m.(SiteACMEManager)
 	return ok
+}
+
+// phpSwitchReady is the same "ask the provider" check for the site-level PHP
+// binding: a writable site writer plus at least one discovered fpm version. A
+// cli-only install is deliberately not enough — there is no socket a vhost
+// could point at.
+func phpSwitchReady(c *Capabilities) bool {
+	if !siteWriterReady(c) {
+		return false
+	}
+	installs, _ := php.Discover()
+	return len(php.FPMVersions(installs)) > 0
 }
 
 func TestPathsAreAbsoluteAndConsistent(t *testing.T) {

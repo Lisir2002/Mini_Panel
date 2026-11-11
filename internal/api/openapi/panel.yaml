@@ -186,23 +186,29 @@ paths:
         可选能力：site 不可用时本端点返回 403 capability，message 直接取
         /api/v1/capabilities 里 site 那一项的 reason（本机没有 nginx / 面板不是
         root / 检测到 Apache 而写 Provider 目前只有 nginx），不在这里另写一套说法。
-        每行是 {name, domains, root, config_path, enabled, created_at, tls?}；enabled 在
-        sites-enabled 布局里等价于软链接存在，conf.d 布局里恒为 true。tls 只在启用
-        HTTPS 后出现，字段为 {enabled, redirect, self_signed, acme, cert_path?,
-        key_path?, not_after?, error?}；acme=true 的证书由面板自动续期，手工上传与
-        自签证书不会以这种方式出现。
+        每行是 {name, domains, root, config_path, enabled, created_at, tls?,
+        php_version?, php_socket?, php_socket_state?}；enabled 在 sites-enabled 布局里
+        等价于软链接存在，conf.d 布局里恒为 true。tls 只在启用 HTTPS 后出现，字段为
+        {enabled, redirect, self_signed, acme, cert_path?, key_path?, not_after?,
+        error?}；acme=true 的证书由面板自动续期，手工上传与自签证书不会以这种方式出现。
+        php_version 非空表示站点已绑定到该 fpm 版本，php_socket 是平台从现场探测推导出的
+        unix socket，php_socket_state 是这次读取时 socket 的真实状态（listening / idle /
+        absent / not_socket / unknown），不是持久化的承诺。
       responses:
         "200": { description: 返回 total 与 items }
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { $ref: "#/components/responses/Disguised" }
     post:
       tags: [site]
-      summary: 创建一个静态站点
+      summary: 创建一个站点（可选绑定 PHP）
       description: |
-        请求体 {name, domains[], root?}。name 是 2-32 位小写字母/数字/连字符，
-        domains 是 1-20 个 example.com 或 *.example.com 形状的主机名，root 省略时
-        取站点根目录下的同名子目录，且必须位于站点根目录之内（不给站点表单变成
-        任意路径读取口的机会）。
+        请求体 {name, domains[], root?, php_version?}。name 是 2-32 位小写字母/数字/
+        连字符，domains 是 1-20 个 example.com 或 *.example.com 形状的主机名，root
+        省略时取站点根目录下的同名子目录，且必须位于站点根目录之内（不给站点表单变成
+        任意路径读取口的机会）。php_version 省略或为空表示纯静态站点；非空时必须是
+        本机探测到且带 fpm 后端的版本，平台把版本解析成 socket 后才写配置，版本不存在
+        或只有 cli/cgi 时返回 422 php_unavailable，且不会创建站点。选择版本还要求
+        php_version_switch 为 available；静态站点不受该能力影响。
         写入协议是"先测试后生效"：写配置 → nginx -t → 只有通过才 reload。任何一步
         失败都会恢复改动前的文件，因此响应为 422 nginx_rejected 时 nginx 里看到的
         仍然是上一份配置。成功的响应是 201 + 站点行。
@@ -221,11 +227,12 @@ paths:
                   maxItems: 20
                   items: { type: string }
                 root: { type: string, description: 可省略；必须位于站点根目录之下 }
+                php_version: { type: string, description: 可省略；必须是现场探测到带 fpm 的版本，如 8.3 }
       responses:
         "201": { description: 已创建并 reload }
         "400": { description: 站点参数不合法（invalid_site） }
         "409": { description: 同名站点已存在（site_exists） }
-        "422": { description: nginx -t 或 reload 拒绝，已回滚（nginx_rejected） }
+        "422": { description: nginx 拒绝（nginx_rejected）或 PHP 版本不可绑定（php_unavailable），均已回滚 }
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { $ref: "#/components/responses/Disguised" }
   /api/v1/sites/{name}:
@@ -249,6 +256,39 @@ paths:
         "404": { description: 面板没有管理这个站点 }
         "422": { description: nginx 拒绝，已恢复 }
         "403": { $ref: "#/components/responses/CSRF" }
+  /api/v1/sites/{name}/php:
+    put:
+      tags: [site]
+      summary: 切换站点绑定的 PHP 版本（空字符串切回静态）
+      description: |
+        M2 第六片：站点级 PHP 版本绑定。请求体 {php_version}：非空值必须是本机现场探测到
+        且带 fpm 后端的版本（php_fpm_versions），平台把版本解析成该版本的 unix socket，
+        再通过"写配置 → nginx -t → reload"改写 vhost 的 .php location；失败时恢复上一份
+        配置，原绑定继续服务。php_version 为空表示清空绑定，站点回到纯静态。
+        选择版本要求 php_version_switch 为 available；清空绑定不受该能力限制，否则删除
+        php-fpm 之后就再也没有办法把站点解绑。响应是更新后的站点行，含 php_version /
+        php_socket / php_socket_state；state 不是 listening 时站点会 502，需要先启动
+        对应版本的 php-fpm。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [php_version]
+              properties:
+                php_version: { type: string, description: 空字符串表示静态；否则为已安装的 fpm 版本 }
+      responses:
+        "200": { description: 已生效，返回更新后的站点行 }
+        "400": { description: 版本格式不合法（invalid_site） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: 版本不可绑定（php_unavailable）或 nginx 拒绝（nginx_rejected），已回滚 }
   /api/v1/sites/{name}/tls:
     post:
       tags: [site]
@@ -641,6 +681,10 @@ components:
           type: array
           items: { type: string, enum: [fpm, cgi, module, not_found] }
         php_versions: { type: array, items: { type: string } }
+        php_fpm_versions:
+          type: array
+          items: { type: string }
+          description: 现场探测到的、带 fpm 后端的 PHP 版本；站点 PHP 选择器的唯一来源
         php_ext_install:
           type: array
           items: { type: string, enum: [package, source, prebuilt_dll] }

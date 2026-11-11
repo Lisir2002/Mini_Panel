@@ -66,7 +66,7 @@
   M2/M3/M4 的写操作接口（`WebServerCtl`、`FirewallCtl`、`PHPCtl`、`ServiceManager`）**现在就声明**，
   这样到里程碑时不需要重新塑形核心层。M2 第一片之后它们的现状不再相同：`PHPCtl` 在 Linux 上
   **已经是实现**（`internal/platform/platform_linux.go:30` 的 `var _ PHPCtl = linuxPlatform{}`，
-  方法体在 `:63`、`:68`、`:70`，底下是 `internal/php` 的现场探测），
+  方法体在 `:68`、`:73`、`:75`，底下是 `internal/php` 的现场探测），
   `WebServerCtl`、`FirewallCtl`、`ServiceManager` 仍然只有类型定义、没有实现、没有路由。
   "有没有实现"这件事由编译器管：那句 `var _ PHPCtl = linuxPlatform{}` 一改签名就编不过。
   接口声明见 `internal/platform/paths.go:77`——那里同时写明 `PoolDir`/`SocketPath` 给的是
@@ -76,6 +76,10 @@
 * `internal/php` 是 M2 新增的一个小包：它只做一件事——把"这台机器上有哪些能跑的 PHP 版本、
   每个版本的 SAPI/pool/socket 路径在哪"从文件系统证据里读出来（`internal/php/php.go:119 DiscoverIn()`），
   不写任何东西、不装任何东西。`internal/platform` 依赖它，而不是反过来。
+  第六片只加了一个纯函数 `internal/php/php.go:352 FPMVersions()`：从探测结果里筛出带 fpm 的
+  版本，作为 `php_fpm_versions` 与页面选择器的唯一来源。站点版本绑定在平台层
+  （`internal/platform/platform_linux.go:179 resolvePHPBinding()`）先按现场探测确认版本确有
+  fpm，再把 socket 交给 `internal/nginx` 写进 vhost；**不创建 per-site pool**。
 * `internal/acme` 是 M2 第五片新增的包：它只负责一件事——用 `golang.org/x/crypto/acme`
   走完 RFC 8555 的 HTTP-01 签发（`internal/acme/acme.go:125 Issue()`），并把 token 写进
   调用方给的 webroot。它不知道 nginx、不知道站点、不碰面板配置；证书装进 vhost 由
@@ -95,24 +99,26 @@
 ### 2.2 诚实性规则（由测试强制，不靠自觉）
 
 每一项功能在位图里是 `Feature{State, Reason, FixAction, Verify}`；`State != available` 时
-`Reason` **必须**非空，写空串会被 `internal/platform/capabilities.go:188 set()` 就地换成
+`Reason` **必须**非空，写空串会被 `internal/platform/capabilities.go:193 set()` 就地换成
 `noReasonStored`（`internal/platform/capabilities.go:193`），于是这条规则在测试里必然露馅。
 
 * `newBase()`（`internal/platform/detect.go:18-76`）先把每一项功能置为 `unavailable` 并填好具体理由，
   平台实现再对它**当场验证过的**部分调用 `Allow()`，或调用 `Degrade()` 说清"主路径能做、缺的是哪一半"。
   默认拒绝，而不是默认允许。
-  **实际状态**：`Allow()` 在生产代码里有五处——`internal/platform/detect.go:74` 点亮任何主机都成立的
-  `audit`，`internal/platform/platform_linux.go:382` / `:383` / `:389` 在"nginx 可识别、进程是 root、
-  `SiteACMEManager` 可用"时点亮 `site` / `site_write` / `ssl`。生产代码里的 `Degrade()` 有四处：
-  `platform_linux.go:379` / `:380`（nginx 在但不是 root）与 `:467` / `:470`（PHP 有运行时但缺后端 /
-  缺绑站写入路径）。因此 `available` 不是只有 `audit`：`site`、`site_write`、`ssl` 会在条件成立的
-  主机上进入这一档；`php`、`database`、`firewall` 等仍停在 `degraded` / `unavailable`。
+  **实际状态**：`Allow()` 在生产代码里有五处——`internal/platform/detect.go:75` 点亮任何主机都成立的
+  `audit`，`internal/platform/platform_linux.go:439` / `:440` / `:446` 在"nginx 可识别、进程是 root、
+  `SiteACMEManager` 可用"时点亮 `site` / `site_write` / `ssl`，`:543` 在探测到带 fpm 的 PHP 版本
+  且站点可写时点亮 `php_version_switch`。生产代码里的 `Degrade()` 有四处：
+  `platform_linux.go:434` / `:435`（nginx 在但不是 root）与 `:527` / `:537`（PHP 有运行时但缺后端 /
+  `php` 主路径仍缺安装卸载）。因此 `available` 不是只有 `audit`：`site`、`site_write`、`ssl`、
+  `php_version_switch` 会在条件成立的主机上进入这一档；`php`、`database`、`firewall` 等仍停在
+  `degraded` / `unavailable`。
   探测到的其它**事实**（有 ufw、有 sshd、有 PHP 8.3）只写进 `Capabilities` 的描述字段，
   不写成"功能可用"。
 * `Deny()` / `Degrade()` / `Allow()` 三个入口都走同一个 `set()`：`Allow` 会清掉旧理由与
   fix/verify，`Deny` 与 `Degrade` 对未知 feature 名不 panic
-  （`internal/platform/capabilities.go:202 Deny()` / `:208 Degrade()` / `:220 Allow()`）。
-  `Has()` 只认 `available`，`degraded` 一律算不可用（`internal/platform/capabilities.go:181 Has()`），
+  （`internal/platform/capabilities.go:207 Deny()` / `:213 Degrade()` / `:225 Allow()`）。
+  `Has()` 只认 `available`，`degraded` 一律算不可用（`internal/platform/capabilities.go:186 Has()`），
   所以"M2 把 php 报成 degraded"不会让任何一道按 `Has()` 把关的接口放行。
 * 五条测试：`TestDetectedCapabilitiesAreExplained`、`TestCapabilityStatesAreSymmetric`
   （`internal/platform/capabilities_test.go`），从 HTTP 外面重复断言的
@@ -123,9 +129,9 @@
 * 第一条测试里除了"关了必须有理由"，还有一张**白名单**：
   `internal/platform/capabilities_test.go:179 implemented := map[string]bool{FeatAudit: true}` 是
   **无条件白名单**（只有 `audit` 在任何主机上都算已交付）；`site` / `site_write` / `ssl` 走
-  `:217 siteWriterReady()` / `:231 siteTLSReady()` 的**条件白名单**，谓词直接问平台实现
-  "此刻有没有可写的 nginx / 有没有 ACME"，随后双向断言（`:185-195` 白名单外报 `available` 报错；
-  `:197-208` 条件成立却没报成 `available` 也报错）。
+  `:220 siteWriterReady()` / `:234 siteTLSReady()` / `:251 phpSwitchReady()` 的**条件白名单**，谓词直接问平台实现
+  "此刻有没有可写的 nginx / 有没有 ACME / 有没有带 fpm 的 PHP"，随后双向断言（`:188-198` 白名单外报 `available` 报错；
+  `:205-211` 条件成立却没报成 `available` 也报错）。
   这一条把纪律从"不许没有理由"升级成"当前版本只许这些项是功能"——任何
   "探测到机制就 `Allow` 成功能"的写法，包括只在某一个平台上成立的写法，都会让测试变红。
   条件白名单只由 `Detect()` 的现场证据决定，所以同一份二进制在没装 nginx 的机器上
@@ -275,7 +281,7 @@
    `docs/里程碑.md`），在它实现之前不得写成现状。真正的访问控制 = 监听地址 + 会话令牌与有效期
    + `panel.ip_allowlist` + CSRF + 登录锁定。
    伪装响应的**形态**也是一条决定：中性 HTML 错误页，只含状态码文本，不含产品名与版本
-   （`internal/api/server.go:278 disguise()` 的注释）。不用 Go 默认 `http.Error` 的
+   （`internal/api/server.go:281 disguise()` 的注释）。不用 Go 默认 `http.Error` 的
    `text/plain`，因为"404 Not Found"那 10 个字节本身就是运行环境指纹，而这条响应的目的正是
    让探测者学不到东西；也不冒充 nginx 的错误页——这个进程就是 web server，一张普通 404 是
    事实，冒充别人的错误页在事故响应时误导运维的程度不亚于误导扫描器。页面里内联
@@ -376,17 +382,19 @@ bcrypt 口令哈希、有效会话 ID 和整份审计记录：会话 ID 泄露�
 反应的按钮，或者一整块被藏起来的已交付功能。
 
 因此这条纪律是**测试强制**的，不是文档口径（M2 第一片是它的正面样本：`internal/php` 当场探到
-PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:440`
-起读现场，`:467` 报的是"检测到了什么、缺哪个后端"，而 `php_version_switch`、`php_ext_source`
-仍然停在 `newBase()` 里那句 `unavailable` 理由上，探测到多版本不等于能切版本）：
+PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:498`
+起读现场，`:527` 报的是"检测到了什么、缺哪个后端"。第六片把"站点能绑定到某个已有版本"
+交付了，`php_version_switch` 才允许在"站点可写 + 探测到 fpm"时 `available`；
+但 `php` 本身仍是 `degraded`，多版本安装/卸载与 `php_ext_source` 没有写入路径）：
 
 * `newBase()` 默认拒绝每一项功能并写好理由（`internal/platform/detect.go:18-76`，拒绝表 `:50`）；
 * `TestDetectedCapabilitiesAreExplained`（`internal/platform/capabilities_test.go:110`）除了
-  "关了必须有理由"，还有一张**白名单**：`capabilities_test.go:179` 的
-  `implemented` 是无条件项（当前 `{FeatAudit: true}`），`:217` 与 `:231` 的
-  `siteWriterReady` / `siteTLSReady` 是条件项（`site`、`site_write`、`ssl`）。
-  白名单外任何 `available` 都失败，条件成立却没报成 `available` 也失败。
-  所以本版本的 `available` 可以是 `audit`，也可以是现场证明可写的 `site` / `site_write` / `ssl`；
+  "关了必须有理由"，还有一张**白名单**：`capabilities_test.go:181` 的
+  `implemented` 是无条件项（当前 `{FeatAudit: true}`），`:220`、`:234` 与 `:251` 的
+  `siteWriterReady` / `siteTLSReady` / `phpSwitchReady` 是条件项（`site`、`site_write`、`ssl`、
+  `php_version_switch`）。白名单外任何 `available` 都失败，条件成立却没报成 `available` 也失败。
+  所以本版本的 `available` 可以是 `audit`，也可以是现场证明可写的 `site` / `site_write` /
+  `ssl`，以及现场证明有 fpm 可绑的 `php_version_switch`；
   `php` 被报成 `degraded` 既不需要、也不允许动这张表。身份、会话、入口、CSRF、锁定、2FA、
   能力契约、自检 CLI 是**面板自身**已交付的部分，它们不在 `features` 名单里，也就不可能被探测
   "顺带"点亮；

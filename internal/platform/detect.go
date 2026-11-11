@@ -23,6 +23,7 @@ func newBase() *Capabilities {
 		WebServers:      []WebServerName{},
 		PHPModes:        []PHPRuntimeMode{},
 		PHPVersions:     []string{},
+		PHPFPMVersions:  []string{},
 		PHPExtInstall:   []ExtensionInstallMode{},
 		ReloadMode:      ReloadNone,
 		Firewall:        FirewallNone,
@@ -51,7 +52,7 @@ func newBase() *Capabilities {
 		{FeatWebSite, "站点创建与 Nginx 配置生成在 M2 交付"},
 		{featSiteWrite, "站点写入随 Nginx Provider 在 M2 交付"},
 		{FeatPHP, "PHP 多版本安装在 M2 交付"},
-		{featPHPVersionSwitch, "PHP 版本切换在 M2 交付"},
+		{FeatPHPVersionSwitch, "PHP 版本切换需要可写的 nginx 站点 Provider 与 php-fpm 后端"},
 		{FeatPHPSourceExt, "PHP 扩展编译安装在 M2 交付"},
 		{FeatSSL, "站点证书签发与部署随 Nginx Provider 在 M2 交付；面板自身 HTTPS 见 panel.json 的 tls/cert/key"},
 		{FeatBackup, "备份任务与归档管理在 M6 交付"},
@@ -82,11 +83,10 @@ const (
 	// php-fpm, so the key exists on the bitmap there and nowhere else. It is
 	// declared here rather than as a string literal at the call site because
 	// capabilities_test.go asserts every bitmap key is a declared one.
-	featPHPFPM           = "php_fpm"
-	featSiteWrite        = "site_write"
-	featPHPVersionSwitch = "php_version_switch"
-	featFirewallWrite    = "firewall_write"
-	featServiceWrite     = "service_write"
+	featPHPFPM        = "php_fpm"
+	featSiteWrite     = "site_write"
+	featFirewallWrite = "firewall_write"
+	featServiceWrite  = "service_write"
 )
 
 // have looks up an executable on PATH. Detection is always live: a Linux host

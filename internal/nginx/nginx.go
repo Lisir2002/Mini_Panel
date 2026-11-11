@@ -175,28 +175,63 @@ type Site struct {
 	Enabled    bool     `json:"enabled"`
 	CreatedAt  string   `json:"created_at"`
 	TLS        *TLSInfo `json:"tls,omitempty"`
+	// PHPVersion and PHPSocket name the fpm backend this site's .php location
+	// points at. The socket is supplied by the platform layer, which derives it
+	// from a discovered installation; it is never taken from an HTTP request.
+	PHPVersion string `json:"php_version,omitempty"`
+	PHPSocket  string `json:"php_socket,omitempty"`
 }
 
-// Spec is the create request after decoding.
+// Spec is the create request after decoding. PHPVersion/PHPSocket are filled by
+// the platform layer after it has checked that the version really has fpm.
 type Spec struct {
-	Name    string   `json:"name"`
-	Domains []string `json:"domains"`
-	Root    string   `json:"root"`
+	Name       string   `json:"name"`
+	Domains    []string `json:"domains"`
+	Root       string   `json:"root"`
+	PHPVersion string   `json:"php_version,omitempty"`
+	PHPSocket  string   `json:"php_socket,omitempty"`
 }
 
 type markerPayload struct {
-	Name      string     `json:"name"`
-	Domains   []string   `json:"domains"`
-	Root      string     `json:"root"`
-	CreatedAt string     `json:"created_at"`
-	TLS       *markerTLS `json:"tls,omitempty"`
+	Name       string     `json:"name"`
+	Domains    []string   `json:"domains"`
+	Root       string     `json:"root"`
+	CreatedAt  string     `json:"created_at"`
+	TLS        *markerTLS `json:"tls,omitempty"`
+	PHPVersion string     `json:"php_version,omitempty"`
+	PHPSocket  string     `json:"php_socket,omitempty"`
 }
 
 var (
-	nameRe   = regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`)
-	domainRe = regexp.MustCompile(`^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
-	rootRe   = regexp.MustCompile(`^/[A-Za-z0-9._\-/]+$`)
+	nameRe    = regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`)
+	domainRe  = regexp.MustCompile(`^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
+	rootRe    = regexp.MustCompile(`^/[A-Za-z0-9._\-/]+$`)
+	phpVerRe  = regexp.MustCompile(`^[0-9]+\.[0-9]+$`)
+	phpSockRe = regexp.MustCompile(`^/[A-Za-z0-9._\-/]+\.sock$`)
 )
+
+// validatePHP accepts either "no PHP binding" (both fields empty) or a version
+// plus the absolute unix socket the platform resolved for it. The socket is
+// rendered into nginx config, so whitespace, semicolons, braces and `..` are
+// rejected rather than escaped: a config injection here would be root-owned
+// nginx configuration, not a cosmetic problem.
+func validatePHP(version, socket string) error {
+	version = strings.TrimSpace(version)
+	socket = strings.TrimSpace(socket)
+	if version == "" && socket == "" {
+		return nil
+	}
+	if version == "" || socket == "" {
+		return fmt.Errorf("%w：PHP 版本与 socket 必须同时给出", ErrInvalid)
+	}
+	if !phpVerRe.MatchString(version) {
+		return fmt.Errorf("%w：PHP 版本 %q 需要形如 8.3", ErrInvalid, version)
+	}
+	if !phpSockRe.MatchString(socket) || strings.Contains(socket, "..") {
+		return fmt.Errorf("%w：PHP socket %q 需要是绝对路径且以 .sock 结尾", ErrInvalid, socket)
+	}
+	return nil
+}
 
 // ValidateName is also used by the API before touching the filesystem, so the
 // answer is the same whether or not a Manager exists.
@@ -280,6 +315,7 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 	s := Site{
 		Name: payload.Name, Domains: payload.Domains, Root: payload.Root,
 		ConfigPath: p, CreatedAt: payload.CreatedAt,
+		PHPVersion: payload.PHPVersion, PHPSocket: payload.PHPSocket,
 	}
 	s.TLS = m.tlsFromMarker(payload)
 	if lp := m.Layout.LinkPath(payload.Name); lp != "" {
@@ -299,6 +335,9 @@ func parseMarker(body string) (markerPayload, bool) {
 			continue
 		}
 		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, markerLine)), &p); err != nil {
+			return markerPayload{}, false
+		}
+		if validatePHP(p.PHPVersion, p.PHPSocket) != nil {
 			return markerPayload{}, false
 		}
 		return p, p.Name != "" && len(p.Domains) > 0 && p.Root != ""
@@ -336,6 +375,11 @@ func (m *Manager) Create(spec Spec) (Site, error) {
 		return Site{}, err
 	}
 	root = filepath.Clean(root)
+	phpVersion := strings.TrimSpace(spec.PHPVersion)
+	phpSocket := strings.TrimSpace(spec.PHPSocket)
+	if err := validatePHP(phpVersion, phpSocket); err != nil {
+		return Site{}, err
+	}
 
 	confPath := m.Layout.ConfigPath(spec.Name)
 	if _, err := os.Lstat(confPath); err == nil {
@@ -351,6 +395,7 @@ func (m *Manager) Create(spec Spec) (Site, error) {
 	site := Site{
 		Name: spec.Name, Domains: domains, Root: root,
 		ConfigPath: confPath, Enabled: true, CreatedAt: createdAt,
+		PHPVersion: phpVersion, PHPSocket: phpSocket,
 	}
 
 	// The document root is operator data, but creating it is part of creating
@@ -416,6 +461,57 @@ func (m *Manager) Create(spec Spec) (Site, error) {
 		return Site{}, fmt.Errorf("%w：reload 失败：%v", ErrConfigRejected, strings.TrimSpace(string(out)))
 	}
 	return site, nil
+}
+
+// SetPHP binds (or, with an empty version, unbinds) the site's .php handler.
+// The platform layer resolves version→socket before calling; this method only
+// validates the shape and writes through the same test-before-reload protocol
+// as every other config change, so a failed switch leaves the previous backend
+// in place.
+func (m *Manager) SetPHP(name, version, socket string) (Site, error) {
+	if err := ValidateName(name); err != nil {
+		return Site{}, err
+	}
+	version = strings.TrimSpace(version)
+	socket = strings.TrimSpace(socket)
+	if err := validatePHP(version, socket); err != nil {
+		return Site{}, err
+	}
+	site, ok := m.readSite(FileName(name))
+	if !ok {
+		return Site{}, ErrNotFound
+	}
+	site.PHPVersion, site.PHPSocket = version, socket
+	if err := m.applyConfig(site.ConfigPath, render(site)); err != nil {
+		return Site{}, err
+	}
+	return site, nil
+}
+
+// applyConfig is the single write path for an existing site: snapshot, write,
+// test, reload, and restore the exact previous bytes on either failure. It
+// deliberately reports "no change" as success without a reload.
+func (m *Manager) applyConfig(path, want string) error {
+	prev, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取站点配置: %w", err)
+	}
+	if string(prev) == want {
+		return nil
+	}
+	if err := m.writeConfig(path, want); err != nil {
+		return fmt.Errorf("写入站点配置: %w", err)
+	}
+	restore := func() { _ = m.writeConfig(path, string(prev)) }
+	if out, err := m.TestConfig(); err != nil {
+		restore()
+		return fmt.Errorf("%w：%v", ErrConfigRejected, strings.TrimSpace(string(out)))
+	}
+	if out, err := m.Reload(); err != nil {
+		restore()
+		return fmt.Errorf("%w：reload 失败：%v", ErrConfigRejected, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // rollbackCreate restores the exact pre-create state: previous bytes when the
@@ -500,7 +596,8 @@ func (m *Manager) Delete(name string) (Site, error) {
 func render(s Site) string {
 	payload, _ := json.Marshal(markerPayload{
 		Name: s.Name, Domains: s.Domains, Root: s.Root, CreatedAt: s.CreatedAt,
-		TLS: markerFromTLS(s.Name, s.TLS),
+		TLS:        markerFromTLS(s.Name, s.TLS),
+		PHPVersion: s.PHPVersion, PHPSocket: s.PHPSocket,
 	})
 	var b strings.Builder
 	b.WriteString(headerLine + "\n")

@@ -26,11 +26,14 @@ type fakeSites struct {
 	deleteErr   error
 	tlsErr      error
 	acmeErr     error
+	phpErr      error
 	created     int
 	deleted     int
 	tlsSets     int
 	tlsClears   int
 	acmeCalls   int
+	phpSets     int
+	phpClears   int
 	lastCertLen int
 }
 
@@ -63,6 +66,11 @@ func (f *fakeSites) Create(spec platform.SiteSpec) (platform.SiteInfo, error) {
 		ConfigPath: "/etc/nginx/sites-available/minipanel-" + spec.Name + ".conf",
 		Enabled:    true, CreatedAt: "2026-11-11T00:00:00Z",
 	}
+	if v := strings.TrimSpace(spec.PHPVersion); v != "" {
+		s.PHPVersion = v
+		s.PHPSocket = "/run/php/php" + v + "-fpm.sock"
+		s.PHPSocketState = "listening"
+	}
 	f.sites[spec.Name] = s
 	f.created++
 	return s, nil
@@ -78,6 +86,28 @@ func (f *fakeSites) Delete(name string) (platform.SiteInfo, error) {
 	}
 	delete(f.sites, name)
 	f.deleted++
+	return s, nil
+}
+
+func (f *fakeSites) SetPHP(name, version string) (platform.SiteInfo, error) {
+	if f.phpErr != nil {
+		return platform.SiteInfo{}, f.phpErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	s.PHPVersion = strings.TrimSpace(version)
+	if s.PHPVersion == "" {
+		s.PHPSocket = ""
+		s.PHPSocketState = ""
+		f.phpClears++
+	} else {
+		s.PHPSocket = "/run/php/php" + s.PHPVersion + "-fpm.sock"
+		s.PHPSocketState = "listening"
+	}
+	f.sites[name] = s
+	f.phpSets++
 	return s, nil
 }
 
@@ -186,18 +216,29 @@ func siteCaps(ready bool, reason string) *platform.Capabilities {
 	}
 	sslState := platform.StateAvailable
 	sslReason := ""
+	phpState := platform.StateAvailable
+	phpReason := ""
 	if !ready {
 		sslState = platform.StateUnavailable
 		sslReason = "站点证书需要可写的站点 Provider"
+		phpState = platform.StateUnavailable
+		phpReason = "PHP 版本绑定需要可写的站点 Provider 与 php-fpm 后端"
 	}
 	return &platform.Capabilities{
 		OS: "linux", Arch: "amd64", Hostname: "test-host",
+		PHPVersions:    []string{"8.3"},
+		PHPFPMVersions: []string{"8.3"},
 		Features: map[string]platform.Feature{
 			platform.FeatAudit: {State: platform.StateAvailable},
 			platform.FeatWebSite: {
 				State: st, Reason: reason,
 			},
 			"site_write": {State: st, Reason: reason},
+			platform.FeatPHPVersionSwitch: {
+				State: phpState, Reason: phpReason,
+				FixAction: "安装 php-fpm 后重载面板",
+				Verify:    "minipanel doctor 的 php 行",
+			},
 			platform.FeatSSL: {
 				State: sslState, Reason: sslReason,
 				FixAction: "在「网站」页为站点生成自签证书、上传证书链与私钥，或使用 ACME 自动签发",

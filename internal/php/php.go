@@ -345,6 +345,20 @@ func Versions(installs []Install) []string {
 	return out
 }
 
+// FPMVersions returns the versions that actually expose an fpm SAPI. Site
+// binding may only choose one of these: a detected cli/cgi version has no
+// socket a vhost could point at, and offering it in the selector would turn the
+// choice into a guaranteed 502.
+func FPMVersions(installs []Install) []string {
+	out := make([]string, 0, len(installs))
+	for _, i := range installs {
+		if i.Has(SAPIFPM) {
+			out = append(out, i.Version)
+		}
+	}
+	return out
+}
+
 // Modes maps a discovered SAPI set onto the capability vocabulary the bitmap
 // uses, so internal/platform can report `php_modes` from evidence. Only fpm and
 // cgi have a constant that means what it says here; the apache2 module handler

@@ -257,3 +257,128 @@ func TestConfDLayoutHasNoSymlink(t *testing.T) {
 		t.Errorf("List = %+v", list)
 	}
 }
+
+// TestCreateWithPHPRendersHandlerAndMarker is the shape php-fpm needs: a
+// regex location that refuses missing files, the standard fastcgi_params
+// include, an explicit SCRIPT_FILENAME, and fastcgi_pass pointing at the
+// platform-resolved unix socket. The marker has to round-trip too, because
+// List is how the next page load knows which version a site is bound to.
+func TestCreateWithPHPRendersHandlerAndMarker(t *testing.T) {
+	m, _ := newTestManager(t)
+	site, err := m.Create(Spec{
+		Name: "blog", Domains: []string{"blog.example.com"},
+		PHPVersion: "8.3", PHPSocket: "/run/php/php8.3-fpm.sock",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if site.PHPVersion != "8.3" || site.PHPSocket != "/run/php/php8.3-fpm.sock" {
+		t.Errorf("site php fields = %q/%q", site.PHPVersion, site.PHPSocket)
+	}
+	body, err := os.ReadFile(m.Layout.ConfigPath("blog"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	for _, want := range []string{
+		"index index.php index.html index.htm;",
+		`location ~ \.php$ {`,
+		"try_files $uri =404;",
+		"include fastcgi_params;",
+		"fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;",
+		"fastcgi_pass unix:/run/php/php8.3-fpm.sock;",
+		`"php_version":"8.3"`,
+		`"php_socket":"/run/php/php8.3-fpm.sock"`,
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("config missing %q\n%s", want, body)
+		}
+	}
+	list, err := m.List()
+	if err != nil || len(list) != 1 {
+		t.Fatalf("List = %+v, %v", list, err)
+	}
+	if list[0].PHPVersion != "8.3" || list[0].PHPSocket != "/run/php/php8.3-fpm.sock" {
+		t.Errorf("marker did not round-trip php binding: %+v", list[0])
+	}
+}
+
+func TestSetPHPSwitchesAndClears(t *testing.T) {
+	m, rec := newTestManager(t)
+	if _, err := m.Create(Spec{Name: "blog", Domains: []string{"blog.example.com"}}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	rec.cmds = nil
+	if _, err := m.SetPHP("blog", "8.2", "/run/php/php8.2-fpm.sock"); err != nil {
+		t.Fatalf("SetPHP: %v", err)
+	}
+	if want := []string{"nginx -t", "nginx -s reload"}; strings.Join(rec.cmds, "|") != strings.Join(want, "|") {
+		t.Errorf("switch command order = %v, want %v", rec.cmds, want)
+	}
+	body, _ := os.ReadFile(m.Layout.ConfigPath("blog"))
+	if !strings.Contains(string(body), "fastcgi_pass unix:/run/php/php8.2-fpm.sock;") {
+		t.Errorf("switch did not rewrite socket\n%s", body)
+	}
+	if !strings.Contains(string(body), `"php_version":"8.2"`) {
+		t.Errorf("switch did not rewrite marker\n%s", body)
+	}
+
+	if _, err := m.SetPHP("blog", "", ""); err != nil {
+		t.Fatalf("clear SetPHP: %v", err)
+	}
+	body, _ = os.ReadFile(m.Layout.ConfigPath("blog"))
+	if strings.Contains(string(body), "fastcgi_pass") || strings.Contains(string(body), "index.php") {
+		t.Errorf("cleared site still has a PHP handler\n%s", body)
+	}
+	if !strings.Contains(string(body), "index index.html index.htm;") {
+		t.Errorf("static index line not restored\n%s", body)
+	}
+}
+
+func TestSetPHPRollsBackWhenTestFails(t *testing.T) {
+	m, rec := newTestManager(t)
+	if _, err := m.Create(Spec{
+		Name: "blog", Domains: []string{"blog.example.com"},
+		PHPVersion: "8.3", PHPSocket: "/run/php/php8.3-fpm.sock",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	before, _ := os.ReadFile(m.Layout.ConfigPath("blog"))
+	rec.failOn = "-t"
+	_, err := m.SetPHP("blog", "8.2", "/run/php/php8.2-fpm.sock")
+	if !errors.Is(err, ErrConfigRejected) {
+		t.Fatalf("SetPHP err = %v, want ErrConfigRejected", err)
+	}
+	after, _ := os.ReadFile(m.Layout.ConfigPath("blog"))
+	if string(after) != string(before) {
+		t.Errorf("failed switch changed the config\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if len(rec.cmds) != 3 || rec.cmds[2] != "nginx -t" {
+		t.Errorf("commands = %v, want create then failing test (no reload)", rec.cmds)
+	}
+}
+
+func TestPHPBindingIsValidated(t *testing.T) {
+	m, _ := newTestManager(t)
+	for _, tc := range []struct{ version, socket string }{
+		{"8.3", ""},
+		{"", "/run/php/php8.3-fpm.sock"},
+		{"v8.3", "/run/php/php8.3-fpm.sock"},
+		{"8.3", "php8.3-fpm.sock"},
+		{"8.3", "/run/php/php8.3-fpm.sock; evil"},
+		{"8.3", "/run/php/../php8.3-fpm.sock"},
+		{"8.3", "/run/php/php8.3-fpm"},
+	} {
+		if _, err := m.Create(Spec{
+			Name: "blog", Domains: []string{"blog.example.com"},
+			PHPVersion: tc.version, PHPSocket: tc.socket,
+		}); !errors.Is(err, ErrInvalid) {
+			t.Errorf("PHP binding (%q,%q) accepted or wrong error: %v", tc.version, tc.socket, err)
+		}
+	}
+	if _, err := m.Create(Spec{Name: "blog", Domains: []string{"blog.example.com"}}); err != nil {
+		t.Fatalf("Create static: %v", err)
+	}
+	if _, err := m.SetPHP("blog", "8.3", "/run/php/php8.3-fpm.sock;include x"); !errors.Is(err, ErrInvalid) {
+		t.Errorf("injection socket accepted: %v", err)
+	}
+}
