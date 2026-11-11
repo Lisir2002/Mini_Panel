@@ -56,9 +56,13 @@ type SiteInfo struct {
 	// AuthUser is the Basic Auth username when the whole site is password
 	// protected. The password itself is never stored in SiteInfo: only the
 	// provider's 0600 file holds a {SHA} hash, and no endpoint returns it.
-	AuthUser   string `json:"auth_user,omitempty"`
-	PHPVersion string `json:"php_version,omitempty"`
-	PHPSocket  string `json:"php_socket,omitempty"`
+	AuthUser string `json:"auth_user,omitempty"`
+	// RealIPFrom lists the trusted proxy addresses/CIDRs; RealIPHeader names the
+	// forwarding header. They are empty when the site logs the peer address.
+	RealIPFrom   []string `json:"real_ip_from,omitempty"`
+	RealIPHeader string   `json:"real_ip_header,omitempty"`
+	PHPVersion   string   `json:"php_version,omitempty"`
+	PHPSocket    string   `json:"php_socket,omitempty"`
 	// PHPSocketState is the live state of PHPSocket (listening / idle / absent /
 	// not_socket / unknown), computed on every read. It is not persisted: "the
 	// site points at 8.3" and "php8.3-fpm is answering" are two separate facts,
@@ -164,6 +168,14 @@ type SiteHotlinkManager interface {
 // a site whose password was lost can be recovered.
 type SiteAuthManager interface {
 	SetAuth(name, username, password string) (SiteInfo, error)
+}
+
+// SiteRealIPManager is the optional trusted-proxy half of a site writer. The
+// caller supplies the peers whose forwarding header is trusted and which of the
+// two supported headers to read; the provider validates both and renders the
+// fixed set_real_ip_from / real_ip_header block. Clearing is always allowed.
+type SiteRealIPManager interface {
+	SetRealIP(name string, from []string, header string) (SiteInfo, error)
 }
 
 // SiteTLSManager is the optional certificate side of a site writer. Manual

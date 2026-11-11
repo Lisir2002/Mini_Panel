@@ -221,6 +221,12 @@ type Site struct {
 	// directory is host state rather than a property of the site.
 	AuthUser string `json:"auth_user,omitempty"`
 	AuthFile string `json:"-"`
+	// RealIPFrom lists the proxy addresses or CIDRs whose forwarding header is
+	// trusted; RealIPHeader names that header. Both are empty when the site uses
+	// the peer address directly. The list is explicit because trusting every
+	// peer would let any client forge the address in the access log.
+	RealIPFrom   []string `json:"real_ip_from,omitempty"`
+	RealIPHeader string   `json:"real_ip_header,omitempty"`
 	// PHPVersion and PHPSocket name the fpm backend this site's .php location
 	// points at. The socket is supplied by the platform layer, which derives it
 	// from a discovered installation; it is never taken from an HTTP request.
@@ -255,6 +261,8 @@ type markerPayload struct {
 	Hotlink           bool       `json:"hotlink,omitempty"`
 	HotlinkAllowEmpty bool       `json:"hotlink_allow_empty,omitempty"`
 	AuthUser          string     `json:"auth_user,omitempty"`
+	RealIPFrom        []string   `json:"real_ip_from,omitempty"`
+	RealIPHeader      string     `json:"real_ip_header,omitempty"`
 	TLS               *markerTLS `json:"tls,omitempty"`
 	PHPVersion        string     `json:"php_version,omitempty"`
 	PHPSocket         string     `json:"php_socket,omitempty"`
@@ -440,6 +448,7 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 		RedirectKeepPath: payload.RedirectKeepPath,
 		Hotlink:          payload.Hotlink, HotlinkAllowEmpty: payload.HotlinkAllowEmpty,
 		AuthUser: payload.AuthUser, AuthFile: authPath(m.AuthDir, payload.Name),
+		RealIPFrom: payload.RealIPFrom, RealIPHeader: payload.RealIPHeader,
 		PHPVersion: payload.PHPVersion, PHPSocket: payload.PHPSocket,
 	}
 	s.TLS = m.tlsFromMarker(payload)
@@ -487,6 +496,11 @@ func parseMarker(body string) (markerPayload, bool) {
 		if p.AuthUser != "" && !authUserRe.MatchString(p.AuthUser) {
 			return markerPayload{}, false
 		}
+		from, header, err := normalizeRealIP(p.RealIPFrom, p.RealIPHeader)
+		if err != nil {
+			return markerPayload{}, false
+		}
+		p.RealIPFrom, p.RealIPHeader = from, header
 		if p.Hotlink && (target != "" || redirect != "") {
 			return markerPayload{}, false
 		}
@@ -841,6 +855,8 @@ func render(s Site) string {
 		Hotlink:           s.Hotlink,
 		HotlinkAllowEmpty: s.HotlinkAllowEmpty,
 		AuthUser:          s.AuthUser,
+		RealIPFrom:        s.RealIPFrom,
+		RealIPHeader:      s.RealIPHeader,
 		TLS:               markerFromTLS(s.Name, s.TLS),
 		PHPVersion:        s.PHPVersion, PHPSocket: s.PHPSocket,
 	})

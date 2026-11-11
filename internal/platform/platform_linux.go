@@ -253,6 +253,17 @@ func (l linuxSites) SetAuth(name, username, password string) (SiteInfo, error) {
 	return toSiteInfo(s), nil
 }
 
+// SetRealIP enables, replaces or clears trusted-proxy resolution. The nginx
+// writer owns address validation and the fixed directive block; this adapter
+// only translates the result.
+func (l linuxSites) SetRealIP(name string, from []string, header string) (SiteInfo, error) {
+	s, err := l.m.SetRealIP(name, from, header)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
 // resolvePHPBinding is the only version→socket translation. It returns empty
 // strings for "static site" and a typed error for anything discovery did not
 // prove, so the API can say "this host does not have PHP 8.2 (fpm)" instead of
@@ -424,6 +435,7 @@ func toSiteInfo(s nginx.Site) SiteInfo {
 		RedirectKeepPath: s.RedirectKeepPath,
 		Hotlink:          s.Hotlink, HotlinkAllowEmpty: s.HotlinkAllowEmpty,
 		AuthUser:   s.AuthUser,
+		RealIPFrom: s.RealIPFrom, RealIPHeader: s.RealIPHeader,
 		ConfigPath: s.ConfigPath, Enabled: s.Enabled, CreatedAt: s.CreatedAt,
 		PHPVersion: s.PHPVersion, PHPSocket: s.PHPSocket,
 	}

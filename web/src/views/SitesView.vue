@@ -3,8 +3,8 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七、八、九、十、十一、十二：静态站点、站点证书、PHP 版本绑定、基础设置编辑、
-// 伪静态模板、反向代理、整站跳转、防盗链与访问密码。
+// M2 第三、四、六、七、八、九、十、十一、十二、十三：静态站点、站点证书、PHP 版本绑定、
+// 基础设置编辑、伪静态模板、反向代理、整站跳转、防盗链、访问密码与真实 IP 解析。
 // 这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
@@ -25,6 +25,9 @@ import { store } from "../store";
 //   * 访问密码是固定的 HTTP Basic Auth：页面只收用户名与口令，realm、指令与 {SHA} 口令文件
 //     都由后端决定，口令不会回显（对话框每次保存都要求重新输入）。它整站生效、不占用
 //     location /，因此与其它站点功能共存；HTTPS 站点的 ACME 续期路径由后端自动豁免。
+//   * 真实 IP 解析只接受"可信代理地址/网段列表 + X-Forwarded-For 或 X-Real-IP"；后端拒绝
+//     0.0.0.0/0 与 ::/0，页面明确说只有列表里的对端才能影响来源地址。它是 server 级指令，
+//     不占用 location /，与其它站点功能共存。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
 //     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
 //     而不是等请求失败后才解释。
@@ -80,6 +83,10 @@ const hotlinkForm = ref({ enabled: false, allow_empty: true });
 const authOpen = ref(false);
 const authTarget = ref(null);
 const authForm = ref({ username: "", password: "" });
+
+const realOpen = ref(false);
+const realTarget = ref(null);
+const realForm = ref({ from: "", header: "X-Forwarded-For" });
 
 function parseDomains(text) {
   return String(text || "")
@@ -473,6 +480,42 @@ async function saveAuth() {
   } finally { busy.value = false; }
 }
 
+function openRealIP(r) {
+  error.value = ""; msg.value = "";
+  realTarget.value = r;
+  realForm.value = {
+    from: (r.real_ip_from || []).join("\n"),
+    header: r.real_ip_header || "X-Forwarded-For",
+  };
+  realOpen.value = true;
+}
+
+async function saveRealIP() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const from = parseDomains(realForm.value.from);
+    if (!from.length && !realTarget.value.real_ip_from?.length) {
+      error.value = "启用真实 IP 解析至少要给出一个可信代理地址或网段；列表留空表示关闭，仅对已启用的站点有效。";
+      return;
+    }
+    const header = from.length ? realForm.value.header : "";
+    const site = await api("/api/v1/sites/" + encodeURIComponent(realTarget.value.name) + "/realip",
+      { method: "PUT", body: JSON.stringify({ from, header }) });
+    if (site.real_ip_from?.length) {
+      msg.value = site.name + " 已启用真实 IP 解析：信任 " + site.real_ip_from.length + " 个代理来源，读取 " +
+        site.real_ip_header + "；不在列表里的客户端不能通过伪造请求头改变日志来源。";
+    } else {
+      msg.value = site.name + " 已关闭真实 IP 解析，站点恢复直接使用对端地址。";
+    }
+    realForm.value = { from: "", header: "X-Forwarded-For" };
+    realOpen.value = false;
+    await load();
+  } catch (e) {
+    error.value = e.message;
+    await load();
+  } finally { busy.value = false; }
+}
+
 onMounted(load);
 </script>
 <template>
@@ -574,6 +617,9 @@ onMounted(load);
               <div v-if="r.auth_user" class="mp-muted mp-tiny">
                 访问密码 · 用户名 <code class="mp-code">{{ r.auth_user }}</code>
               </div>
+              <div v-if="r.real_ip_from?.length" class="mp-muted mp-tiny">
+                真实 IP · {{ r.real_ip_header }} · {{ r.real_ip_from.join("、") }}
+              </div>
             </td>
             <td>
               <span class="mp-tag on" v-if="r.enabled">已启用</span>
@@ -599,7 +645,7 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:470px;white-space:nowrap">
+            <td style="width:530px;white-space:nowrap">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
@@ -614,6 +660,7 @@ onMounted(load);
               <el-button size="small" text type="primary" @click="openAuth(r)">
                 {{ r.auth_user ? "访问密码" : "加密码" }}
               </el-button>
+              <el-button size="small" text type="primary" @click="openRealIP(r)">真实 IP</el-button>
               <el-button size="small" text type="primary" :disabled="!phpAvailable && !r.php_version" @click="openPHP(r)">
                 PHP
               </el-button>
@@ -846,6 +893,41 @@ onMounted(load);
           <el-button size="small" :disabled="busy" @click="authOpen = false">取消</el-button>
           <el-button size="small" type="primary" :loading="busy" @click="saveAuth">
             {{ authForm.username ? "保存" : (authTarget?.auth_user ? "关闭访问密码" : "保存") }}
+          </el-button>
+        </template>
+      </el-dialog>
+
+      <el-dialog v-model="realOpen" :title="'真实 IP 解析 · ' + (realTarget?.name || '')" width="min(620px, 94vw)">
+        <el-alert v-if="realTarget?.real_ip_from?.length" type="info" :closable="false" style="margin-bottom:10px"
+          title="该站点已启用可信代理解析。清空下面的列表并保存即可关闭，站点恢复直接使用对端地址。" />
+        <el-form label-position="top" @submit.prevent="saveRealIP">
+          <el-form-item label="可信代理地址或网段（每行一条，最多 16 条）">
+            <el-input v-model="realForm.from" type="textarea" :rows="4"
+              placeholder="10.0.0.0/8&#10;192.0.2.7" />
+            <div class="mp-hint" style="margin-top:6px">
+              只有来自这些地址/网段的请求才会读取转发头；<code class="mp-code">0.0.0.0/0</code> 与
+              <code class="mp-code">::/0</code> 会被后端拒绝，因为那等于允许任何客户端伪造来源地址。
+            </div>
+          </el-form-item>
+          <el-form-item label="转发头">
+            <el-radio-group v-model="realForm.header">
+              <el-radio value="X-Forwarded-For">X-Forwarded-For（可递归）</el-radio>
+              <el-radio value="X-Real-IP">X-Real-IP（单个地址）</el-radio>
+            </el-radio-group>
+            <div class="mp-hint">
+              选择 X-Forwarded-For 时后端额外写 <code class="mp-code">real_ip_recursive on</code>；
+              X-Real-IP 不写。转发头只影响站点日志与后续按 IP 的规则，不改变面板自身的来源判断。
+            </div>
+            <div class="mp-hint">
+              真实 IP 解析是 server 级指令，不占用 <code class="mp-code">location /</code>，可与伪静态、
+              代理、跳转、防盗链、访问密码和 PHP 绑定共存。
+            </div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="realOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy" @click="saveRealIP">
+            {{ realForm.from.trim() ? "保存" : (realTarget?.real_ip_from?.length ? "关闭真实 IP" : "保存") }}
           </el-button>
         </template>
       </el-dialog>

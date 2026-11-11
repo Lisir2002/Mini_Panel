@@ -33,6 +33,7 @@ type fakeSites struct {
 	redirectErr  error
 	hotlinkErr   error
 	authErr      error
+	realIPErr    error
 	created      int
 	deleted      int
 	tlsSets      int
@@ -46,6 +47,7 @@ type fakeSites struct {
 	redirectSets int
 	hotlinkSets  int
 	authSets     int
+	realIPSets   int
 	lastCertLen  int
 }
 
@@ -215,6 +217,26 @@ func (f *fakeSites) SetAuth(name, username, password string) (platform.SiteInfo,
 // SetRewrite mirrors the provider contract: the id is stored on the row and
 // returned to the caller. The real PHP-dependency check lives in nginx; these
 // tests only need a provider that records the call.
+// SetRealIP records the trust list and header. The real provider canonicalizes
+// addresses and writes the nginx block; the HTTP contract only carries them.
+func (f *fakeSites) SetRealIP(name string, from []string, header string) (platform.SiteInfo, error) {
+	if f.realIPErr != nil {
+		return platform.SiteInfo{}, f.realIPErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	if len(from) == 0 {
+		s.RealIPFrom, s.RealIPHeader = nil, ""
+	} else {
+		s.RealIPFrom, s.RealIPHeader = from, header
+	}
+	f.sites[name] = s
+	f.realIPSets++
+	return s, nil
+}
+
 func (f *fakeSites) SetRewrite(name, preset string) (platform.SiteInfo, error) {
 	if f.rewriteErr != nil {
 		return platform.SiteInfo{}, f.rewriteErr

@@ -426,6 +426,11 @@ func renderServer(s Site, tlsOn bool) string {
 		b.WriteString("    ssl_protocols TLSv1.2 TLSv1.3;\n")
 		b.WriteString("    ssl_session_cache shared:SSL:10m;\n")
 	}
+	if len(s.RealIPFrom) > 0 {
+		// Server-level real-IP resolution. It only trusts peers the operator
+		// listed; the header is one of two fixed names chosen by the writer.
+		b.WriteString("\n" + realIPLines(s))
+	}
 	if s.AuthUser != "" {
 		// Server-level Basic Auth. When TLS is on, the HTTP-01 challenge path is
 		// exempted: the issuer validates over port 80 without credentials, and a

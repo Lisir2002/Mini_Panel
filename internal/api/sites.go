@@ -147,6 +147,21 @@ func (s *Server) siteAuthManager() (platform.SiteAuthManager, string) {
 	return am, ""
 }
 
+// siteRealIPManager is the optional trusted-proxy interface. A provider without
+// it cannot offer real-IP resolution; the handler reports the same capability
+// reason as the other site write features.
+func (s *Server) siteRealIPManager() (platform.SiteRealIPManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	rm, ok := m.(platform.SiteRealIPManager)
+	if !ok || rm == nil {
+		return nil, "该平台的站点 Provider 没有实现真实 IP 解析"
+	}
+	return rm, ""
+}
+
 // handleSitesList is GET /api/v1/sites. Only files the panel wrote itself are
 // listed; a hand-written vhost in the same directory is somebody else's
 // configuration and is not reported as a panel site.
@@ -447,6 +462,39 @@ func (s *Server) handleSiteAuth(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_auth", "更新访问密码失败："+err.Error())
+	}
+}
+
+// handleSiteRealIP is PUT /api/v1/sites/{name}/realip. The body is
+// {"from":["10.0.0.0/8"],"header":"X-Forwarded-For"}; an empty list and header
+// clears the trusted-proxy block. The provider validates every address/CIDR and
+// refuses trust-everything, then renders the fixed set_real_ip_from block.
+func (s *Server) handleSiteRealIP(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteRealIPManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		From   []string `json:"from"`
+		Header string   `json:"header"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetRealIP(chiParam(r, "name"), body.From, body.Header)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_real_ip", "更新真实 IP 解析失败："+err.Error())
 	}
 }
 
