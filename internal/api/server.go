@@ -125,6 +125,13 @@ func (s *Server) routes() chi.Router {
 
 			r.Get("/audit", s.handleAudit)
 
+			// M1: the session list becomes a page instead of a table nobody reads.
+			// Reading it is a GET; both ways of ending a session are DELETEs, so
+			// they pass through csrf() and auditWrites() like every other write.
+			r.Get("/sessions", s.handleSessionsList)
+			r.Delete("/sessions", s.handleSessionsRevokeOthers)
+			r.Delete("/sessions/{id}", s.handleSessionRevoke)
+
 			r.Post("/2fa/setup", s.handleTOTPSetup)
 			r.Post("/2fa/enable", s.handleTOTPEnable)
 			r.Post("/password", s.handlePasswordChange)
@@ -172,18 +179,13 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 //   - It is camouflage for unauthenticated probing. A scanner walking the common
 //     paths sees 404s everywhere and cannot tell that a panel is behind port
 //     29080, which is the entire value.
-//   - It is NOT an authorisation layer. Once the client holds a valid
-//     mp_session, `hasSession` admits it at any path — deliberately, because the
-//     SPA must keep working when the operator navigates, reloads, or lands on a
-//     deep link, and rewriting those requests to one magic path would trade a
-//     working UI for a checkmark. Authentication is the session token, its
+//   - It is NOT an authorisation layer. Authentication is the session token, its
 //     expiry, the IP allowlist, CSRF and the lockout; the entrance only decides
-//     whether an anonymous visitor can find the login form.
-//   - Consequence for defence in depth: an XSS or a leaked cookie is not
-//     mitigated by the entrance, and any claim that it "protects the panel after
-//     login" would be false. Tightening this further (per-path entrance check on
-//     HTML navigations) is an M1 item and must not be described as current
-//     behaviour.
+//     whether an anonymous visitor can find the login form, and M1's addition —
+//     the guided hop below for page navigations — only decides which URL a
+//     session can be *pointed at* without having visited the entrance in the
+//     last hour. It does not mitigate XSS or a leaked cookie: an attacker
+//     holding a session that bounces still ends up served by the entrance.
 func (s *Server) entranceGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ent := s.Cfg.Entrance
@@ -196,6 +198,22 @@ func (s *Server) entranceGate(next http.Handler) http.Handler {
 			return
 		}
 		if hasSession(r) {
+			// M1 tightening. Login deliberately drops the entrance marker — it is
+			// single-use, and keeping it would mean an attacker who steals the
+			// marker but not the session can POST credentials from anywhere — so
+			// every honest page load after a login arrives without it. Send those
+			// requests through the entrance once, which replants the marker and
+			// serves the same page.
+			//
+			// Only page navigations take the hop. API calls and static assets are
+			// answered exactly as before, because a fetch that silently returns a
+			// 302-to-HTML is how a SPA ends up "randomly" logging people out, and
+			// this check is camouflage maintenance, not a session control.
+			if isPageNavigation(r) && !s.entranceMarked(r) {
+				s.log().Info("entrance: guided hop", "path", r.URL.Path, "ip", clientIP(r))
+				http.Redirect(w, r, ent, http.StatusFound)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -209,6 +227,17 @@ func (s *Server) entranceGate(next http.Handler) http.Handler {
 		}
 		s.disguise(w, r, "path outside entrance")
 	})
+}
+
+// isPageNavigation is a browser asking for a document, and nothing else: a
+// fetch sends */* or a type, a <script src> sends its own accept list, curl
+// defaults to */*. Deliberately narrow — treating anything non-JSON as a
+// navigation would bounce half the panel's own UI.
+func isPageNavigation(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
 func hasSession(r *http.Request) bool {
@@ -278,10 +307,35 @@ func (s *Server) requireSession(next http.Handler) http.Handler {
 			writeErr(w, http.StatusForbidden, "ip_not_allowed", "当前 IP 不在面板授权列表中")
 			return
 		}
+		// A password that a human never chose — set by the CLI, or older than the
+		// expiry policy — is not usable until it is replaced. Three paths stay
+		// open so there is a way to replace it: who am I, change it, leave.
+		// Exact paths only; a prefix would be a second, larger attack surface.
+		if err := s.passwordGate(uid, r); err != "" {
+			writeErr(w, http.StatusForbidden, "password_change_required", err)
+			return
+		}
 		ctx := context.WithValue(r.Context(), ctxUserKey,
 			&SessionUser{ID: uid, Username: uname, SID: c.Value})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// passwordGate returns a non-empty message when the account must change its
+// password and this request is not one of the three that can do it.
+func (s *Server) passwordGate(uid int64, r *http.Request) string {
+	switch r.URL.Path {
+	case "/api/v1/session", "/api/v1/password", "/api/v1/logout":
+		return ""
+	}
+	u, err := s.Store.UserByID(uid)
+	if err != nil || u == nil || !u.MustChangePW {
+		return ""
+	}
+	if s.passwordExpired(u) {
+		return "口令已过期，请先在“账号安全”中修改口令后再使用面板"
+	}
+	return "该账号的口令由 CLI 设置，尚未由本人确认；请先修改口令"
 }
 
 func (s *Server) ipAllowed(ip string) bool {

@@ -102,7 +102,16 @@ paths:
                   username: { type: string }
                   csrf: { type: string }
                   totp_enabled: { type: boolean }
-                  must_change_pw: { type: boolean }
+                  must_change_pw:
+                    type: boolean
+                    description: 口令尚未经本人确认（CLI 设过，或已按 panel.password_expiry_days 过期）
+                  password_expired:
+                    type: boolean
+                    description: must_change_pw 是因为过期触发的；区分"改口令"与"补一次确认"
+                  password_changed:
+                    type: integer
+                    format: int64
+                    description: 当前口令的设置时间（unix 秒），0 表示无记录
                   expires_at: { type: integer, format: int64 }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/Disguised" }
@@ -130,15 +139,27 @@ paths:
                   username: { type: string }
                   csrf: { type: string }
                   platform: { type: string, example: linux }
+                  must_change_pw: { type: boolean }
+                  password_expired: { type: boolean }
         "403": { description: 当前 IP 不在 panel.ip_allowlist 中 }
         "404": { $ref: "#/components/responses/Disguised" }
+      description: |
+        /session 是三个"口令待确认"状态下仍然可达的路径之一（另外两个是
+        /password 与 /logout）。must_change_pw 为真时其余已鉴权路径一律返回
+        403 password_change_required——包括 /settings，所以救回自己的办法是
+        改口令，或者在本机跑 minipanel passwd。把有效期做成"登录时判定一次"
+        是为了不打断正在干活的运维；口令在会话中途到期不会踢人，只在下一次
+        登录时要求更换。
   /api/v1/capabilities:
     get:
       tags: [panel]
       summary: 本机能力位图
       description: |
-        前端渲染的唯一依据。规则：features 中为 false 的项，unavailable 必须给出
-        可读理由；界面据此显示"禁用 + 理由"，绝不渲染点击无响应的按钮。
+        前端渲染的唯一依据。契约 v2（docs/功能设计.md §4.1）：features 的每一项是
+        {state, reason, fix_action, verify}，state 只有 available / degraded /
+        unavailable / foreign 四种取值，非 available 的项 reason 必须非空；
+        界面据此显示"禁用 + 理由"，绝不渲染点击无响应的按钮，也不隐藏做不到的模块。
+        v1 的 unavailable 平行 map 已删除——它和 features 可以各说各话。
       responses:
         "200":
           description: OK
@@ -199,8 +220,12 @@ paths:
             enum:
               - panel.ip_allowlist
               - panel.password_expiry_days
-              - panel.basic_auth
               - panel.trust_proxy
+            # panel.basic_auth used to be here. It had no enforcement point, and
+            # a second authentication channel is not something this panel grows;
+            # identity stays session + TOTP + IP allowlist + CSRF + lockout. The
+            # key is now refused like any unknown one (400 immutable), and the
+            # store v2 migration deletes rows an older binary wrote.
       requestBody:
         required: true
         content:
@@ -234,6 +259,57 @@ paths:
       responses:
         "200": { description: OK }
         "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/sessions:
+    get:
+      tags: [account]
+      summary: 当前账号的会话列表
+      description: |
+        每行给 ip / user_agent / created_at / expires_at / revoked / expired /
+        current。id 字段是 sessions.ref（8 随机字节的十六进制），**不是**会话令牌：
+        mp_session 的值在任何响应、审计条目和日志行里都不出现，因为它拿着就能登录。
+        列表按"还活着的在前、时间倒序"排，已撤销的行仍然返回——运维要的是
+        "哪个是家里的笔记本"，而不是一个每次都在缩短的表格。
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 100 } }
+      responses:
+        "200": { description: OK }
+        "403": { $ref: "#/components/responses/PasswordChange" }
+        "404": { $ref: "#/components/responses/Disguised" }
+    delete:
+      tags: [account]
+      summary: 撤销当前账号除本次登录以外的全部会话
+      description: |
+        返回 {ok, revoked, kept_current}。自己的会话故意保留：这条操作的语义是
+        "把别的浏览器踢掉"，做完之后人不该被自己的按钮赶出去——结束当前会话的
+        正确接口是 POST /api/v1/logout。
+      responses:
+        "200": { description: 已撤销 revoked 个，当前会话仍在用 }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { $ref: "#/components/responses/Disguised" }
+  /api/v1/sessions/{id}:
+    delete:
+      tags: [account]
+      summary: 撤销一个会话
+      description: |
+        {id} 是 sessions.ref，只用于取标识：先用 ^[0-9a-f]{16}$ 校验，再作为绑定
+        参数进入一条同时按 user_id 过滤的 UPDATE（docs/功能设计.md §4.4 是这条
+        纪律的原文）。不存在、已撤销、属于别人——三种情况都回同一个 404，接口不
+        成为一个"哪些会话曾经存在"的探测器。
+        撤销的是当前正在用的那一条时，响应带 current=true / need_relogin=true，
+        并且服务端立刻清掉会话 Cookie：数据库已经不再认这个令牌了，让浏览器继续
+        拿着它只会在下一个请求里多挨一次 404。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^[0-9a-f]{16}$"
+      responses:
+        "200": { description: 已撤销 }
+        "400": { description: 格式不符（不是 16 位十六进制） }
+        "404": { description: 没有可撤销的会话 }
+        "403": { $ref: "#/components/responses/CSRF" }
   /api/v1/2fa/setup:
     post:
       tags: [account]
@@ -300,6 +376,11 @@ components:
         伪装只是掩护，真正的访问控制是监听地址 + 认证 + IP 白名单。
     TLSRequired:
       description: 面板未启用 TLS 且不是回环调试，拒绝接收凭据。
+    PasswordChange:
+      description: |
+        403 password_change_required — 该账号的口令尚未由本人确认（CLI 设的，或已超过
+        panel.password_expiry_days）。面板此时只放行 /session、/password、/logout 三条
+        路径，所以其它页面的 403 不是故障，是策略；前端见此响应必须把用户带到改密。
     BadRequest:
       description: 请求体或参数不合法
       content:
@@ -376,9 +457,29 @@ components:
         database_engines: { type: array, items: { type: string } }
         features:
           type: object
-          additionalProperties: { type: boolean }
-          description: 能力开关。false 的项必须在 unavailable 里有理由。
-        unavailable:
-          type: object
-          additionalProperties: { type: string }
-          description: 禁用理由，供 UI 直接展示。
+          description: |
+            能力契约的唯一载体：每个 key 一个对象。key 的集合由代码声明
+            （internal/platform/capabilities.go 的常量表 + detect.go 的拒绝表），
+            测试同时钉住两个方向——bitmap 里不许出现未声明的 key，已声明的 key
+            也不许缺席，缺席即"藏起来"，是 §4.1 禁止的第四种表现。
+          additionalProperties:
+            type: object
+            required: [state, reason]
+            properties:
+              state:
+                type: string
+                enum: [available, degraded, unavailable, foreign]
+              reason:
+                type: string
+                description: |
+                  state != available 时非空，且必须是运维读得懂的一句话（含里程碑
+                  编号或缺失的前置）。state == available 时为空字符串。
+              fix_action:
+                type: string
+                description: |
+                  可执行的一步，只允许 §4.2 的三类：面板自己有权限的动作、一条可直接
+                  复制的命令、或指向 verify 的复查。空字符串表示没有；不允许包名、
+                  任意 URL 或任意命令。
+              verify:
+                type: string
+                description: 运维自己确认的路径（只读），空字符串表示没有。

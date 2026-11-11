@@ -6,38 +6,107 @@ import (
 	"testing"
 )
 
-func TestDenyAndAllowAreSymmetric(t *testing.T) {
+// TestCapabilityStatesAreSymmetric covers the four-state contract
+// (docs/功能设计.md §4.1). The two things a caller must never be able to produce
+// are an unexplained refusal and an "available" entry still dragging a fix
+// action from an earlier state — both are how a UI ends up rendering a control
+// that lies.
+func TestCapabilityStatesAreSymmetric(t *testing.T) {
 	c := newBase()
 	if c.Has(FeatWebSite) {
 		t.Fatal("newBase must deny write features")
 	}
+	if got := c.State(FeatWebSite); got != StateUnavailable {
+		t.Fatalf("newBase state for %s = %q, want unavailable", FeatWebSite, got)
+	}
+
 	c.Allow(FeatWebSite)
 	if !c.Has(FeatWebSite) {
 		t.Fatal("Allow did not take effect")
 	}
-	if r := c.Unavailable[FeatWebSite]; r != "" {
-		t.Fatalf("Allow left a stale reason behind: %q", r)
+	f := c.Features[FeatWebSite]
+	if f.Reason != "" || f.FixAction != "" || f.Verify != "" {
+		t.Fatalf("Allow left stale explanation behind: %+v", f)
 	}
+
 	c.Deny(FeatWebSite, "not here")
 	if c.Has(FeatWebSite) {
 		t.Fatal("Deny did not take effect")
 	}
-	c.Deny(FeatWebSite, "")
+	if c.Reason(FeatWebSite) != "not here" {
+		t.Fatalf("Deny dropped its reason: %q", c.Reason(FeatWebSite))
+	}
+
+	// An empty reason is the bug the whole contract exists to prevent, so it is
+	// refused at the data structure and becomes a self-reporting sentence.
+	c.Deny(FeatWebSite, "   ")
 	if c.Has(FeatWebSite) {
 		t.Fatal("Deny with an empty reason still disabled")
 	}
+	if strings.TrimSpace(c.Reason(FeatWebSite)) == "" {
+		t.Fatal("empty reason stored verbatim; the UI would have to invent text")
+	}
+
+	// Degraded is reachable-but-short, so it must not read as available: a
+	// handler that gates on Has() refuses the click rather than half-doing it.
+	c.Degrade(FeatMonitor, "采样可用，图表在 M4 交付", "minipanel doctor", "/api/v1/system/info")
+	if c.Has(FeatMonitor) {
+		t.Fatal("degraded must not report as available")
+	}
+	d := c.Features[FeatMonitor]
+	if d.State != StateDegraded || d.FixAction == "" || d.Verify == "" {
+		t.Fatalf("Degrade lost a field: %+v", d)
+	}
+
+	// Foreign objects are readable but not ours to write.
+	c.Foreign(FeatFilePerms, "该文件由 Docker 卷挂载，属主不在面板名下")
+	if c.Has(FeatFilePerms) || c.State(FeatFilePerms) != StateForeign {
+		t.Fatalf("Foreign did not take effect: %+v", c.Features[FeatFilePerms])
+	}
+
 	// Denying an unknown key must not panic: feature names come from a list the
 	// front end reads, and a typo there should be loud, not fatal.
 	c.Deny("made_up_feature", "reason")
-	if !strings.Contains(c.Unavailable["made_up_feature"], "reason") {
+	if !strings.Contains(c.Reason("made_up_feature"), "reason") {
 		t.Error("reason for an unknown feature was dropped")
+	}
+	// Reading a key nobody declared is also not fatal, and answers the honest
+	// default: not available.
+	if c.State("never_declared") != StateUnavailable || c.Has("never_declared") {
+		t.Error("undeclared feature read back as something other than unavailable")
 	}
 }
 
+// declaredFeatures is the registry side of the contract: every key the panel
+// knows about, so a denial list can quietly drop one and the test catches it.
+// Adding a key here is the §4.3 approval step — semantics, read or write, the
+// Linux and Windows path, what decides the state, and the test that pins it.
+func declaredFeatures() []string {
+	return []string{
+		FeatWebSite, featSiteWrite, FeatPHP, featPHPVersionSwitch, FeatPHPSourceExt,
+		FeatSSL, FeatDatabase, FeatBackup, FeatFirewall, featFirewallWrite,
+		featServiceWrite, FeatCron, FeatTerminal, FeatMonitor, FeatAudit,
+		FeatSSHManager, FeatFilePerms,
+	}
+}
+
+// declaredKey is the reverse direction: php_fpm only exists on Windows, so the
+// set of legal keys is "everything the panel declares", not "everything this
+// OS happens to report".
+func declaredKey(name string) bool {
+	for _, k := range declaredFeatures() {
+		if k == name {
+			return true
+		}
+	}
+	return false
+}
+
 // TestDetectedCapabilitiesAreExplained is the contract the UI is allowed to rely
-// on: any feature reported as unavailable must carry a reason an operator can
-// read. A missing reason is what forces a front end to either hide the control
-// or render a dead button — the two BaoTa variants we refuse to copy.
+// on: any feature not reported available must carry a reason an operator can
+// read, and every reason-carrying entry must be one the panel declared.
+// A missing reason is what forces a front end to either hide the control or
+// render a dead button — the two BaoTa variants we refuse to copy.
 func TestDetectedCapabilitiesAreExplained(t *testing.T) {
 	c, err := Current().Detect()
 	if err != nil {
@@ -49,12 +118,41 @@ func TestDetectedCapabilitiesAreExplained(t *testing.T) {
 	if c.Hostname == "" || c.Hostname == "unknown-host" {
 		t.Logf("hostname detection fell back: %q", c.Hostname)
 	}
-	for name, on := range c.Features {
-		if on {
+
+	legal := map[FeatureState]bool{
+		StateAvailable: true, StateDegraded: true, StateUnavailable: true, StateForeign: true,
+	}
+	for name, f := range c.Features {
+		if !legal[f.State] {
+			t.Errorf("feature %q has state %q, which is not one of the four", name, f.State)
 			continue
 		}
-		if r := c.Unavailable[name]; strings.TrimSpace(r) == "" {
-			t.Errorf("feature %q is off without a reason", name)
+		if f.State == StateAvailable {
+			if f.Reason != "" {
+				t.Errorf("available feature %q carries a reason %q", name, f.Reason)
+			}
+			continue
+		}
+		if strings.TrimSpace(f.Reason) == "" {
+			t.Errorf("feature %q is %s without a reason", name, f.State)
+		}
+		if strings.Contains(f.Reason, noReasonStored) {
+			t.Errorf("feature %q fell back to the missing-reason placeholder: the detect path never explained it", name)
+		}
+	}
+	// A key the front end has never heard of is the other way to ship a control
+	// that does nothing: it would be rendered from a hardcoded list and silently
+	// miss whatever Detect() started reporting.
+	for name := range c.Features {
+		if !declaredKey(name) {
+			t.Errorf("bitmap reports undeclared feature %q; docs/功能设计.md §4.3 is the approval step this is missing", name)
+		}
+	}
+	// The other direction: a declared key must be present, or the UI renders it
+	// as "never heard of it", which is the hiding this contract forbids.
+	for _, name := range declaredFeatures() {
+		if _, ok := c.Features[name]; !ok {
+			t.Errorf("declared feature %q missing from the bitmap", name)
 		}
 	}
 	// Identity fields must be populated even on a minimal container, or the
@@ -69,15 +167,22 @@ func TestDetectedCapabilitiesAreExplained(t *testing.T) {
 	// rather than a blacklist: a feature only becomes legal here once the code
 	// behind it exists on every platform the panel claims, which is what stops a
 	// platform-specific `Allow` from sneaking a dead button into the UI.
+	//
+	// M1 has not added a module, so `audit` is still the only entry point on
+	// this list — it is the delivery switch, and docs/功能设计.md §4.3 requires
+	// the implementation, this whitelist and the docs to move together.
 	implemented := map[string]bool{FeatAudit: true}
-	for name, on := range c.Features {
-		if on && !implemented[name] {
-			t.Errorf("M0 把 %s 报成可用，但这个版本里没有对应实现", name)
+	for name, f := range c.Features {
+		if f.State != StateAvailable {
+			continue
+		}
+		if !implemented[name] {
+			t.Errorf("这一版把 %s 报成可用，但没有对应实现", name)
 		}
 	}
 	for name := range implemented {
 		if !c.Has(name) {
-			t.Errorf("%s 是 M0 已实现的能力，必须报为可用", name)
+			t.Errorf("%s 是本版已实现的能力，必须报为可用", name)
 		}
 	}
 }

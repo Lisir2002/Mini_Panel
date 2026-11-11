@@ -107,6 +107,7 @@
 
   <!-- 已登录 -->
   <div id="app" class="hide">
+    <div class="notice hide" id="gateNotice"></div>
     <div class="card">
       <h3>概览</h3>
       <div class="grid" id="kpis"></div>
@@ -122,14 +123,14 @@
         下面两张表是两回事：<b>探测到的机制</b>只说明这台宿主机上有什么（装了 nginx、能发 sighup、有 apt），
         面板能不能操作它，一律看第二张 <b>capability bitmap</b>。机制字段不是功能开关，
         前端不会把 <code>reload_mode=sighup</code> 这类探测结果画成"现在就能重载"。
-        第二张表逐行照抄接口返回的 features / unavailable，前端不判断任何能力是否可用。
+        第二张表逐行照抄接口返回的 features（每项 {state, reason, fix_action, verify}），前端不判断任何能力是否可用。
       </p>
       <div class="secttl">探测到的机制（宿主环境，不代表本版本可操作）</div>
       <table id="capsMech">
         <colgroup><col style="width:34%"><col></colgroup>
         <tbody id="capsMechBody"></tbody>
       </table>
-      <div class="secttl">本版本可操作的功能（capability bitmap，来自 /api/v1/capabilities 的 features）</div>
+      <div class="secttl">本版本可操作的功能（capability bitmap 四态：available / degraded / unavailable / foreign）</div>
       <p class="muted" id="capsSummary" style="margin:0 0 4px;font-size:12px"></p>
       <table id="caps">
         <colgroup><col style="width:34%"><col></colgroup>
@@ -159,7 +160,7 @@
       <div class="msg" id="setMsg"></div>
     </div>
 
-    <div class="card">
+    <div class="card" id="cardSec">
       <h3>账号安全</h3>
       <p class="muted" style="margin:0 0 10px;font-size:13px">
         「配置两步验证」先生成密钥，扫码后必须输入 6 位口令确认才真正生效，未确认前不改变登录流程；
@@ -214,7 +215,13 @@ async function api(path,opts={}){
   const r=await fetch(path,Object.assign({credentials:"same-origin"},opts,{headers:h}));
   const t=await r.text();
   let j=null; try{j=JSON.parse(t)}catch(e){}
-  if(!r.ok){const err=(j&&j.error)||{};throw new Error(err.message||("HTTP "+r.status+(t?"： "+t.slice(0,80):"")))}
+  if(!r.ok){
+    const err=(j&&j.error)||{};
+    const e=new Error(err.message||("HTTP "+r.status+(t?"： "+t.slice(0,80):"")));
+    // kind 是接口给的事实（internal/api/server.go 的 writeErr），前端据此分流，
+    // 不拿 HTTP 状态码或文案猜。
+    e.kind=err.kind||"";e.status=r.status;throw e;
+  }
   return j;
 }
 function say(el,text,kind){const e=$(el);e.textContent=text||"";e.className="msg "+(kind||"")}
@@ -236,7 +243,7 @@ const fmtUp=fmtDur;
 // 时刻单元格：正文固定 YYYY-MM-DD HH:MM:SS，全文（含时区与原始 epoch）放 title。
 const timeCell=sec=>'<td class="nowrap" title="'+esc(fmtTime(sec)+" "+tzLabel()+"（epoch "+sec+"）")+'">'+fmtTime(sec)+"</td>";
 
-let health=null, caps=null, auditOffset=0;
+let health=null, caps=null, auditOffset=0, gated=false;
 
 // ---------- 门禁：/healthz 决定是初始化还是登录 ----------
 async function boot(){
@@ -274,7 +281,6 @@ async function doLogin(ev,silent){
   try{
     const r=await api("/api/v1/login",{method:"POST",body:JSON.stringify(body)});
     if(r.totp_required){$("#totpBox").classList.remove("hide");return}
-    if(r.must_change_pw)note("该账号的密码由 CLI 设置，请尽快在“账号安全”中改为自己的密码。");
     await enterApp();
   }catch(e){
     const msg=e.message||"";
@@ -283,10 +289,36 @@ async function doLogin(ev,silent){
   }
 }
 function note(text){$("#notice").innerHTML='<div class="notice">'+text+'</div>'}
+
+// 后端的口令闸门（internal/api/server.go passwordGate）只放行三条路径：
+// /session、/password、/logout。前端必须照这个事实画：闸门期间除了改口令，
+// 别处点什么都只会拿到 403，把那些卡片留着只会让人以为是面板坏了。
+// 文案直接取自接口返回的理由，前端不另编一套说法。
+function gateOn(why){
+  gated=true;
+  $("#gateNotice").textContent=why||"该账号必须先修改口令。";
+  $("#gateNotice").classList.remove("hide");
+  document.querySelectorAll("#app .card").forEach(c=>{if(c.id!=="cardSec")c.classList.add("hide")});
+  $("#pwBox").classList.remove("hide");
+}
+function gateOff(){
+  gated=false;
+  $("#gateNotice").classList.add("hide");
+  document.querySelectorAll("#app .card").forEach(c=>c.classList.remove("hide"));
+}
 async function enterApp(){
   $("#gate").classList.add("hide");$("#app").classList.remove("hide");
   const s=await api("/api/v1/session");
   $("#userbar").innerHTML='<span class="muted">'+s.username+'</span> <button class="ghost" onclick="logout()">退出</button>';
+  // 闸门状态问接口，不靠前端记：must_change_pw（CLI 设的口令）与 password_expired
+  // （超过 panel.password_expiry_days）是两件事，理由也分别由后端给。
+  if(s.must_change_pw||s.password_expired){
+    gateOn(s.password_expired
+      ?"口令已超过面板设定的有效期，必须先换成新口令；换完之前面板不响应其它请求。"
+      :"该账号的口令不是本人设置的（来自 minipanel passwd 或初始化），必须先改成自己的口令。");
+    return;
+  }
+  gateOff();
   await Promise.all([loadCaps(),loadSystem(),loadSettings(),loadAudit(true)]);
 }
 async function logout(){
@@ -331,14 +363,14 @@ const FEATS=[["site","网站"],["site_write","网站写入"],["php","PHP 多版�
   ["monitor","监控"],["audit","审计"],["ssh_manager","SSH 管理"],["file_posix_perms","文件权限"],
   ["service_write","服务管理"]];
 const NO_REASON="后端未给出理由（缺陷，请报告）";
-const capTag=(on)=>on?'<span class="tag on">可用</span>':'<span class="tag off">未开放</span>';
 async function loadCaps(){
   caps=await api("/api/v1/capabilities");
-  const f=caps.features||{},u=caps.unavailable||{};
+  // 契约 v2：理由住在每一项里面，不再有可以对不上号的第二张 map。
+  const f=caps.features||{};
   // 机制探测区：只描述宿主上有什么，一律不画"可用/未开放"标签，避免被读成功能开关。
   // 每个字段显式登记它覆盖了接口里的哪些 key，最后兜底渲染没登记到的 key，
   // 后端加字段时这里不会静默丢信息，而是当场点名"前端未分区"。
-  const used=new Set(["features","unavailable"]),mech=[];
+  const used=new Set(["features"]),mech=[];
   const m=(label,keys,text,extra)=>{keys.forEach(k=>used.add(k));mech.push(tr(label,text,extra,keys))};
   m("主机名 / 架构",["hostname","arch"],(caps.hostname||"—")+" · "+(caps.arch||"—"));
   m("操作系统",["os","os_family","os_version","is_privileged"],
@@ -362,26 +394,43 @@ async function loadCaps(){
   for(const k of Object.keys(caps))if(!used.has(k))
     m(k+"（前端未分区，请报告缺陷）",[k],typeof caps[k]==="object"?JSON.stringify(caps[k]):String(caps[k]));
   $("#capsMechBody").innerHTML=mech.join("");
-  // 功能区：唯一事实来源是 features/unavailable。
+  // 功能区：唯一事实来源是 features[key]。
   const rows=[];
   const known=new Set(FEATS.map(x=>x[0]));
-  for(const [k,name] of FEATS)rows.push(featRow(k,name,f[k],u[k]));
+  for(const [k,name] of FEATS)rows.push(featRow(k,name,f[k]));
   // 后端加了新 feature key 而这里没跟上时，照样渲染出来并且点名"未登记"，
   // 这样缺陷当场可见，不会静默变成少一行或灰行没理由。
-  for(const k of Object.keys(f))if(!known.has(k))rows.push(featRow(k,k+"（前端未登记，请报告缺陷）",f[k],u[k]));
-  for(const k of Object.keys(u))if(!known.has(k)&&!(k in f))rows.push(featRow(k,k+"（前端未登记，请报告缺陷）",undefined,u[k]));
+  for(const k of Object.keys(f))if(!known.has(k))rows.push(featRow(k,k+"（前端未登记，请报告缺陷）",f[k]));
   $("#capsBody").innerHTML=rows.join("");
-  const on=Object.keys(f).filter(k=>f[k]===true);
+  const on=Object.keys(f).filter(k=>f[k]&&f[k].state==="available");
   $("#capsSummary").textContent="本版本可操作："+(on.length?on.length+" 项（"+on.map(k=>{
     const hit=FEATS.find(x=>x[0]===k);return hit?hit[1]:k+"（前端未登记）"}).join("、")+"）":"0 项")+
     "；其余 "+(Object.keys(f).length-on.length)+" 项由后端明确拒绝，理由见下表。";
 }
-// 唯一事实来源是接口的 features[key]；理由只在被拒绝时展示，缺失时点名缺陷。
-function featRow(k,name,on,reason){
-  const avail=on===true;
-  let cell=capTag(avail);
-  if(!avail)cell+=' <span class="muted">'+esc((typeof reason==="string"&&reason.trim())?reason.trim():NO_REASON)+"</span>";
-  else if(reason)cell+=' <span class="muted">（接口同时给出了不可用理由，前后矛盾，请报告缺陷）</span>';
+// 四态渲染（docs/功能设计.md §4.1）：available 是唯一画成"可用"的一态，其余三态
+// 都必须带着后端给的那句话，否则就是缺陷，点名而不是编文案。
+const STATE={available:["可用","on"],degraded:["部分可用","off"],unavailable:["未开放","off"],foreign:["非面板管理","off"]};
+function featRow(k,name,entry){
+  if(entry===undefined){
+    // key 在 FEATS 里但后端没报：这一行既不是"可用"也不是"未开放"，是缺数据。
+    return '<tr><th title="'+esc("features."+k)+'">'+esc(name)+'</th><td><span class="tag off">未上报</span>'
+      +' <span class="muted">后端 bitmap 里没有 '+esc(k)+' 这一项（缺陷，请报告）</span></td></tr>';
+  }
+  const st=STATE[entry.state];
+  if(!st){
+    return '<tr><th title="'+esc("features."+k)+'">'+esc(name)+'</th><td><span class="tag off">状态异常</span>'
+      +' <span class="muted">未知 state="'+esc(entry.state)+'"（契约只有四种）</span></td></tr>';
+  }
+  const reason=typeof entry.reason==="string"?entry.reason.trim():"";
+  let cell='<span class="tag '+st[1]+'">'+st[0]+"</span>";
+  if(entry.state!=="available")
+    cell+=' <span class="muted">'+esc(reason||NO_REASON)+"</span>";
+  else if(reason)
+    cell+=' <span class="muted">（接口同时给出了不可用理由，前后矛盾，请报告缺陷）</span>';
+  // fix_action / verify 是 §4.2 限定的两种可执行出口：能复制的命令或只读复查路径。
+  // 这里只呈现，不执行——面板的 M1 没有"点一下替运维跑命令"这条路。
+  if(entry.fix_action)cell+='<br><span class="muted tiny">补齐：'+esc(entry.fix_action)+"</span>";
+  if(entry.verify)cell+='<br><span class="muted tiny">复查：'+esc(entry.verify)+"</span>";
   return '<tr><th title="'+esc("features."+k)+'">'+esc(name)+"</th><td>"+cell+"</td></tr>";
 }
 const tr=(a,b,c,keys)=>'<tr><th'+(keys?' title="'+esc(keys.map(k=>"caps."+k).join(" · "))+'"':'')+'>'+
@@ -460,13 +509,22 @@ $("#btn2faEnable").onclick=async()=>{
     say("#secMsg","两步验证已启用，下次登录需要动态口令","ok");$("#twoFA").classList.add("hide");
   }catch(e){say("#secMsg",e.message,"bad")}
 };
-$("#btnPw").onclick=()=>{$("#pwBox").classList.toggle("hide")};
+$("#btnPw").onclick=()=>{
+  // 闸门期间这一框是唯一的出口，折叠它等于把人锁在一页空白上，所以只许展开。
+  const box=$("#pwBox");
+  if(gated)box.classList.remove("hide");else box.classList.toggle("hide");
+};;
 $("#btnPwSave").onclick=async()=>{
   say("#secMsg","");
   try{await api("/api/v1/password",{method:"POST",
       body:JSON.stringify({old_password:$("#pwOld").value,new_password:$("#pwNew").value})});
     say("#secMsg","密码已更新，其他会话已失效","ok");
-  }catch(e){say("#secMsg",e.message,"bad")}
+    // 改密成功是闸门唯一的出口：其余面板由接口重新判定，而不是前端自己认为解开了。
+    await enterApp();
+  }catch(e){
+    say("#secMsg",e.message,"bad");
+    if(e.kind==="password_change_required")gateOn(e.message);
+  }
 };
 
 // ---------- 审计 ----------

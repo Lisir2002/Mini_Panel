@@ -2,21 +2,14 @@ package api
 
 import "net"
 
-// isIP reports whether s is a bare IP address.
-//
-// The panel IP allowlist accepts addresses and CIDRs only. Hostnames are
-// deliberately rejected: resolving one means the allow decision depends on a
-// DNS server the panel does not control, and an attacker who can poison that
-// record walks straight through the list.
-func isIP(s string) bool { return net.ParseIP(s) != nil }
-
-// isCIDR reports whether s is a valid network in prefix form.
-func isCIDR(s string) bool {
-	_, _, err := net.ParseCIDR(s)
-	return err == nil
-}
-
 // isLoopback reports whether s is a loopback address or the localhost name.
+//
+// It guards the one exception to "never send credentials over plain HTTP": a
+// panel bound to loopback, talked to from loopback, is not exposed to anybody
+// else. Anything else has to have TLS.
+//
+// The allowlist format lives with the rest of the input rules in internal/sec,
+// because the CLI has to accept exactly what this package will enforce.
 func isLoopback(s string) bool {
 	if s == "localhost" {
 		return true

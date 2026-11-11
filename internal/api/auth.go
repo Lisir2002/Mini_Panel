@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -115,6 +116,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	_ = s.Store.TouchLogin(u.ID, ip)
 	s.pruneSessions()
 
+	// Expiry is judged here, once, at the moment a credential is proven — not
+	// silently in the middle of a working session, which would cut an operator
+	// off mid-task. The flag is persisted so the CLI and doctor see the same
+	// state the gate enforces, and the session is still minted: the only way to
+	// clear it is POST /password, which needs a session to carry CSRF.
+	expired := s.passwordExpired(u)
+	if expired && !u.MustChangePW {
+		_ = s.Store.SetMustChange(u.ID, true)
+		u.MustChangePW = true
+	}
+
 	sid := sec.Token(32)
 	if err := s.newSession(sid, u.ID, ip, r.UserAgent()); err != nil {
 		writeErr(w, http.StatusInternalServerError, "store", "创建会话失败")
@@ -125,12 +137,31 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	s.Audit.Write(auditEntry(r, u.Username, "POST /api/v1/login", "/api/v1/login", nil, "ok"))
 	writeJSON(w, http.StatusOK, map[string]any{
-		"username":       u.Username,
-		"csrf":           csrf,
-		"totp_enabled":   u.TOTPEnabled,
-		"must_change_pw": u.MustChangePW,
-		"expires_at":     time.Now().Add(s.Cfg.SessionTTL.D()).Unix(),
+		"username":         u.Username,
+		"csrf":             csrf,
+		"totp_enabled":     u.TOTPEnabled,
+		"must_change_pw":   u.MustChangePW,
+		"password_expired": expired,
+		"password_changed": u.PwUpdatedAt,
+		"expires_at":       time.Now().Add(s.Cfg.SessionTTL.D()).Unix(),
 	})
+}
+
+// passwordExpired reports whether panel.password_expiry_days has passed since
+// the current password was set. 0 or an unparsable value means "no expiry", and
+// a password that has no recorded change time (a database written before this
+// policy existed) is never treated as expired — guessing a date would lock
+// people out for a policy nobody configured.
+func (s *Server) passwordExpired(u *store.User) bool {
+	raw, err := s.Store.GetSetting("panel.password_expiry_days")
+	if err != nil {
+		return false
+	}
+	days, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || days <= 0 || u.PwUpdatedAt <= 0 {
+		return false
+	}
+	return time.Now().After(time.Unix(u.PwUpdatedAt, 0).Add(time.Duration(days) * 24 * time.Hour))
 }
 
 // handleSetup creates the first administrator. It is reachable only while the
@@ -184,10 +215,18 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	u := CurrentUser(r)
+	// Read from the row, not from the token: the CLI can set or clear this flag
+	// while a session is alive, and a page that reloaded has to know which of
+	// the two states it is in before it starts issuing calls that would 403.
+	db, err := s.Store.UserByID(u.ID)
+	mustChange := err == nil && db != nil && db.MustChangePW
+	expired := err == nil && db != nil && s.passwordExpired(db)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"username": u.Username,
-		"csrf":     csrfFromRequest(r),
-		"platform": s.Caps.OS,
+		"username":         u.Username,
+		"csrf":             csrfFromRequest(r),
+		"platform":         s.Caps.OS,
+		"must_change_pw":   mustChange,
+		"password_expired": expired,
 	})
 }
 
@@ -200,10 +239,15 @@ func csrfFromRequest(r *http.Request) string {
 
 // ---- session plumbing -----------------------------------------------------
 
+// newSession stores a minted token plus its public handle (sessions.ref, added
+// by migration v3). The handle exists so the session list can name a row to the
+// browser without ever showing the token that row is keyed by; it is not a
+// second credential — every query that takes it is also scoped by user_id.
 func (s *Server) newSession(id string, userID int64, ip, ua string) error {
 	now := time.Now()
-	_, err := s.Store.DB().Exec(`INSERT INTO sessions(id,user_id,created_at,expires_at,ip,ua,revoked)
-		VALUES(?,?,?,?,?,?,0)`, id, userID, now.Unix(), now.Add(s.Cfg.SessionTTL.D()).Unix(), ip, ua)
+	_, err := s.Store.DB().Exec(`INSERT INTO sessions(id,ref,user_id,created_at,expires_at,ip,ua,revoked)
+		VALUES(?,?,?,?,?,?,?,0)`, id, sec.Token(8), userID, now.Unix(),
+		now.Add(s.Cfg.SessionTTL.D()).Unix(), ip, ua)
 	return err
 }
 

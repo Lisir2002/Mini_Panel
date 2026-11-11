@@ -78,7 +78,6 @@ func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 var editableSettings = map[string]func(string) error{
 	"panel.ip_allowlist":         validateIPAllowlist,
 	"panel.password_expiry_days": validateNonNegativeInt,
-	"panel.basic_auth":           validateBoolString,
 	"panel.trust_proxy":          validateBoolString,
 }
 
@@ -271,27 +270,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 
 // ---- validators -----------------------------------------------------------
 
-func validateIPAllowlist(v string) error {
-	if strings.TrimSpace(v) == "" {
-		return nil
-	}
-	for _, line := range strings.Split(v, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.Contains(line, "/") {
-			if !isCIDR(line) {
-				return errors.New("非法 CIDR：" + line)
-			}
-			continue
-		}
-		if !isIP(line) {
-			return errors.New("非法 IP（仅支持 IP 与 CIDR，不支持域名）：" + line)
-		}
-	}
-	return nil
-}
+func validateIPAllowlist(v string) error { return sec.ValidateIPAllowlist(v) }
 
 func validateNonNegativeInt(v string) error {
 	n, err := strconv.Atoi(strings.TrimSpace(v))

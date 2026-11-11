@@ -8,6 +8,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,7 +18,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+// schemaVersion is the shape this binary expects. Migrations only ever move
+// forward: v1 is left exactly as it shipped, and anything that becomes obsolete
+// afterwards is undone by a later version rather than by editing history.
+const schemaVersion = 3
 
 type Store struct{ db *sql.DB }
 
@@ -175,9 +179,175 @@ CREATE TABLE settings(
 			}
 		}
 		return nil
+	case 2:
+		// panel.basic_auth was seeded by v1 but never had an enforcement point,
+		// and a second authentication channel is not something this panel wants
+		// to grow: identity stays "one administrator + session + TOTP + IP
+		// allowlist + CSRF + lockout". The key is gone from the editable list
+		// (internal/api/system.go) and any row an older binary wrote is removed
+		// here. v1's seed list is deliberately left untouched — rewriting a
+		// migration that has already run is how a schema stops being traceable.
+		_, err := s.db.Exec(`DELETE FROM settings WHERE key='panel.basic_auth'`)
+		return err
+	case 3:
+		// sessions.id is the bearer token: whoever holds it holds the session.
+		// The M1 session list has to name rows to the browser without handing
+		// them that token, so each row gets a second, non-secret handle.
+		//
+		// It is a separate column rather than a truncation of the id (showing
+		// "a1b2c3…" is how a partial credential ends up copy-pastable), and
+		// rather than SQLite's rowid (a rowid survives no VACUUM, so a URL
+		// someone bookmarked yesterday can point at a different session after a
+		// maintenance run — a revoke-that-hits-the-wrong-row is exactly the
+		// failure this panel should not be able to have).
+		//
+		// Every step below is written to be re-runnable. migrate() only applies
+		// versions above the stored one, so in the normal path this runs once;
+		// but the ALTER, the backfill and the index are three statements, and a
+		// power cut between any two of them would otherwise leave a panel that
+		// cannot start again — "duplicate column name" on every boot, with the
+		// operator outside their own machine and the fix being manual SQL. A
+		// migration that cannot be resumed after a crash is not a migration.
+		has, err := s.hasColumn("sessions", "ref")
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.Exec(`ALTER TABLE sessions ADD COLUMN ref TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("add sessions.ref: %w", err)
+			}
+		}
+		// Backfill: rows written before this version get handles too, otherwise
+		// an operator looking at the session list after an upgrade sees rows
+		// they cannot revoke. hex(randomblob(8)) is evaluated per row, and the
+		// loop re-draws any collision instead of trusting one pass to be enough.
+		for {
+			if _, err := s.db.Exec(`UPDATE sessions
+				SET ref=lower(hex(randomblob(8)))
+				WHERE ref='' OR ref IN (SELECT ref FROM sessions WHERE ref<>'' GROUP BY ref HAVING COUNT(1)>1)`); err != nil {
+				return fmt.Errorf("backfill sessions.ref: %w", err)
+			}
+			var dup int
+			if err := s.db.QueryRow(`SELECT COUNT(1) FROM (SELECT ref FROM sessions
+				WHERE ref<>'' GROUP BY ref HAVING COUNT(1)>1)`).Scan(&dup); err != nil {
+				return err
+			}
+			if dup == 0 {
+				break
+			}
+		}
+		if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_ref
+			ON sessions(ref) WHERE ref<>''`); err != nil {
+			return fmt.Errorf("unique index on sessions.ref: %w", err)
+		}
+		return nil
 	default:
 		return fmt.Errorf("no migration for version %d", v)
 	}
+}
+
+// ---- sessions (read side) -------------------------------------------------
+
+// SessionRow is one row of the sessions table as the panel UI needs it.
+//
+// deliberately absent: the session token. sessions.id is a bearer credential —
+// holding it *is* being logged in — and a list endpoint is exactly the place
+// where such a value gets screenshotted, logged, or read out of the browser by
+// the next XSS. The UI sees Ref instead, which is scoped by user_id on every
+// query that uses it.
+type SessionRow struct {
+	Ref       string
+	UserID    int64
+	CreatedAt int64
+	ExpiresAt int64
+	IP        string
+	UserAgent string
+	Revoked   bool
+}
+
+// ListSessions returns the account's own sessions, newest first, revoked rows
+// last: the operator asks "which of these is the laptop at home", and a dead row
+// still answers that for a while after it dies. limit is clamped, because this
+// is a UI list, not an export.
+func (s *Store) ListSessions(userID int64, limit int) ([]SessionRow, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.db.Query(`SELECT ref,user_id,created_at,expires_at,ip,ua,revoked
+		FROM sessions WHERE user_id=? ORDER BY revoked ASC, created_at DESC LIMIT ?`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionRow
+	for rows.Next() {
+		var r SessionRow
+		var rev int
+		if err := rows.Scan(&r.Ref, &r.UserID, &r.CreatedAt, &r.ExpiresAt, &r.IP, &r.UserAgent, &rev); err != nil {
+			return nil, err
+		}
+		r.Revoked = rev != 0
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// CountSessions reports live (non-revoked, unexpired) sessions for one account.
+func (s *Store) CountSessions(userID int64) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(1) FROM sessions WHERE user_id=? AND revoked=0 AND expires_at>?`,
+		userID, time.Now().Unix()).Scan(&n)
+	return n, err
+}
+
+// RevokeByRef marks one of the account's own sessions dead and reports whether
+// anything matched. A ref that belongs to somebody else does not exist here —
+// the user_id is in the WHERE clause, so the answer is "no rows", not "yes".
+func (s *Store) RevokeByRef(userID int64, ref string) (bool, error) {
+	if ref == "" {
+		return false, nil
+	}
+	res, err := s.db.Exec(`UPDATE sessions SET revoked=1 WHERE user_id=? AND ref=? AND revoked=0`,
+		userID, ref)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// RevokeOthers kills every session of the account except keepRef ("" keeps
+// none). Returns how many rows were revoked, which excludes the kept one by
+// construction.
+func (s *Store) RevokeOthers(userID int64, keepRef string) (int, error) {
+	var res sql.Result
+	var err error
+	if keepRef == "" {
+		res, err = s.db.Exec(`UPDATE sessions SET revoked=1 WHERE user_id=? AND revoked=0`, userID)
+	} else {
+		res, err = s.db.Exec(`UPDATE sessions SET revoked=1 WHERE user_id=? AND revoked=0 AND ref<>?`,
+			userID, keepRef)
+	}
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
+// RefByID translates a session token into its public handle. The API handlers
+// know the token (it is the request's own cookie) and need the handle to say
+// "this is the row you are using right now" without comparing tokens in the UI.
+func (s *Store) RefByID(id string) (string, bool, error) {
+	var ref string
+	err := s.db.QueryRow(`SELECT ref FROM sessions WHERE id=?`, id).Scan(&ref)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return ref, true, nil
 }
 
 // ---- settings -------------------------------------------------------------
@@ -248,6 +418,31 @@ func (s *Store) SetPassword(userID int64, hash string, mustChange bool) error {
 	return err
 }
 
+// SetMustChange raises or clears the "this password has to be replaced before
+// the account is usable" marker, without touching the hash. It is what makes an
+// expiry policy and a CLI-set password converge on one flag and one gate.
+func (s *Store) SetMustChange(userID int64, must bool) error {
+	_, err := s.db.Exec(`UPDATE users SET must_change_pw=? WHERE id=?`, b2i(must), userID)
+	return err
+}
+
+// UserByID is the per-request lookup behind the password gate. It behaves exactly
+// like UserByUsername, including returning sql.ErrNoRows, so callers only have to
+// learn one error shape. There is one administrator in practice, so an extra
+// indexed SELECT costs nothing and beats caching a flag that a CLI command can
+// change while the panel is running.
+func (s *Store) UserByID(id int64) (*User, error) {
+	u := &User{}
+	err := s.db.QueryRow(`SELECT id,username,pw_hash,totp_secret,totp_enabled,must_change_pw,
+		pw_updated_at,created_at,last_login_at,last_login_ip FROM users WHERE id=?`, id).
+		Scan(&u.ID, &u.Username, &u.PwHash, &u.TOTPSecret, &u.TOTPEnabled, &u.MustChangePW,
+			&u.PwUpdatedAt, &u.CreatedAt, &u.LastLoginAt, &u.LastLoginIP)
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
 func (s *Store) SetTOTP(userID int64, secret string, enabled bool) error {
 	_, err := s.db.Exec(`UPDATE users SET totp_secret=?, totp_enabled=? WHERE id=?`,
 		secret, b2i(enabled), userID)
@@ -258,6 +453,27 @@ func (s *Store) TouchLogin(userID int64, ip string) error {
 	_, err := s.db.Exec(`UPDATE users SET last_login_at=?, last_login_ip=? WHERE id=?`,
 		time.Now().Unix(), ip, userID)
 	return err
+}
+
+// hasColumn reports whether a table already has a column. Migration v3 needs it
+// to stay re-runnable; nothing else in this package should, and that is the
+// reason it is unexported.
+func (s *Store) hasColumn(table, column string) (bool, error) {
+	rows, err := s.db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func b2i(b bool) int {

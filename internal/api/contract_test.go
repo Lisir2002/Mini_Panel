@@ -86,9 +86,15 @@ func TestSpecDeclaresTheSecurityContract(t *testing.T) {
 			t.Errorf("规格里出现反射式接口片段 %q", bad)
 		}
 	}
-	// The only path parameter allowed anywhere is the whitelisted settings key.
-	// A free-form module/action segment is how a reflection endpoint (and then a
-	// traversal or an RCE) gets written.
+	// Path parameters are whitelisted by name, and the whitelist is about what a
+	// segment is *allowed to be*: an identity, nothing else. M0 allowed only
+	// {key} (the settings allow-list); M1's session endpoints add {id}, which is
+	// a database handle validated by charset before it reaches SQL. A verb, a
+	// module or a method name in a URL is how a reflection endpoint gets written,
+	// and behind it the traversal or the RCE — so those stay out, and so does
+	// {path}: a file or log selector in a URL is how a file manager becomes a
+	// directory browser (docs/功能设计.md §4.4).
+	allowedParams := map[string]bool{"key": true, "id": true, "name": true}
 	for _, line := range strings.Split(b, "\n") {
 		trimmed := strings.TrimSuffix(strings.TrimSpace(line), ":")
 		if !strings.HasPrefix(trimmed, "/api/") || !strings.Contains(trimmed, "{") {
@@ -99,7 +105,7 @@ func TestSpecDeclaresTheSecurityContract(t *testing.T) {
 				continue
 			}
 			name := strings.Trim(seg, "{}")
-			if name != "key" {
+			if !allowedParams[name] {
 				t.Errorf("接口 %s 含非白名单路径参数 {%s}", trimmed, name)
 			}
 		}

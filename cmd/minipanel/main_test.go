@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -274,4 +276,211 @@ func TestBannerReportsLiveConfigValues(t *testing.T) {
 	if !strings.Contains(joined, "未设置") {
 		t.Errorf("disabled entrance not explained in banner:\n%s", joined)
 	}
+}
+
+// TestResetIPsWritesOnlyWhatItIsTold covers the escape hatch for the one setting
+// whose own enforcement path is the thing that broke: panel.ip_allowlist is
+// checked in the session middleware, so a bad list refuses the request that
+// would correct it. If reset-ips could guess, a typo in a recovery script would
+// silently open the panel to every address.
+func TestResetIPsWritesOnlyWhatItIsTold(t *testing.T) {
+	isolated(t)
+	if err := dispatch([]string{"init", "--insecure-no-tls"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	// No flags must not mean "clear".
+	if err := dispatch([]string{"reset-ips"}); err == nil {
+		t.Error("reset-ips without --set/--clear did something; it should refuse")
+	}
+	assertSetting(t, "panel.ip_allowlist", "")
+
+	if err := dispatch([]string{"reset-ips", "--set", "203.0.113.7,10.0.0.0/8"}); err != nil {
+		t.Fatalf("reset-ips --set: %v", err)
+	}
+	assertSetting(t, "panel.ip_allowlist", "203.0.113.7\n10.0.0.0/8\n")
+
+	if err := dispatch([]string{"reset-ips", "--clear"}); err != nil {
+		t.Fatalf("reset-ips --clear: %v", err)
+	}
+	assertSetting(t, "panel.ip_allowlist", "")
+
+	// Same rules as the API: hostnames would make the allow decision depend on
+	// somebody else's DNS.
+	for _, bad := range []string{"office.example.com", "1.2.3.4/33", "not-an-ip/99", "10.0.0.7/8/16"} {
+		if err := dispatch([]string{"reset-ips", "--set", bad}); err == nil {
+			t.Errorf("reset-ips accepted %q", bad)
+		}
+	}
+	// The list must still be usable after a refusal, and readable by the
+	// middleware: no partial write, no stray whitespace.
+	assertSetting(t, "panel.ip_allowlist", "")
+	if err := dispatch([]string{"reset-ips", "--set", "198.51.100.0/24"}); err != nil {
+		t.Fatalf("reset-ips after refusals: %v", err)
+	}
+	if err := sec.ValidateIPAllowlist(mustSetting(t, "panel.ip_allowlist")); err != nil {
+		t.Errorf("stored list no longer parses: %v", err)
+	}
+
+	if err := dispatch([]string{"reset-ips", "--set", "203.0.113.7", "--clear"}); err == nil {
+		t.Error("--set with --clear accepted; refusing beats choosing for the operator")
+	}
+	if err := dispatch([]string{"reset-ips", "203.0.113.7"}); err == nil {
+		t.Error("positional argument accepted; it would be silently ignored")
+	}
+}
+
+// TestReset2FAClosesTheSecondFactorAndItsSessions covers the other lockout path:
+// with totp_enabled set, the code is required at login and the secret exists only
+// in this database. Turning it off has to also invalidate the sessions minted
+// while it was on, or "the phone is gone" and "a session from the phone" survive
+// side by side.
+func TestReset2FAClosesTheSecondFactorAndItsSessions(t *testing.T) {
+	isolated(t)
+	if err := dispatch([]string{"init", "--insecure-no-tls"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if err := dispatch([]string{"passwd", "admin", "--password", "First!2026pass"}); err != nil {
+		t.Fatalf("passwd: %v", err)
+	}
+
+	path := filepath.Join(platform.Current().DataDir(), "minipanel.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := st.SetTOTP(1, "JBSWY3DPEHPK3PXP", true); err != nil {
+		t.Fatalf("enable 2fa: %v", err)
+	}
+	if _, err := st.DB().Exec(`INSERT INTO sessions(id,user_id,created_at,expires_at,ip,ua,revoked)
+		VALUES('alive',1,0,9999999999,'203.0.113.7','test',0)`); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	st.Close()
+
+	// Disabling a second factor is a downgrade, so it cannot be the default.
+	if err := dispatch([]string{"reset-2fa"}); err == nil {
+		t.Error("reset-2fa without --clear did something; it should refuse")
+	}
+	if err := dispatch([]string{"reset-2fa", "--clear", "--user", "ghost"}); err == nil {
+		t.Error("reset-2fa accepted a username that does not exist")
+	}
+	if err := dispatch([]string{"reset-2fa", "--clear"}); err != nil {
+		t.Fatalf("reset-2fa --clear: %v", err)
+	}
+
+	st, err = store.Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer st.Close()
+	u, err := st.UserByUsername("admin")
+	if err != nil {
+		t.Fatalf("read user: %v", err)
+	}
+	if u.TOTPEnabled || u.TOTPSecret != "" {
+		t.Errorf("2FA still enabled after reset (enabled=%v secret=%q)", u.TOTPEnabled, u.TOTPSecret)
+	}
+	var revoked int
+	if err := st.DB().QueryRow(`SELECT revoked FROM sessions WHERE id='alive'`).Scan(&revoked); err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+	if revoked != 1 {
+		t.Error("session minted while 2FA was on survived the reset")
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe. The recovery
+// commands print straight through fmt, and their output is a claim about
+// behaviour, so it has to be readable to be asserted on.
+func captureStdout(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	callErr := fn()
+	os.Stdout = old
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("drain stdout: %v", err)
+	}
+	_ = r.Close()
+	return buf.String(), callErr
+}
+
+// TestRecoveryCommandsTellTheTruthAboutRestarting pins the one part of these
+// commands a green test suite cannot catch on its own: the sentence after the
+// write. panel.ip_allowlist, the TOTP secret and must_change_pw are re-read per
+// request, so promising a restart there sends the operator off to look for a
+// change that has already taken effect; panel.entrance is bootstrap config held
+// in memory by the running process, so leaving the restart out would have them
+// refresh a page that genuinely has not moved. A live run caught the first of
+// these — reset-ips said "重启面板生效" while the very next request, with no
+// restart, was already allowed through.
+func TestRecoveryCommandsTellTheTruthAboutRestarting(t *testing.T) {
+	isolated(t)
+	if err := dispatch([]string{"init", "--insecure-no-tls"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if err := dispatch([]string{"passwd", "admin", "--password", "First!2026pass"}); err != nil {
+		t.Fatalf("passwd: %v", err)
+	}
+
+	live := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"reset-ips --set", []string{"reset-ips", "--set", "203.0.113.7"}, "下一条请求就生效"},
+		{"reset-ips --clear", []string{"reset-ips", "--clear"}, "下一条请求就生效"},
+		{"reset-2fa --clear", []string{"reset-2fa", "--clear"}, "立即生效"},
+	}
+	for _, tc := range live {
+		out, err := captureStdout(t, func() error { return dispatch(tc.args) })
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", tc.name, err, out)
+		}
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("%s does not say it applies immediately (want %q):\n%s", tc.name, tc.want, out)
+		}
+		if strings.Contains(out, "重启面板生效") {
+			t.Errorf("%s promises a restart it does not need:\n%s", tc.name, out)
+		}
+	}
+
+	// The entrance is the opposite case: the value is written to panel.json and
+	// the running server keeps the one it loaded at startup, so without a restart
+	// the new entrance is not served — the message has to say so.
+	out, err := captureStdout(t, func() error {
+		return dispatch([]string{"reset-entrance", "--set", "/recovdoor1"})
+	})
+	if err != nil {
+		t.Fatalf("reset-entrance: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "需重启面板生效") {
+		t.Errorf("reset-entrance hides the restart it genuinely needs:\n%s", out)
+	}
+	if got := readBack(t).Entrance; got != "/recovdoor1" {
+		t.Errorf("entrance on disk = %q, want /recovdoor1", got)
+	}
+}
+
+// mustSetting is the read-back half of the assertions above.
+func mustSetting(t *testing.T, key string) string {
+	t.Helper()
+	st, err := store.Open(filepath.Join(platform.Current().DataDir(), "minipanel.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	v, err := st.GetSetting(key)
+	if err != nil {
+		t.Fatalf("get %s: %v", key, err)
+	}
+	return v
 }

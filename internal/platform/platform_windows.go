@@ -63,7 +63,7 @@ func (windowsPlatform) Detect() (*Capabilities, error) {
 	// binary in the official builds, so the runtime model is a FastCGI process
 	// pool rather than FPM pools.
 	c.PHPModes = append(c.PHPModes, PHPModeCGI)
-	c.Deny("php_fpm", "Windows 官方 PHP 构建不含 php-fpm，Mini Panel 在 Windows 上使用 php-cgi.exe 的 FastCGI 模式")
+	c.Deny(featPHPFPM, "Windows 官方 PHP 构建不含 php-fpm，Mini Panel 在 Windows 上使用 php-cgi.exe 的 FastCGI 模式")
 
 	// Extensions cannot be compiled on the target: the toolchain must match the
 	// upstream build exactly. We install prebuilt DLLs whose name encodes

@@ -106,7 +106,7 @@ check-contract:
 
 ## check-honesty  能力位图自洽：features=false 的每一项都必须带可读理由
 check-honesty:
-	$(GO) test -count=1 -run 'TestDetectedCapabilitiesAreExplained|TestDenyAndAllowAreSymmetric|TestPathsAreAbsoluteAndConsistent' ./internal/platform/
+	$(GO) test -count=1 -run 'TestDetectedCapabilitiesAreExplained|TestCapabilityStatesAreSymmetric|TestPathsAreAbsoluteAndConsistent' ./internal/platform/
 	$(GO) test -count=1 -run 'TestCapabilitiesAreSelfConsistent' ./internal/api/
 
 ## clean  只删构建产物；$(MINI_PANEL_ROOT) 里的 panel.json / minipanel.db 是运维数据，故意不删

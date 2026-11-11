@@ -35,6 +35,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -61,10 +62,15 @@ var usage = `Mini Panel ` + build.Version + ` — 云服务器管理面板
   minipanel passwd <user>    设置/重置管理员口令（账号不存在时创建，并作废全部会话）
                                --password '<口令>'（省略则从标准输入读取）
   minipanel reset-entrance   重新生成安全入口（--set </路径> | --disable）
+  minipanel reset-ips        重写 IP 白名单，用于把自己从门外救回来（--set <列表> | --clear）
+  minipanel reset-2fa        关闭两步验证（--clear，必填；同时作废该账号全部会话）
+                               --user <账号>（只有一个管理员时可省略）
   minipanel version          版本信息
 
 任何子命令加 -h 打印它自己的选项。
 口令写法：minipanel passwd admin --password 'X'，或 echo 'X' | minipanel passwd admin。
+被自己关在门外时：minipanel reset-entrance 找回入口，reset-ips 清掉白名单，
+reset-2fa --clear 关掉两步验证；三条都在本机执行，都不需要面板可用。
 `
 
 func main() {
@@ -95,6 +101,10 @@ func dispatch(args []string) error {
 		return cmdPasswd(rest)
 	case "reset-entrance":
 		return cmdResetEntrance(rest)
+	case "reset-ips":
+		return cmdResetIPs(rest)
+	case "reset-2fa":
+		return cmdReset2FA(rest)
 	case "version":
 		fmt.Printf("Mini Panel %s (commit %s, built %s)\n", build.Version, build.Commit, build.BuildDate)
 		return nil
@@ -487,8 +497,11 @@ func cmdDoctor(args []string) error {
 		}
 	}
 
+	lockRisks := lockoutRisks(e)
+
 	if *asJSON {
 		out := map[string]any{
+			"lockout_risks":   lockRisks,
 			"config_file":     config.Path(e.dir),
 			"config_exists":   e.exists,
 			"config":          e.cfg,
@@ -524,13 +537,24 @@ func cmdDoctor(args []string) error {
 	if users == 0 {
 		fmt.Println("    提示：尚无管理员账号，面板启动后会在首次访问时要求初始化。")
 	}
-	feats := make([]string, 0, len(e.caps.Features))
-	for k, v := range e.caps.Features {
-		if !v {
-			feats = append(feats, k+"("+e.caps.Unavailable[k]+")")
+	// Every panel-side safety switch is also a way to lock the operator out of
+	// their own machine, so the self-check names them and the matching rescue
+	// command together. Anything that is armed but has no undo here is a bug.
+	if len(lockRisks) > 0 {
+		fmt.Println("  锁死风险    （每条都有本机自救命令，无需面板可用）")
+		for _, l := range lockRisks {
+			fmt.Printf("    %s：%s\n      自救：%s\n", l.Name, l.State, l.Undo)
 		}
 	}
+	feats := make([]string, 0, len(e.caps.Features))
+	for k, f := range e.caps.Features {
+		if f.State == platform.StateAvailable {
+			continue
+		}
+		feats = append(feats, k+"["+string(f.State)+"]("+f.Reason+")")
+	}
 	if len(feats) > 0 {
+		sort.Strings(feats)
 		fmt.Println("  未开放能力  ", strings.Join(feats, " "))
 	}
 	return nil
@@ -705,4 +729,209 @@ func cmdResetEntrance(args []string) error {
 	}
 	fmt.Println("安全入口已更新为", orNone(e.cfg.Entrance), "— 需重启面板生效。")
 	return nil
+}
+
+// ---- reset-ips -------------------------------------------------------------
+
+// cmdResetIPs is the escape hatch for panel.ip_allowlist. The list is enforced in
+// the session middleware (internal/api/server.go), which means a typo can refuse
+// the very request that would fix it — a setting whose only undo was editing
+// SQLite by hand is not a setting an operator should have to trust.
+func cmdResetIPs(args []string) error {
+	fs := flag.NewFlagSet("reset-ips", flag.ContinueOnError)
+	set := fs.String("set", "", "写入新的白名单（IP 或 CIDR，多个用逗号或换行分隔）")
+	clear := fs.Bool("clear", false, "清空白名单，恢复为不限制来源")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("reset-ips 不接受位置参数，多余的是 %q（用 minipanel reset-ips -h 看选项）",
+			strings.Join(fs.Args(), " "))
+	}
+	if *clear && *set != "" {
+		return fmt.Errorf("--clear 与 --set 互斥，请只选一个")
+	}
+	if !*clear && *set == "" {
+		return fmt.Errorf("reset-ips 需要 --set <列表> 或 --clear 之一；" +
+			"不带参数时什么都不做，是为了避免一条命令的笔误顺手关掉访问控制")
+	}
+	e, err := bootstrap()
+	if err != nil {
+		return err
+	}
+	defer e.st.Close()
+
+	value := ""
+	if *set != "" {
+		// The same validator the API uses, so a list this command accepts is a
+		// list the middleware reads the same way.
+		v, err := sec.NormalizeIPAllowlist(strings.ReplaceAll(*set, ",", "\n"))
+		if err != nil {
+			return err
+		}
+		value = v
+	}
+	if err := e.st.SetSetting("panel.ip_allowlist", value); err != nil {
+		return err
+	}
+	if value == "" {
+		fmt.Println("IP 白名单已清空：任何来源地址都允许访问面板（仍需登录）。下一条请求就生效，不用重启面板。")
+		return nil
+	}
+	n := strings.Count(strings.TrimRight(value, "\n"), "\n") + 1
+	// Wording checked against the code, not assumed: ipAllowed() re-reads the
+	// setting on every request (internal/api/server.go), so this one takes effect
+	// immediately. Telling the operator to restart would leave them hunting for a
+	// change that already happened — and reset-entrance, which really does need
+	// one, is the reason they would suspect the message was stale.
+	fmt.Printf("IP 白名单已写入 %d 条，下一条请求就生效：白名单是每次请求现读的，不用重启面板。\n", n)
+	fmt.Println("提醒：确认列表里包含你此刻的来源地址，否则下一条请求就会被拒绝；" +
+		"万一被挡在外面，在机器上再跑一次 minipanel reset-ips --clear。")
+	return nil
+}
+
+// ---- reset-2fa -------------------------------------------------------------
+
+// cmdReset2FA is the escape hatch for TOTP. Once totp_enabled is set, a code is
+// required at login and the secret lives only in this database; without this
+// command the fix for a lost phone was hand-editing the users table, which turns
+// the panel's own two-factor protection into a self-inflicted outage.
+func cmdReset2FA(args []string) error {
+	fs := flag.NewFlagSet("reset-2fa", flag.ContinueOnError)
+	user := fs.String("user", "", "账号名（默认当前唯一的管理员）")
+	clear := fs.Bool("clear", false, "关闭两步验证并作废已保存的密钥")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("reset-2fa 不接受位置参数，多余的是 %q（用 minipanel reset-2fa -h 看选项）",
+			strings.Join(fs.Args(), " "))
+	}
+	if !*clear {
+		return fmt.Errorf("reset-2fa 需要显式 --clear：关闭两步验证会降低账号强度，" +
+			"这条命令不做任何默认动作")
+	}
+	e, err := bootstrap()
+	if err != nil {
+		return err
+	}
+	defer e.st.Close()
+
+	uname, err := targetUser(e, *user)
+	if err != nil {
+		return err
+	}
+	u, err := e.st.UserByUsername(uname)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("账号 %s 不存在", uname)
+	}
+	if err != nil {
+		return fmt.Errorf("读取账号 %s: %w", uname, err)
+	}
+	if err := e.st.SetTOTP(u.ID, "", false); err != nil {
+		return err
+	}
+	// A second factor that was just turned off should not leave behind the
+	// sessions that were minted while it was on: whoever holds the phone was the
+	// only one who could log in, and now anybody with the password can.
+	revoked, _ := e.st.DB().Exec(`UPDATE sessions SET revoked=1 WHERE user_id=?`, u.ID)
+	n, _ := revoked.RowsAffected()
+	fmt.Printf("账号 %s 的两步验证已关闭，作废 %d 个会话。\n", uname, n)
+	// Both halves of that sentence are live: the TOTP secret is read from the
+	// users table at login and session revocation is checked per request, so no
+	// restart is involved. What does have to happen is re-enabling the second
+	// factor from the panel once the password works again.
+	fmt.Println("口令登录现在可用（立即生效，无需重启）——登录后在面板「账号安全」里重新开启两步验证。")
+	return nil
+}
+
+// targetUser resolves --user, or the single administrator when it is omitted.
+// Asking "which account?" interactively would make both of these commands
+// unusable from a recovery script, and there is exactly one account in practice.
+func targetUser(e *env, name string) (string, error) {
+	if strings.TrimSpace(name) != "" {
+		return strings.TrimSpace(name), nil
+	}
+	var got []string
+	rows, err := e.st.DB().Query(`SELECT username FROM users ORDER BY id`)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return "", err
+		}
+		got = append(got, s)
+	}
+	switch len(got) {
+	case 0:
+		return "", fmt.Errorf("还没有管理员账号，先跑 minipanel init")
+	case 1:
+		return got[0], nil
+	default:
+		return "", fmt.Errorf("存在 %d 个账号（%s），请用 --user 指定哪一个",
+			len(got), strings.Join(got, ", "))
+	}
+}
+
+// lockoutRisk is one armed way to be locked out of the panel, paired with the
+// command that undoes it from the machine itself.
+type lockoutRisk struct {
+	Name  string `json:"name"`
+	State string `json:"state"`
+	Undo  string `json:"undo"`
+}
+
+// lockoutRisks reads the same values the middleware enforces. The point of
+// listing them is symmetry: a switch here without a matching minipanel command
+// means the operator's only way back is editing SQLite, which is not something
+// this panel should ever ask of somebody who already lost their entrance, phone
+// or IP address.
+func lockoutRisks(e *env) []lockoutRisk {
+	var out []lockoutRisk
+	if raw, _ := e.st.GetSetting("panel.ip_allowlist"); strings.TrimSpace(raw) != "" {
+		n := strings.Count(strings.TrimRight(strings.TrimSpace(raw), "\n"), "\n") + 1
+		out = append(out, lockoutRisk{
+			Name:  "IP 白名单",
+			State: fmt.Sprintf("已启用，%d 条；不在名单内的地址连登录页都看不到", n),
+			Undo:  "minipanel reset-ips --clear",
+		})
+	}
+	var totpOn int
+	_ = e.st.DB().QueryRow(`SELECT COUNT(1) FROM users WHERE totp_enabled=1`).Scan(&totpOn)
+	if totpOn > 0 {
+		out = append(out, lockoutRisk{
+			Name:  "两步验证",
+			State: fmt.Sprintf("%d 个账号已开启；密钥只存在本机数据库里", totpOn),
+			Undo:  "minipanel reset-2fa --clear --user <账号>",
+		})
+	}
+	if raw, _ := e.st.GetSetting("panel.password_expiry_days"); strings.TrimSpace(raw) != "" && strings.TrimSpace(raw) != "0" {
+		out = append(out, lockoutRisk{
+			Name:  "口令有效期",
+			State: "每 " + strings.TrimSpace(raw) + " 天要求更换（登录时判定，不打断进行中的会话）",
+			Undo:  "面板内改口令，或 minipanel passwd <账号> 后由本人确认",
+		})
+	}
+	var must int
+	_ = e.st.DB().QueryRow(`SELECT COUNT(1) FROM users WHERE must_change_pw=1`).Scan(&must)
+	if must > 0 {
+		out = append(out, lockoutRisk{
+			Name:  "口令待确认",
+			State: fmt.Sprintf("%d 个账号除改口令与登出外的请求会被拒绝", must),
+			Undo:  "面板内改口令；忘了旧口令用 minipanel passwd <账号>",
+		})
+	}
+	if e.cfg.TLS {
+		if _, err := describeCert(filepath.Join(e.cfg.DataDir, "panel-cert.pem")); err != nil {
+			out = append(out, lockoutRisk{
+				Name:  "面板证书",
+				State: "TLS 已开启但证书不可用：" + err.Error(),
+				Undo:  "minipanel init --insecure-no-tls 先恢复到回环可用，再修证书",
+			})
+		}
+	}
+	return out
 }

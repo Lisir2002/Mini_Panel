@@ -32,29 +32,18 @@ func newBase() *Capabilities {
 		Permissions:     "none",
 		RemoteAccess:    []RemoteAccess{},
 		DatabaseEngines: []string{},
-		Unavailable:     map[string]string{},
 		// M0 delivers identity, sessions, the entrance, the capability contract
-		// and the audit log — and nothing else. A feature is true here only if
-		// this binary actually does the thing when you click it today. The
+		// and the audit log — and nothing else. A feature is available here only
+		// if this binary actually does the thing when you click it today. The
 		// tempting version (ACME "is pure Go", file backup "is portable") is the
 		// one that renders a live-looking control over an empty implementation,
 		// which is exactly the failure the research pass found in BaoTa and that
 		// this project refuses to copy.
-		Features: map[string]bool{
-			FeatWebSite:      false,
-			FeatPHP:          false,
-			FeatPHPSourceExt: false,
-			FeatSSL:          false,
-			FeatDatabase:     false,
-			FeatBackup:       false,
-			FeatFirewall:     false,
-			FeatCron:         false,
-			FeatTerminal:     false,
-			FeatMonitor:      false,
-			FeatAudit:        true, // the only M0 module that is really finished
-			FeatSSHManager:   false,
-			FeatFilePerms:    false,
-		},
+		//
+		// Everything else is declared by the denial table below — the map starts
+		// empty so a key cannot exist as an unexplained `false`, which is what
+		// the separate bool map made easy in M0.
+		Features: map[string]Feature{},
 	}
 	// Every denial carries the reason the UI must show. Milestone wording is
 	// deliberately concrete: "not implemented" is not an acceptable message.
@@ -79,12 +68,21 @@ func newBase() *Capabilities {
 	for _, d := range denials {
 		c.Deny(d.feat, d.why)
 	}
+	// The one module M0 actually finished: writes go through internal/audit and
+	// the read side is GET /api/v1/audit. No platform may take this away — the
+	// audit log is a property of the panel process, not of the host.
+	c.Allow(FeatAudit)
 	return c
 }
 
 // Milestone-scoped sub-features used by the UI to distinguish "can read" from
 // "can write". Kept in one place so handlers and the front end agree on names.
 const (
+	// featPHPFPM is Windows-only: the official PHP builds ship php-cgi.exe, not
+	// php-fpm, so the key exists on the bitmap there and nowhere else. It is
+	// declared here rather than as a string literal at the call site because
+	// capabilities_test.go asserts every bitmap key is a declared one.
+	featPHPFPM           = "php_fpm"
 	featSiteWrite        = "site_write"
 	featPHPVersionSwitch = "php_version_switch"
 	featFirewallWrite    = "firewall_write"

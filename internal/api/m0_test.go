@@ -28,9 +28,10 @@ import (
 // here is a regression against an observed defect, not a stylistic preference.
 
 const (
-	testEntrance  = "/zq4k7m2p"
-	adminName     = "admin"
-	adminPassword = "Sup3rSecret!pw"
+	testEntrance    = "/zq4k7m2p"
+	adminName       = "admin"
+	adminPassword   = "Sup3rSecret!pw"
+	rotatedPassword = "Rotated!Passw0rd" // used by the password-change tests
 )
 
 type panel struct {
@@ -366,7 +367,12 @@ func TestSettingsAllowListAndValidation(t *testing.T) {
 
 	// Bootstrap values are not writable through the API at all: changing the
 	// port or the entrance is a file edit plus a restart, on purpose.
-	for _, key := range []string{"panel.port", "panel.entrance", "panel.ssl", "panel.session_timeout"} {
+	// panel.basic_auth is on this list because it no longer exists: the key was
+	// dropped (see the store v2 migration) rather than given an enforcement
+	// point, since a second authentication channel is exactly what the identity
+	// model refuses. An old client putting it must get the same refusal as any
+	// unknown key, not a silently ignored 200.
+	for _, key := range []string{"panel.port", "panel.entrance", "panel.ssl", "panel.session_timeout", "panel.basic_auth"} {
 		r, b := p.do(http.MethodPut, "/api/v1/settings/"+key, `{"value":"1"}`, h)
 		if r.StatusCode != http.StatusBadRequest || !strings.Contains(b, "immutable") {
 			t.Errorf("%s = %d %s, want 400 immutable", key, r.StatusCode, b)
@@ -441,10 +447,16 @@ func TestSettingsAllowListAndValidation(t *testing.T) {
 	}
 	// Every seeded row must be listed, otherwise the UI silently hides settings.
 	for _, k := range []string{"panel.port", "panel.ssl", "panel.ip_allowlist", "panel.trust_proxy",
-		"panel.login_limit", "panel.unauth_status", "panel.basic_auth", "panel.password_expiry_days"} {
+		"panel.login_limit", "panel.unauth_status", "panel.password_expiry_days"} {
 		if _, ok := seen[k]; !ok {
 			t.Errorf("setting %s missing from the list", k)
 		}
+	}
+	// And the removed key must not come back as an orphan row: a settings table
+	// that shows a switch with no code behind it is the failure this project
+	// calls out in other panels.
+	if _, ok := seen["panel.basic_auth"]; ok {
+		t.Error("panel.basic_auth is still listed; the v2 migration should have deleted the row")
 	}
 }
 
@@ -554,7 +566,7 @@ func TestAuditRecordsMutationsWithMaskedSecrets(t *testing.T) {
 	p.visitEntrance()
 	p.login()
 	h := p.csrfHeader()
-	p.do(http.MethodPut, "/api/v1/settings/panel.basic_auth", `{"value":"true"}`, h)
+	p.do(http.MethodPut, "/api/v1/settings/panel.trust_proxy", `{"value":"true"}`, h)
 	// Intentionally wrong old password: failures belong in the audit trail too.
 	rw, _ := p.do(http.MethodPost, "/api/v1/password",
 		`{"old_password":"NotMyPassword!1","new_password":"Another!Secure2"}`, h)
@@ -680,18 +692,40 @@ func TestCapabilitiesAreSelfConsistent(t *testing.T) {
 		t.Fatalf("capabilities json: %v", err)
 	}
 	feats, _ := c["features"].(map[string]any)
-	unav, _ := c["unavailable"].(map[string]any)
 	if len(feats) == 0 {
 		t.Fatal("empty feature map")
 	}
-	// The rule the front end renders from: nothing may be both denied and
-	// unexplained.
+	// Contract v2 (docs/功能设计.md §4.1): the reason lives inside the entry, so
+	// there is no second map to fall out of sync with the first. Read it as JSON
+	// rather than as platform.Capabilities, because what the front end renders is
+	// this wire format, not our struct tags.
+	legal := map[string]bool{"available": true, "degraded": true, "unavailable": true, "foreign": true}
 	for k, v := range feats {
-		if v == false {
-			if r, ok := unav[k].(string); !ok || r == "" {
-				t.Errorf("feature %s is disabled without a reason — the UI would have to fake it", k)
-			}
+		entry, ok := v.(map[string]any)
+		if !ok {
+			t.Errorf("feature %s is not an object: %v", k, v)
+			continue
 		}
+		state, _ := entry["state"].(string)
+		if !legal[state] {
+			t.Errorf("feature %s has state %q, outside the four the UI renders", k, state)
+			continue
+		}
+		reason, _ := entry["reason"].(string)
+		if state == "available" {
+			if reason != "" {
+				t.Errorf("available feature %s carries reason %q", k, reason)
+			}
+			continue
+		}
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("feature %s is %s without a reason — the UI would have to fake it", k, state)
+		}
+	}
+	// `unavailable` as a sibling map is gone; an old client reading it must not
+	// find a stale half of the contract still being served.
+	if _, still := c["unavailable"]; still {
+		t.Error("capabilities still serve the v1 `unavailable` map alongside features")
 	}
 	if c["os"] != platform.Current().ID() {
 		t.Errorf("os = %v", c["os"])
@@ -699,8 +733,133 @@ func TestCapabilitiesAreSelfConsistent(t *testing.T) {
 	// A core invariant, asserted from the outside: the bitmap must never claim a
 	// capability this build has no provider for.
 	for _, k := range []string{"web_site", "database", "firewall", "monitor", "terminal"} {
-		if feats[k] == true {
-			t.Errorf("M0 must not advertise %s", k)
+		entry, _ := feats[k].(map[string]any)
+		if entry["state"] == "available" {
+			t.Errorf("这一版不得把 %s 报成可用", k)
 		}
+	}
+}
+
+// TestPasswordChangeGateBlocksThePanelUntilItIsDone pins M1's closed loop.
+// must_change_pw is the state minipanel passwd leaves behind — a password no
+// human chose — and it used to be a note in a login response, which meant the
+// panel kept working normally on a credential that had never been confirmed.
+// Here it is a gate with exactly three ways out.
+func TestPasswordChangeGateBlocksThePanelUntilItIsDone(t *testing.T) {
+	p := newPanel(t, nil)
+	p.createAdmin()
+	p.visitEntrance()
+	p.login()
+	if r, _ := p.get("/api/v1/system/info"); r.StatusCode != http.StatusOK {
+		t.Fatalf("baseline read should work before gating, got %d", r.StatusCode)
+	}
+	if _, err := p.st.DB().Exec(`UPDATE users SET must_change_pw=1 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+
+	r, b := p.get("/api/v1/system/info")
+	if r.StatusCode != http.StatusForbidden || !strings.Contains(b, "password_change_required") {
+		t.Fatalf("gated read = %d %s, want 403 password_change_required", r.StatusCode, b)
+	}
+	// Writes are gated too: an unconfirmed credential must not be able to change
+	// the machine, only its own password.
+	h := p.csrfHeader()
+	if r, b = p.do(http.MethodPut, "/api/v1/settings/panel.password_expiry_days", `{"value":"30"}`, h); r.StatusCode != http.StatusForbidden {
+		t.Fatalf("gated write = %d %s, want 403", r.StatusCode, b)
+	}
+	// Who am I / change it / leave stay reachable, or the gate is a lockout.
+	if r, b = p.get("/api/v1/session"); r.StatusCode != http.StatusOK {
+		t.Fatalf("session must stay reachable while gated: %d %s", r.StatusCode, b)
+	} else if !strings.Contains(b, `"must_change_pw":true`) {
+		t.Fatalf("session must report the gate instead of hiding it: %s", b)
+	}
+	if r, _ = p.do(http.MethodPost, "/api/v1/password",
+		fmt.Sprintf(`{"old_password":"Nope!Wrong1","new_password:%q`, "Rotated!Passw0rd"), h); r.StatusCode == http.StatusOK {
+		t.Fatal("password changed without the current password while gated")
+	}
+	if r, b = p.do(http.MethodPost, "/api/v1/password",
+		fmt.Sprintf(`{"old_password":%q,"new_password":"Rotated!Passw0rd"}`, adminPassword), h); r.StatusCode != http.StatusOK {
+		t.Fatalf("changing the password should clear the gate: %d %s", r.StatusCode, b)
+	}
+	if r, _ = p.get("/api/v1/system/info"); r.StatusCode != http.StatusOK {
+		t.Fatalf("after the change the panel must work, got %d", r.StatusCode)
+	}
+	if r, _ = p.get("/api/v1/session"); r.StatusCode == http.StatusOK {
+		// re-check the flag is gone
+		if _, b := p.get("/api/v1/session"); strings.Contains(b, `"must_change_pw":true`) {
+			t.Fatalf("gate flag still set after the change: %s", b)
+		}
+	}
+	// And the way out that does not involve a password still works.
+	if r, _ = p.do(http.MethodPost, "/api/v1/logout", `{}`, p.csrfHeader()); r.StatusCode != http.StatusOK {
+		t.Fatalf("logout while authenticated = %d", r.StatusCode)
+	}
+}
+
+// TestPasswordExpiryIsJudgedAtLogin covers panel.password_expiry_days, which was
+// writable with no code behind it — a settings row that lied. Expiry is decided
+// at the moment a credential is proven, never in the middle of a session.
+func TestPasswordExpiryIsJudgedAtLogin(t *testing.T) {
+	p := newPanel(t, nil)
+	p.createAdmin()
+	p.visitEntrance()
+	p.login()
+	if r, b := p.do(http.MethodPut, "/api/v1/settings/panel.password_expiry_days", `{"value":"1"}`, p.csrfHeader()); r.StatusCode != http.StatusOK {
+		t.Fatalf("setting expiry: %d %s", r.StatusCode, b)
+	}
+	stale := time.Now().AddDate(0, 0, -10).Unix()
+	if _, err := p.st.DB().Exec(`UPDATE users SET pw_updated_at=? WHERE id=1`, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	r, b := p.login()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("an expired password still authenticates (it only has to be replaced): %d %s", r.StatusCode, b)
+	}
+	if !strings.Contains(b, `"password_expired":true`) || !strings.Contains(b, `"must_change_pw":true`) {
+		t.Fatalf("login after expiry must say so: %s", b)
+	}
+	if r, _ = p.get("/api/v1/system/info"); r.StatusCode != http.StatusForbidden {
+		t.Fatalf("expired password must be gated, got %d", r.StatusCode)
+	}
+	// The reason is visible without a DB read: an operator needs to know whether
+	// this is policy expiry or a CLI-set password.
+	if _, b = p.get("/api/v1/session"); !strings.Contains(b, `"password_expired":true`) {
+		t.Fatalf("session should distinguish expiry from a CLI-set password: %s", b)
+	}
+
+	// The gate blocks settings on purpose, so the way out is the one the design
+	// promises: change the password (still reachable while gated), which also
+	// refreshes pw_updated_at and therefore clears the policy hit.
+	if r, b = p.do(http.MethodPost, "/api/v1/password",
+		fmt.Sprintf(`{"old_password":%q,"new_password":%q}`, adminPassword, rotatedPassword),
+		p.csrfHeader()); r.StatusCode != http.StatusOK {
+		t.Fatalf("changing the password must be reachable while gated: %d %s", r.StatusCode, b)
+	}
+	if r, _ = p.get("/api/v1/system/info"); r.StatusCode != http.StatusOK {
+		t.Fatalf("after the change the panel must work, got %d", r.StatusCode)
+	}
+	// p.login() still uses the bootstrap password, which the step above replaced.
+	if r, b = p.loginRaw(adminName, rotatedPassword, ""); r.StatusCode != http.StatusOK ||
+		strings.Contains(b, `"password_expired":true`) {
+		t.Fatalf("a just-set password cannot be expired: %d %s", r.StatusCode, b)
+	}
+
+	// 0 means no expiry at all: an old password must keep working, because
+	// treating a missing policy as a date would lock people out for a rule
+	// nobody configured.
+	if r, b = p.do(http.MethodPut, "/api/v1/settings/panel.password_expiry_days", `{"value":"0"}`, p.csrfHeader()); r.StatusCode != http.StatusOK {
+		t.Fatalf("clearing expiry: %d %s", r.StatusCode, b)
+	}
+	if _, err := p.st.DB().Exec(`UPDATE users SET pw_updated_at=? WHERE id=1`,
+		time.Now().AddDate(-1, 0, 0).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if r, b = p.loginRaw(adminName, rotatedPassword, ""); r.StatusCode != http.StatusOK ||
+		strings.Contains(b, `"password_expired":true`) {
+		t.Fatalf("expiry=0 must mean no expiry: %d %s", r.StatusCode, b)
+	}
+	if r, _ = p.get("/api/v1/system/info"); r.StatusCode != http.StatusOK {
+		t.Fatalf("with no policy the old password keeps working, got %d", r.StatusCode)
 	}
 }
