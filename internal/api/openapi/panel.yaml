@@ -203,7 +203,9 @@ paths:
         且与 rewrite 模板互斥（同一个 location / 不能既代理又做伪静态）。
         redirect_target 非空表示站点把整站跳转到该 URL，redirect_code 是 301 或 302，
         redirect_keep_path 表示拼接 $request_uri 保留原路径；三者只在启用跳转后出现，
-        且与 rewrite、proxy 三者互斥（都占用 location /）。
+        且与 rewrite、proxy 三者互斥（都占用 location /）。redirect_paths 是精确路径
+        例外表，每项 {path,target,code}；它使用自己的 location = 块，不占用
+        location /，因此可与静态、伪静态、代理或整站跳转共存。
         hotlink=true 表示静态资源启用了固定 Referer 校验，hotlink_allow_empty 表示
         无 Referer 的请求也放行；两者只在启用防盗链后出现，且与 proxy、redirect 互斥
         （代理或整站跳转会让本机静态资源块不可达）。
@@ -494,6 +496,54 @@ paths:
       responses:
         "200": { description: 已生效，返回更新后的站点行 }
         "400": { description: 跳转目标或状态码不合法、与伪静态/代理冲突（invalid_site） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx 拒绝，已回滚（nginx_rejected） }
+  /api/v1/sites/{name}/redirect-paths:
+    put:
+      tags: [site]
+      summary: 替换或清除站点的按路径精确跳转表
+      description: |
+        M2 第十四片：请求体 {rules:[{path,target,code}]}。rules 是整个表的替代值，
+        最多 10 条；空数组表示清除全部路径例外。path 以 / 开头，只允许字母、数字与
+        . _ ~ / -，不允许查询串、片段、nginx 元字符、.. 或尾部归一化后成为站点根的
+        路径；/.well-known/acme-challenge 前缀被拒绝，避免遮蔽 ACME 校验。尾部斜杠
+        会被归一化，重复路径拒绝。
+        target 是绝对 http/https URL，校验规则与整站跳转相同，面板会规范 scheme、
+        host 与 port，并拒绝 userinfo、查询串、片段与控制字符。code 只接受 301/302。
+        渲染结果是每条规则一个固定块：
+        location = <path> { return <code> <target>$is_args$args; }。调用方不能提交
+        nginx 配置文本；$is_args$args 是面板常量，用于原样保留查询串。
+        这些 location = 块按 nginx 规则先于 location / 匹配，因此路径例外可以与静态、
+        伪静态、反向代理、整站跳转、防盗链、访问密码、真实 IP 与 PHP 绑定共存。
+        写入仍走"写配置 → nginx -t → 通过才 reload"；失败恢复原字节，响应 422
+        nginx_rejected。成功响应是更新后的站点行，含 redirect_paths。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rules]
+              properties:
+                rules:
+                  type: array
+                  maxItems: 10
+                  items:
+                    type: object
+                    required: [path, target, code]
+                    properties:
+                      path: { type: string, description: 精确匹配路径 }
+                      target: { type: string, description: 绝对 http/https 目标 URL }
+                      code: { type: integer, description: "301 或 302" }
+      responses:
+        "200": { description: 已生效，返回更新后的站点行 }
+        "400": { description: 路径、目标或状态码不合法（invalid_site） }
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { description: 面板没有管理这个站点 }
         "422": { description: nginx 拒绝，已回滚（nginx_rejected） }

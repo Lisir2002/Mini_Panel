@@ -3,8 +3,8 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七、八、九、十、十一、十二、十三：静态站点、站点证书、PHP 版本绑定、
-// 基础设置编辑、伪静态模板、反向代理、整站跳转、防盗链、访问密码与真实 IP 解析。
+// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四：静态站点、站点证书、PHP 版本绑定、
+// 基础设置编辑、伪静态模板、反向代理、整站跳转、防盗链、访问密码、真实 IP 解析与按路径跳转表。
 // 这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
@@ -28,6 +28,9 @@ import { store } from "../store";
 //   * 真实 IP 解析只接受"可信代理地址/网段列表 + X-Forwarded-For 或 X-Real-IP"；后端拒绝
 //     0.0.0.0/0 与 ::/0，页面明确说只有列表里的对端才能影响来源地址。它是 server 级指令，
 //     不占用 location /，与其它站点功能共存。
+//   * 按路径跳转表只编辑"精确路径 + 301/302 + 绝对目标"三类字段；后端为每条规则渲染固定
+//     location = 块并追加常量 $is_args$args，调用方不能提交任何 nginx 配置文本。整表替换、
+//     空表清除，最多 10 条；它不占用 location /，因此与整站跳转、代理、伪静态共存。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
 //     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
 //     而不是等请求失败后才解释。
@@ -87,6 +90,15 @@ const authForm = ref({ username: "", password: "" });
 const realOpen = ref(false);
 const realTarget = ref(null);
 const realForm = ref({ from: "", header: "X-Forwarded-For" });
+
+const redirectPathsOpen = ref(false);
+const redirectPathsTarget = ref(null);
+const redirectPathRules = ref([]);
+const maxRedirectPathRules = 10;
+
+function blankRedirectPathRule() {
+  return { path: "", target: "", code: 301 };
+}
 
 function parseDomains(text) {
   return String(text || "")
@@ -516,6 +528,105 @@ async function saveRealIP() {
   } finally { busy.value = false; }
 }
 
+function redirectPathsWords(r) {
+  const rules = r.redirect_paths || [];
+  return rules.slice(0, 3).map((p) => p.path + "→" + p.code).join("、") +
+    (rules.length > 3 ? "…" : "");
+}
+
+function openRedirectPaths(r) {
+  error.value = ""; msg.value = "";
+  redirectPathsTarget.value = r;
+  const rules = (r.redirect_paths || []).map((p) => ({
+    path: p.path || "",
+    target: p.target || "",
+    code: p.code === 302 ? 302 : 301,
+  }));
+  redirectPathRules.value = rules.length ? rules : [blankRedirectPathRule()];
+  redirectPathsOpen.value = true;
+}
+
+function addRedirectPath() {
+  error.value = ""; msg.value = "";
+  if (redirectPathRules.value.length >= maxRedirectPathRules) {
+    error.value = "按路径跳转最多 " + maxRedirectPathRules + " 条。";
+    return;
+  }
+  redirectPathRules.value.push(blankRedirectPathRule());
+}
+
+function removeRedirectPath(index) {
+  redirectPathRules.value.splice(index, 1);
+}
+
+function normalizedRedirectPath(path) {
+  const trimmed = String(path || "").trim();
+  return trimmed.replace(/\/+$/, "") || "/";
+}
+
+async function saveRedirectPaths() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const rules = redirectPathRules.value
+      .map((r) => ({
+        path: String(r.path || "").trim(),
+        target: String(r.target || "").trim(),
+        code: Number(r.code),
+      }))
+      .filter((r) => r.path || r.target)
+      .map((r) => ({ ...r, path: normalizedRedirectPath(r.path) }));
+
+    if (rules.length > maxRedirectPathRules) {
+      error.value = "按路径跳转最多 " + maxRedirectPathRules + " 条。";
+      return;
+    }
+
+    const seen = new Set();
+    for (let i = 0; i < rules.length; i++) {
+      const rule = rules[i];
+      const row = i + 1;
+      if (!rule.path || !rule.target) {
+        error.value = "第 " + row + " 条的路径与跳转目标必须同时填写；两者都留空表示删除这一行。";
+        return;
+      }
+      if (rule.path === "/") {
+        error.value = "第 " + row + " 条路径不能是站点根路径 /；它已经由整站跳转或 location / 接管。";
+        return;
+      }
+      if (!/^\/[A-Za-z0-9._~/-]{0,127}$/.test(rule.path)) {
+        error.value = "第 " + row + " 条路径只能以 / 开头，只允许字母、数字与 . _ ~ / -，且最长 128 个字符。";
+        return;
+      }
+      if (rule.path.includes("..") || rule.path.startsWith("/.well-known/acme-challenge")) {
+        error.value = "第 " + row + " 条路径不能包含 ..，也不能遮蔽 ACME 校验路径。";
+        return;
+      }
+      if (seen.has(rule.path)) {
+        error.value = "第 " + row + " 条路径 " + rule.path + " 与前面的路径重复。";
+        return;
+      }
+      seen.add(rule.path);
+      if (rule.code !== 301 && rule.code !== 302) {
+        error.value = "第 " + row + " 条跳转状态码只能是 301 或 302。";
+        return;
+      }
+    }
+
+    const site = await api("/api/v1/sites/" + encodeURIComponent(redirectPathsTarget.value.name) + "/redirect-paths",
+      { method: "PUT", body: JSON.stringify({ rules }) });
+    msg.value = site.name + " 的按路径跳转表已" +
+      (site.redirect_paths?.length ? "更新（" + site.redirect_paths.length + " 条精确匹配，保留查询串）" : "清除") +
+      "；nginx 已通过 nginx -t 并重载。";
+    redirectPathsOpen.value = false;
+    await load();
+  } catch (e) {
+    // 400 invalid_site（路径、目标或状态码不合法）与 422 nginx_rejected 都带后端原文；
+    // 后端在返回前没有写入任何文件，页面原样显示。
+    error.value = e.message;
+    await load();
+  } finally { busy.value = false; }
+}
+
 onMounted(load);
 </script>
 <template>
@@ -620,6 +731,10 @@ onMounted(load);
               <div v-if="r.real_ip_from?.length" class="mp-muted mp-tiny">
                 真实 IP · {{ r.real_ip_header }} · {{ r.real_ip_from.join("、") }}
               </div>
+              <div v-if="r.redirect_paths?.length" class="mp-muted mp-tiny">
+                路径跳转 {{ r.redirect_paths.length }} 条 ·
+                <code class="mp-code">{{ redirectPathsWords(r) }}</code>
+              </div>
             </td>
             <td>
               <span class="mp-tag on" v-if="r.enabled">已启用</span>
@@ -645,7 +760,7 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:530px;white-space:nowrap">
+            <td style="width:620px;white-space:nowrap">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
@@ -654,6 +769,7 @@ onMounted(load);
               <el-button size="small" text type="primary" @click="openRedirect(r)">
                 {{ r.redirect_target ? "跳转" : "整站跳转" }}
               </el-button>
+              <el-button size="small" text type="primary" @click="openRedirectPaths(r)">路径跳转</el-button>
               <el-button size="small" text type="primary" @click="openHotlink(r)">
                 {{ r.hotlink ? "防盗链" : "防盗" }}
               </el-button>
@@ -817,6 +933,47 @@ onMounted(load);
           <el-button size="small" type="primary" :loading="busy"
             :disabled="!!redirectForm.target.trim() && (!!rewriteLabel(redirectTarget) || !!redirectTarget?.proxy_target || !!redirectTarget?.hotlink)" @click="saveRedirect">
             {{ redirectForm.target.trim() ? "保存" : "清除跳转" }}
+          </el-button>
+        </template>
+      </el-dialog>
+
+      <el-dialog v-model="redirectPathsOpen" :title="'按路径跳转 · ' + (redirectPathsTarget?.name || '')" width="min(760px, 96vw)">
+        <el-alert v-if="redirectPathsTarget?.redirect_paths?.length" type="info" :closable="false" style="margin-bottom:10px"
+          :title="'该站点已有 ' + redirectPathsTarget.redirect_paths.length + ' 条路径例外。保存会用下面的列表整体替换；删除全部行后保存表示清除。'" />
+        <div class="mp-row" style="margin-bottom:8px;align-items:flex-end">
+          <div style="flex:1;min-width:200px"><span class="mp-muted mp-tiny">精确路径（区分大小写）</span></div>
+          <div style="width:110px"><span class="mp-muted mp-tiny">状态码</span></div>
+          <div style="flex:2;min-width:220px"><span class="mp-muted mp-tiny">跳转目标</span></div>
+          <div style="width:52px"></div>
+        </div>
+        <div v-for="(rule, i) in redirectPathRules" :key="i" class="mp-row" style="margin-bottom:8px">
+          <el-input v-model="rule.path" maxlength="128" placeholder="/old" style="flex:1;min-width:200px" />
+          <el-select v-model="rule.code" style="width:110px">
+            <el-option label="301 永久" :value="301" />
+            <el-option label="302 临时" :value="302" />
+          </el-select>
+          <el-input v-model="rule.target" maxlength="255" placeholder="https://new.example.com" style="flex:2;min-width:220px" />
+          <el-button size="small" text type="danger" :disabled="busy" @click="removeRedirectPath(i)">删除</el-button>
+        </div>
+        <div class="mp-hint" style="margin-top:4px">
+          每行渲染成一个固定的 <code class="mp-code">location = &lt;path&gt;</code> 块；请求带查询串时，
+          面板追加常量 <code class="mp-code">$is_args$args</code> 原样保留它。精确路径优先于
+          <code class="mp-code">location /</code>，所以本表可与整站跳转、反向代理、伪静态、访问密码与
+          PHP 绑定共存；两者互不遮蔽各自的范围。站点根路径 <code class="mp-code">/</code> 不在这里配置。
+          路径不能包含 <code class="mp-code">..</code>，也不能遮蔽 <code class="mp-code">/.well-known/acme-challenge</code>。
+          目标地址与整站跳转同样校验，只能填绝对 <code class="mp-code">http://</code> 或
+          <code class="mp-code">https://</code> 地址，不接受任何 nginx 配置文本。
+        </div>
+        <div class="mp-row" style="margin-top:8px">
+          <el-button size="small" :disabled="busy || redirectPathRules.length >= maxRedirectPathRules" @click="addRedirectPath">
+            添加一行
+          </el-button>
+          <span class="mp-muted mp-tiny">最多 {{ maxRedirectPathRules }} 条 · 当前 {{ redirectPathRules.length }} 条</span>
+        </div>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="redirectPathsOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy" @click="saveRedirectPaths">
+            {{ redirectPathRules.some((r) => String(r.path || '').trim() || String(r.target || '').trim()) ? "保存" : "清除跳转表" }}
           </el-button>
         </template>
       </el-dialog>
@@ -1015,7 +1172,9 @@ onMounted(load);
         随时编辑，域名变更受现有证书覆盖范围约束。伪静态模板由本地二进制提供
         （WordPress / Laravel / ThinkPHP / SPA），不接受自定义配置片段；需要 PHP 的模板只能用于
         已绑定 PHP 的站点。反向代理同样只接受一个校验过的上游 URL（可选 WebSocket），
-        固定写入代理头，与伪静态模板互斥。新建站点的根目录是 0755 的空目录，
+        固定写入代理头，与伪静态模板互斥。按路径跳转只写若干条精确 <code class="mp-code">location =</code>
+        例外，保留查询串且不占用 <code class="mp-code">location /</code>，所以能够与整站跳转、代理和
+        伪静态共存。新建站点的根目录是 0755 的空目录，
         放一个 <code class="mp-code">index.html</code>（或绑定 PHP 后放 index.php）就能访问。
       </div>
     </template>

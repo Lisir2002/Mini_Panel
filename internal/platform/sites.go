@@ -45,9 +45,12 @@ type SiteInfo struct {
 	// RedirectTarget is the validated absolute URL when the site redirects
 	// every request; empty means no redirect. RedirectCode is 301 or 302 and
 	// RedirectKeepPath says whether the original request path is appended.
-	RedirectTarget   string `json:"redirect_target,omitempty"`
-	RedirectCode     int    `json:"redirect_code,omitempty"`
-	RedirectKeepPath bool   `json:"redirect_keep_path,omitempty"`
+	// RedirectPaths is a table of exact path exceptions rendered before the
+	// catch-all; an empty table means no exceptions.
+	RedirectTarget   string             `json:"redirect_target,omitempty"`
+	RedirectCode     int                `json:"redirect_code,omitempty"`
+	RedirectKeepPath bool               `json:"redirect_keep_path,omitempty"`
+	RedirectPaths    []SiteRedirectRule `json:"redirect_paths,omitempty"`
 	// Hotlink is the fixed Referer check for static assets; HotlinkAllowEmpty
 	// says whether requests without a Referer are allowed through. Both are
 	// omitted until hotlink protection is enabled.
@@ -80,6 +83,15 @@ type SiteTLSInfo struct {
 	KeyPath    string `json:"key_path,omitempty"`
 	NotAfter   string `json:"not_after,omitempty"`
 	Error      string `json:"error,omitempty"`
+}
+
+// SiteRedirectRule is one exact-path exception in a site's redirect table. The
+// provider validates both path and target and renders a fixed `location =`
+// block; callers cannot submit nginx text.
+type SiteRedirectRule struct {
+	Path   string `json:"path"`
+	Target string `json:"target"`
+	Code   int    `json:"code"`
 }
 
 // SiteManager is the write side of FeatWebSite. It is deliberately small: the
@@ -151,6 +163,14 @@ type SiteProxyManager interface {
 // fixed `return` line. Clearing (empty target) is always allowed.
 type SiteRedirectManager interface {
 	SetRedirect(name, target string, code int, keepPath bool) (SiteInfo, error)
+}
+
+// SiteRedirectPathManager is the optional exact-path redirect table. The
+// operator supplies complete rules (path + absolute target + 301/302); the
+// provider normalizes and renders fixed `location =` blocks. An empty table is
+// always an allowed clear operation.
+type SiteRedirectPathManager interface {
+	SetRedirectPaths(name string, rules []SiteRedirectRule) (SiteInfo, error)
 }
 
 // SiteHotlinkManager is the optional hotlink-protection half of a site writer.

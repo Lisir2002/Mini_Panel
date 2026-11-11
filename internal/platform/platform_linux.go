@@ -231,6 +231,21 @@ func (l linuxSites) SetRedirect(name, target string, code int, keepPath bool) (S
 	return toSiteInfo(s), nil
 }
 
+// SetRedirectPaths replaces or clears exact-path redirect exceptions. The nginx
+// writer owns path/target/status validation and renders fixed `location =`
+// blocks; this adapter translates the neutral rule list and errors.
+func (l linuxSites) SetRedirectPaths(name string, rules []SiteRedirectRule) (SiteInfo, error) {
+	native := make([]nginx.RedirectRule, len(rules))
+	for i, r := range rules {
+		native[i] = nginx.RedirectRule{Path: r.Path, Target: r.Target, Code: r.Code}
+	}
+	s, err := l.m.SetRedirectPaths(name, native)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
 // SetHotlink toggles the fixed Referer check. The nginx writer owns the
 // extension list and the proxy/redirect exclusion; this adapter only translates
 // errors and the returned row.
@@ -438,6 +453,12 @@ func toSiteInfo(s nginx.Site) SiteInfo {
 		RealIPFrom: s.RealIPFrom, RealIPHeader: s.RealIPHeader,
 		ConfigPath: s.ConfigPath, Enabled: s.Enabled, CreatedAt: s.CreatedAt,
 		PHPVersion: s.PHPVersion, PHPSocket: s.PHPSocket,
+	}
+	if len(s.RedirectPaths) > 0 {
+		out.RedirectPaths = make([]SiteRedirectRule, len(s.RedirectPaths))
+		for i, r := range s.RedirectPaths {
+			out.RedirectPaths[i] = SiteRedirectRule{Path: r.Path, Target: r.Target, Code: r.Code}
+		}
 	}
 	if s.PHPVersion != "" {
 		out.PHPSocketState = php.SocketStatus(s.PHPSocket)

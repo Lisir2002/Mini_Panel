@@ -21,34 +21,36 @@ import (
 // it: capability gate, status codes, CSRF, and the audit trail.
 
 type fakeSites struct {
-	sites        map[string]platform.SiteInfo
-	createErr    error
-	deleteErr    error
-	tlsErr       error
-	acmeErr      error
-	phpErr       error
-	settingsErr  error
-	rewriteErr   error
-	proxyErr     error
-	redirectErr  error
-	hotlinkErr   error
-	authErr      error
-	realIPErr    error
-	created      int
-	deleted      int
-	tlsSets      int
-	tlsClears    int
-	acmeCalls    int
-	phpSets      int
-	phpClears    int
-	settingsSets int
-	rewriteSets  int
-	proxySets    int
-	redirectSets int
-	hotlinkSets  int
-	authSets     int
-	realIPSets   int
-	lastCertLen  int
+	sites            map[string]platform.SiteInfo
+	createErr        error
+	deleteErr        error
+	tlsErr           error
+	acmeErr          error
+	phpErr           error
+	settingsErr      error
+	rewriteErr       error
+	proxyErr         error
+	redirectErr      error
+	redirectPathErr  error
+	hotlinkErr       error
+	authErr          error
+	realIPErr        error
+	created          int
+	deleted          int
+	tlsSets          int
+	tlsClears        int
+	acmeCalls        int
+	phpSets          int
+	phpClears        int
+	settingsSets     int
+	rewriteSets      int
+	proxySets        int
+	redirectSets     int
+	redirectPathSets int
+	hotlinkSets      int
+	authSets         int
+	realIPSets       int
+	lastCertLen      int
 }
 
 func newFakeSites() *fakeSites {
@@ -179,6 +181,27 @@ func (f *fakeSites) SetRedirect(name, target string, code int, keepPath bool) (p
 	s.RedirectKeepPath = keepPath
 	f.sites[name] = s
 	f.redirectSets++
+	return s, nil
+}
+
+// SetRedirectPaths records a whole exact-path table. The fake provider mirrors
+// the production contract by replacing the table, including clearing it when
+// rules is empty.
+func (f *fakeSites) SetRedirectPaths(name string, rules []platform.SiteRedirectRule) (platform.SiteInfo, error) {
+	if f.redirectPathErr != nil {
+		return platform.SiteInfo{}, f.redirectPathErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	if len(rules) == 0 {
+		s.RedirectPaths = nil
+	} else {
+		s.RedirectPaths = append([]platform.SiteRedirectRule(nil), rules...)
+	}
+	f.sites[name] = s
+	f.redirectPathSets++
 	return s, nil
 }
 

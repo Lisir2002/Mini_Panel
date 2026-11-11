@@ -205,10 +205,12 @@ type Site struct {
 	ProxyWebSocket bool   `json:"proxy_websocket,omitempty"`
 	// RedirectTarget is the validated absolute URL when the site redirects
 	// every request. Redirect, proxy and rewrite all own `location /`, so at
-	// most one of them may be set.
-	RedirectTarget   string `json:"redirect_target,omitempty"`
-	RedirectCode     int    `json:"redirect_code,omitempty"`
-	RedirectKeepPath bool   `json:"redirect_keep_path,omitempty"`
+	// most one of them may be set. RedirectPaths adds exact path exceptions;
+	// those use their own `location =` blocks and therefore do not own `/`.
+	RedirectTarget   string         `json:"redirect_target,omitempty"`
+	RedirectCode     int            `json:"redirect_code,omitempty"`
+	RedirectKeepPath bool           `json:"redirect_keep_path,omitempty"`
+	RedirectPaths    []RedirectRule `json:"redirect_paths,omitempty"`
 	// Hotlink guards static assets with a fixed Referer check. It owns a regex
 	// location for asset extensions rather than `location /`, so it can coexist
 	// with rewrite templates but not with a proxy or redirect that would make
@@ -247,25 +249,26 @@ type Spec struct {
 }
 
 type markerPayload struct {
-	Name              string     `json:"name"`
-	Domains           []string   `json:"domains"`
-	Root              string     `json:"root"`
-	CreatedAt         string     `json:"created_at"`
-	Index             []string   `json:"index,omitempty"`
-	Rewrite           string     `json:"rewrite,omitempty"`
-	ProxyTarget       string     `json:"proxy_target,omitempty"`
-	ProxyWebSocket    bool       `json:"proxy_websocket,omitempty"`
-	RedirectTarget    string     `json:"redirect_target,omitempty"`
-	RedirectCode      int        `json:"redirect_code,omitempty"`
-	RedirectKeepPath  bool       `json:"redirect_keep_path,omitempty"`
-	Hotlink           bool       `json:"hotlink,omitempty"`
-	HotlinkAllowEmpty bool       `json:"hotlink_allow_empty,omitempty"`
-	AuthUser          string     `json:"auth_user,omitempty"`
-	RealIPFrom        []string   `json:"real_ip_from,omitempty"`
-	RealIPHeader      string     `json:"real_ip_header,omitempty"`
-	TLS               *markerTLS `json:"tls,omitempty"`
-	PHPVersion        string     `json:"php_version,omitempty"`
-	PHPSocket         string     `json:"php_socket,omitempty"`
+	Name              string         `json:"name"`
+	Domains           []string       `json:"domains"`
+	Root              string         `json:"root"`
+	CreatedAt         string         `json:"created_at"`
+	Index             []string       `json:"index,omitempty"`
+	Rewrite           string         `json:"rewrite,omitempty"`
+	ProxyTarget       string         `json:"proxy_target,omitempty"`
+	ProxyWebSocket    bool           `json:"proxy_websocket,omitempty"`
+	RedirectTarget    string         `json:"redirect_target,omitempty"`
+	RedirectCode      int            `json:"redirect_code,omitempty"`
+	RedirectKeepPath  bool           `json:"redirect_keep_path,omitempty"`
+	RedirectPaths     []RedirectRule `json:"redirect_paths,omitempty"`
+	Hotlink           bool           `json:"hotlink,omitempty"`
+	HotlinkAllowEmpty bool           `json:"hotlink_allow_empty,omitempty"`
+	AuthUser          string         `json:"auth_user,omitempty"`
+	RealIPFrom        []string       `json:"real_ip_from,omitempty"`
+	RealIPHeader      string         `json:"real_ip_header,omitempty"`
+	TLS               *markerTLS     `json:"tls,omitempty"`
+	PHPVersion        string         `json:"php_version,omitempty"`
+	PHPSocket         string         `json:"php_socket,omitempty"`
 }
 
 var (
@@ -445,8 +448,8 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 		ConfigPath: p, CreatedAt: payload.CreatedAt, Index: payload.Index,
 		Rewrite: payload.Rewrite, ProxyTarget: payload.ProxyTarget, ProxyWebSocket: payload.ProxyWebSocket,
 		RedirectTarget: payload.RedirectTarget, RedirectCode: payload.RedirectCode,
-		RedirectKeepPath: payload.RedirectKeepPath,
-		Hotlink:          payload.Hotlink, HotlinkAllowEmpty: payload.HotlinkAllowEmpty,
+		RedirectKeepPath: payload.RedirectKeepPath, RedirectPaths: payload.RedirectPaths,
+		Hotlink: payload.Hotlink, HotlinkAllowEmpty: payload.HotlinkAllowEmpty,
 		AuthUser: payload.AuthUser, AuthFile: authPath(m.AuthDir, payload.Name),
 		RealIPFrom: payload.RealIPFrom, RealIPHeader: payload.RealIPHeader,
 		PHPVersion: payload.PHPVersion, PHPSocket: payload.PHPSocket,
@@ -490,6 +493,11 @@ func parseMarker(body string) (markerPayload, bool) {
 			return markerPayload{}, false
 		}
 		p.RedirectTarget, p.RedirectCode, p.RedirectKeepPath = redirect, code, keepPath
+		pathRules, err := normalizeRedirectPaths(p.RedirectPaths)
+		if err != nil {
+			return markerPayload{}, false
+		}
+		p.RedirectPaths = pathRules
 		if !p.Hotlink {
 			p.HotlinkAllowEmpty = false
 		}
@@ -852,6 +860,7 @@ func render(s Site) string {
 		RedirectTarget:    s.RedirectTarget,
 		RedirectCode:      s.RedirectCode,
 		RedirectKeepPath:  s.RedirectKeepPath,
+		RedirectPaths:     s.RedirectPaths,
 		Hotlink:           s.Hotlink,
 		HotlinkAllowEmpty: s.HotlinkAllowEmpty,
 		AuthUser:          s.AuthUser,

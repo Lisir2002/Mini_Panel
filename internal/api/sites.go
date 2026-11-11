@@ -118,6 +118,21 @@ func (s *Server) siteRedirectManager() (platform.SiteRedirectManager, string) {
 	return rm, ""
 }
 
+// siteRedirectPathManager is the optional exact-path redirect table. Providers
+// that only implement the site-wide redirect endpoint return 403 capability
+// rather than pretending path exceptions are available.
+func (s *Server) siteRedirectPathManager() (platform.SiteRedirectPathManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	rm, ok := m.(platform.SiteRedirectPathManager)
+	if !ok || rm == nil {
+		return nil, "该平台的站点 Provider 没有实现按路径跳转"
+	}
+	return rm, ""
+}
+
 // siteHotlinkManager is the optional hotlink-protection interface. A provider
 // without it returns 403 capability with the reason below.
 func (s *Server) siteHotlinkManager() (platform.SiteHotlinkManager, string) {
@@ -395,6 +410,38 @@ func (s *Server) handleSiteRedirect(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_redirect", "更新整站跳转失败："+err.Error())
+	}
+}
+
+// handleSiteRedirectPaths is PUT /api/v1/sites/{name}/redirect-paths. The body
+// is {"rules":[{"path":"/old","target":"https://new.example.com","code":301}]};
+// an empty rules list clears the table. Paths and targets are validated and
+// normalized by the provider, which renders only fixed `location =` blocks.
+func (s *Server) handleSiteRedirectPaths(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteRedirectPathManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Rules []platform.SiteRedirectRule `json:"rules"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetRedirectPaths(chiParam(r, "name"), body.Rules)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_redirect_paths", "更新按路径跳转失败："+err.Error())
 	}
 }
 

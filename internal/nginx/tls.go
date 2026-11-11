@@ -440,6 +440,12 @@ func renderServer(s Site, tlsOn bool) string {
 			b.WriteString("\n" + acmeExemptLocation())
 		}
 	}
+	if len(s.RedirectPaths) > 0 {
+		// Exact path exceptions render before `location /`. They do not own the
+		// catch-all, so they can coexist with the site's static, proxy, rewrite
+		// or site-wide redirect behavior.
+		b.WriteString("\n" + redirectPathLocations(s.RedirectPaths))
+	}
 	b.WriteString("\n    location / {\n")
 	switch {
 	case s.RedirectTarget != "":
