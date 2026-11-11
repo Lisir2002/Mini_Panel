@@ -29,6 +29,7 @@ type fakeSites struct {
 	phpErr       error
 	settingsErr  error
 	rewriteErr   error
+	proxyErr     error
 	created      int
 	deleted      int
 	tlsSets      int
@@ -38,6 +39,7 @@ type fakeSites struct {
 	phpClears    int
 	settingsSets int
 	rewriteSets  int
+	proxySets    int
 	lastCertLen  int
 }
 
@@ -133,6 +135,24 @@ func (f *fakeSites) SetBasics(name string, domains []string, root string, index 
 	s.Index = index
 	f.sites[name] = s
 	f.settingsSets++
+	return s, nil
+}
+
+// SetProxy records the target and WebSocket flag. URL validation and the
+// rewrite mutual-exclusion rule live in the nginx writer; the HTTP tests only
+// need a provider that remembers the call.
+func (f *fakeSites) SetProxy(name, target string, websocket bool) (platform.SiteInfo, error) {
+	if f.proxyErr != nil {
+		return platform.SiteInfo{}, f.proxyErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	s.ProxyTarget = strings.TrimSpace(target)
+	s.ProxyWebSocket = websocket
+	f.sites[name] = s
+	f.proxySets++
 	return s, nil
 }
 

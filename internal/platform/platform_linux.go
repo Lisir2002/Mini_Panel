@@ -208,6 +208,17 @@ func (l linuxSites) RewritePresets() []RewritePreset {
 	return out
 }
 
+// SetProxy enables, replaces or clears the fixed reverse-proxy block. The nginx
+// writer owns URL validation and the mutual-exclusion rule with rewrite
+// templates; this adapter only translates errors and the returned row.
+func (l linuxSites) SetProxy(name, target string, websocket bool) (SiteInfo, error) {
+	s, err := l.m.SetProxy(name, target, websocket)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
 // resolvePHPBinding is the only version→socket translation. It returns empty
 // strings for "static site" and a typed error for anything discovery did not
 // prove, so the API can say "this host does not have PHP 8.2 (fpm)" instead of
@@ -373,7 +384,8 @@ func mapACMEErr(err error) error {
 func toSiteInfo(s nginx.Site) SiteInfo {
 	out := SiteInfo{
 		Name: s.Name, Domains: s.Domains, Root: s.Root, Index: s.Index,
-		Rewrite:    s.Rewrite,
+		Rewrite:     s.Rewrite,
+		ProxyTarget: s.ProxyTarget, ProxyWebSocket: s.ProxyWebSocket,
 		ConfigPath: s.ConfigPath, Enabled: s.Enabled, CreatedAt: s.CreatedAt,
 		PHPVersion: s.PHPVersion, PHPSocket: s.PHPSocket,
 	}

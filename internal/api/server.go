@@ -132,6 +132,7 @@ func (s *Server) routes() chi.Router {
 			r.Delete("/sites/{name}", s.handleSiteDelete)
 			r.Put("/sites/{name}/php", s.handleSitePHP)
 			r.Put("/sites/{name}/rewrite", s.handleSiteRewrite)
+			r.Put("/sites/{name}/proxy", s.handleSiteProxy)
 			r.Post("/sites/{name}/tls", s.handleSiteTLSSet)
 			r.Delete("/sites/{name}/tls", s.handleSiteTLSClear)
 			r.Post("/sites/{name}/acme", s.handleSiteACME)

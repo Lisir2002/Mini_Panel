@@ -36,9 +36,14 @@ type SiteInfo struct {
 	// Rewrite is the id of a bundled rewrite template ("none" for the default
 	// static lookup). The set is exposed by SiteRewriteManager so the UI and
 	// the provider cannot drift.
-	Rewrite    string `json:"rewrite,omitempty"`
-	PHPVersion string `json:"php_version,omitempty"`
-	PHPSocket  string `json:"php_socket,omitempty"`
+	Rewrite string `json:"rewrite,omitempty"`
+	// ProxyTarget is the validated upstream URL when the site is a reverse
+	// proxy; empty means no proxy. ProxyWebSocket says whether the fixed
+	// directive block forwards Upgrade/Connection headers.
+	ProxyTarget    string `json:"proxy_target,omitempty"`
+	ProxyWebSocket bool   `json:"proxy_websocket,omitempty"`
+	PHPVersion     string `json:"php_version,omitempty"`
+	PHPSocket      string `json:"php_socket,omitempty"`
 	// PHPSocketState is the live state of PHPSocket (listening / idle / absent /
 	// not_socket / unknown), computed on every read. It is not persisted: "the
 	// site points at 8.3" and "php8.3-fpm is answering" are two separate facts,
@@ -110,6 +115,15 @@ type RewritePreset struct {
 type SiteRewriteManager interface {
 	SetRewrite(name, preset string) (SiteInfo, error)
 	RewritePresets() []RewritePreset
+}
+
+// SiteProxyManager is the optional reverse-proxy half of a site writer. The
+// operator supplies one upstream URL; the provider validates it into
+// scheme/host/port/path and renders a fixed directive block. Clearing (empty
+// target) is always allowed so an operator can recover a site whose upstream
+// disappeared, even if the rest of the site writer is degraded.
+type SiteProxyManager interface {
+	SetProxy(name, target string, websocket bool) (SiteInfo, error)
 }
 
 // SiteTLSManager is the optional certificate side of a site writer. Manual

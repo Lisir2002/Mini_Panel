@@ -3,7 +3,8 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七、八片：静态站点、站点证书、PHP 版本绑定、基础设置编辑与伪静态模板。
+// M2 第三、四、六、七、八、九片：静态站点、站点证书、PHP 版本绑定、基础设置编辑、
+// 伪静态模板与反向代理。
 // 这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
@@ -13,6 +14,9 @@ import { store } from "../store";
 //     socket 当前不是 listening 时，页面直接说"站点会 502"，不把配置写入说成后端可用。
 //   * 伪静态列表来自 GET /sites/rewrite-presets，不是前端硬编码；模板内容固定在二进制里。
 //     wordpress / laravel / thinkphp 需要已绑定 PHP，静态站点会被后端拒绝。
+//   * 反向代理只接受一个上游 URL 与 WebSocket 开关；后端按 url.Parse 与字符白名单校验，
+//     页面不提供任何"自定义 nginx 片段"输入框。它与伪静态互斥：两者都占用 location /，
+//     页面在两边对话框里都提示先清空一边，后端也会拒绝并把文件保持原样。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
 //     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
 //     而不是等请求失败后才解释。
@@ -52,6 +56,10 @@ const rewritePresets = ref([]);
 const rewriteOpen = ref(false);
 const rewriteTarget = ref(null);
 const rewriteForm = ref({ preset: "none" });
+
+const proxyOpen = ref(false);
+const proxyTarget = ref(null);
+const proxyForm = ref({ target: "", websocket: false });
 
 function parseDomains(text) {
   return String(text || "")
@@ -295,6 +303,41 @@ async function saveRewrite() {
   } finally { busy.value = false; }
 }
 
+function proxyLabel(r) {
+  if (!r.proxy_target) return "";
+  return "代理 · " + r.proxy_target + (r.proxy_websocket ? " · WebSocket" : "");
+}
+
+function openProxy(r) {
+  error.value = ""; msg.value = "";
+  proxyTarget.value = r;
+  proxyForm.value = { target: r.proxy_target || "", websocket: !!r.proxy_websocket };
+  proxyOpen.value = true;
+}
+
+async function saveProxy() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const target = proxyForm.value.target.trim();
+    const site = await api("/api/v1/sites/" + encodeURIComponent(proxyTarget.value.name) + "/proxy",
+      { method: "PUT", body: JSON.stringify({ target, websocket: proxyForm.value.websocket }) });
+    if (site.proxy_target) {
+      msg.value = site.name + " 已反向代理到 " + site.proxy_target +
+        (site.proxy_websocket ? "（含 WebSocket 升级）" : "") +
+        "；nginx 已通过 nginx -t 并重载。";
+    } else {
+      msg.value = site.name + " 已清除反向代理，location / 回到默认静态查找；nginx 已通过 nginx -t 并重载。";
+    }
+    proxyOpen.value = false;
+    await load();
+  } catch (e) {
+    // 400 invalid_site（URL 不合法或与伪静态冲突）与 422 nginx_rejected 都带后端原文；
+    // 后端在返回前没有写入任何文件，页面只需要原样显示。
+    error.value = e.message;
+    await load();
+  } finally { busy.value = false; }
+}
+
 onMounted(load);
 </script>
 
@@ -303,8 +346,8 @@ onMounted(load);
     <h3>网站</h3>
     <p class="mp-note">
       管理面板自己创建的站点；可以在创建时或之后绑定一个本机探测到的 PHP fpm 版本，留空则是
-      <b>静态站点</b>。站点的域名、根目录、默认文档与伪静态模板可随时编辑。每一次创建、编辑、删除、
-      PHP 切换、伪静态或证书变更都是"先测试后生效"：写配置 →
+      <b>静态站点</b>。站点的域名、根目录、默认文档、伪静态模板与反向代理可随时编辑。每一次创建、
+      编辑、删除、PHP 切换、伪静态、代理或证书变更都是"先测试后生效"：写配置 →
       <code class="mp-code">nginx -t</code> → 只有通过才 reload；任何一步失败都会恢复上一份配置与证书。
       只列出面板自己写出的 vhost（文件内带标记），手工写的配置不会被列出来，也不会被删除。
     </p>
@@ -383,6 +426,10 @@ onMounted(load);
               <code class="mp-code">{{ r.root }}</code>
               <div v-if="r.index?.length" class="mp-muted mp-tiny">index {{ r.index.join(" ") }}</div>
               <div v-if="rewriteLabel(r)" class="mp-muted mp-tiny">伪静态 · {{ rewriteLabel(r) }}</div>
+              <div v-if="r.proxy_target" class="mp-muted mp-tiny">
+                代理 · <code class="mp-code">{{ r.proxy_target }}</code>
+                <span v-if="r.proxy_websocket"> · WebSocket</span>
+              </div>
             </td>
             <td>
               <span class="mp-tag on" v-if="r.enabled">已启用</span>
@@ -408,9 +455,12 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:280px;white-space:nowrap">
+            <td style="width:340px;white-space:nowrap">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
+              <el-button size="small" text type="primary" @click="openProxy(r)">
+                {{ r.proxy_target ? "代理" : "反代" }}
+              </el-button>
               <el-button size="small" text type="primary" :disabled="!phpAvailable && !r.php_version" @click="openPHP(r)">
                 PHP
               </el-button>
@@ -460,13 +510,15 @@ onMounted(load);
       </el-dialog>
 
       <el-dialog v-model="rewriteOpen" :title="'伪静态 · ' + (rewriteTarget?.name || '')" width="min(560px, 94vw)">
+        <el-alert v-if="rewriteTarget?.proxy_target" type="info" :closable="false" style="margin-bottom:10px"
+          title="该站点已启用反向代理：两者都占用 location /。除“默认”以外的模板会被后端拒绝；请先在“代理”对话框里清空上游 URL。" />
         <el-alert v-if="rewriteTarget && !rewriteTarget.php_version" type="info" :closable="false" style="margin-bottom:10px"
           title="当前是静态站点：需要 PHP 的模板（WordPress / Laravel / ThinkPHP）不可选，避免 nginx 把 index.php 当文本返回。先绑定 PHP 再回来选择。" />
         <el-form label-position="top" @submit.prevent="saveRewrite">
           <el-form-item label="规则模板">
             <el-select v-model="rewriteForm.preset" style="width:100%">
               <el-option v-for="p in rewritePresets" :key="p.id" :label="p.label" :value="p.id"
-                :disabled="p.requires_php && !rewriteTarget?.php_version" />
+                :disabled="(p.id !== 'none' && !!rewriteTarget?.proxy_target) || (p.requires_php && !rewriteTarget?.php_version)" />
             </el-select>
             <div class="mp-hint" style="margin-top:6px">
               {{ rewritePreset(rewriteForm.preset)?.description || "" }}
@@ -480,6 +532,39 @@ onMounted(load);
         <template #footer>
           <el-button size="small" :disabled="busy" @click="rewriteOpen = false">取消</el-button>
           <el-button size="small" type="primary" :loading="busy" @click="saveRewrite">应用</el-button>
+        </template>
+      </el-dialog>
+
+      <el-dialog v-model="proxyOpen" :title="'反向代理 · ' + (proxyTarget?.name || '')" width="min(600px, 94vw)">
+        <el-alert v-if="rewriteLabel(proxyTarget)" type="info" :closable="false" style="margin-bottom:10px"
+          :title="'该站点正在使用伪静态模板（' + rewriteLabel(proxyTarget) + '）：两者都占用 location /。后端会拒绝保存代理；请先把伪静态切回“默认”，再启用代理。'" />
+        <el-form label-position="top" @submit.prevent="saveProxy">
+          <el-form-item label="上游 URL（http:// 或 https://，可带端口与路径前缀）">
+            <el-input v-model="proxyForm.target" placeholder="http://127.0.0.1:8080" maxlength="255" />
+            <div class="mp-hint" style="margin-top:6px">
+              只接受一个经过校验的上游地址（主机名 / IP、1-65535 端口、可选的路径前缀）；不接受
+              userinfo、查询串、片段或任何 nginx 配置文本。清空输入并保存表示关闭代理，站点回到
+              默认的 <code class="mp-code">try_files $uri $uri/ =404</code>。
+            </div>
+          </el-form-item>
+          <el-form-item>
+            <el-checkbox v-model="proxyForm.websocket" :disabled="!proxyForm.target.trim()">
+              转发 WebSocket 升级头（Upgrade / Connection）
+            </el-checkbox>
+            <div class="mp-hint">
+              面板固定写入 <code class="mp-code">proxy_pass</code> 与 Host / X-Real-IP /
+              X-Forwarded-For / X-Forwarded-Proto 请求头；勾选后再追加两行升级头。保存仍走
+              <code class="mp-code">nginx -t</code> → reload，失败会恢复原来的 location /。
+              反向代理与伪静态模板互斥；PHP 绑定不受影响（.php 正则 location 优先于 location /）。
+            </div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="proxyOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy"
+            :disabled="!!proxyForm.target.trim() && !!rewriteLabel(proxyTarget)" @click="saveProxy">
+            {{ proxyForm.target.trim() ? "保存" : "清除代理" }}
+          </el-button>
         </template>
       </el-dialog>
 
@@ -565,7 +650,8 @@ onMounted(load);
         <code class="mp-code">php</code> 仍为 degraded。站点的域名、根目录、默认文档与伪静态模板可以
         随时编辑，域名变更受现有证书覆盖范围约束。伪静态模板由本地二进制提供
         （WordPress / Laravel / ThinkPHP / SPA），不接受自定义配置片段；需要 PHP 的模板只能用于
-        已绑定 PHP 的站点。新建站点的根目录是 0755 的空目录，
+        已绑定 PHP 的站点。反向代理同样只接受一个校验过的上游 URL（可选 WebSocket），
+        固定写入代理头，与伪静态模板互斥。新建站点的根目录是 0755 的空目录，
         放一个 <code class="mp-code">index.html</code>（或绑定 PHP 后放 index.php）就能访问。
       </div>
     </template>

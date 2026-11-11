@@ -198,7 +198,9 @@ paths:
         unix socket，php_socket_state 是这次读取时 socket 的真实状态（listening / idle /
         absent / not_socket / unknown），不是持久化的承诺。rewrite 是本地模板库里的规则 id
         （none / wordpress / laravel / thinkphp / spa）；none 或省略表示默认的
-        try_files $uri $uri/ =404。
+        try_files $uri $uri/ =404。proxy_target 非空表示站点把 location / 反向代理到该
+        上游 URL，proxy_websocket 表示同时转发 Upgrade 头；两者只在启用代理后出现，
+        且与 rewrite 模板互斥（同一个 location / 不能既代理又做伪静态）。
       responses:
         "200": { description: 返回 total 与 items }
         "403": { $ref: "#/components/responses/CSRF" }
@@ -397,6 +399,48 @@ paths:
       responses:
         "200": { description: 已生效，返回更新后的站点行 }
         "400": { description: 模板未知或站点未绑定 PHP（invalid_site） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx 拒绝，已回滚（nginx_rejected） }
+  /api/v1/sites/{name}/proxy:
+    put:
+      tags: [site]
+      summary: 设置或清除站点的反向代理（固定上游 URL，可选 WebSocket）
+      description: |
+        M2 第九片：请求体 {target, websocket}。target 是一个 http:// 或 https:// 上游
+        URL（可带端口与路径前缀），服务端用 url.Parse 解析后按 scheme/host/port/path
+        重新规范化，只接受主机名、IP 字面量与合法端口；拒绝 userinfo、查询串、片段、
+        控制字符以及 ; { } 引号 反斜杠 $ 反引号 等 nginx 元字符。代理指令块是固定
+        模板：proxy_pass 加上 Host / X-Real-IP / X-Forwarded-For / X-Forwarded-Proto
+        四个头；websocket=true 时再追加 Upgrade / Connection 两行，用于 WebSocket
+        升级。调用方不能提交任何 nginx 配置文本。
+        target 为空字符串表示清除代理，站点回到默认的 try_files $uri $uri/ =404；
+        这是始终允许的救援路径。websocket=true 搭配空 target 返回 400 invalid_site，
+        避免表单误操作把站点改成"只有升级头"的怪状态。
+        反向代理与伪静态模板互斥：两者都占用 location /。站点正在使用非 none 模板时
+        设置代理返回 400 invalid_site；站点已启用代理时设置非 none 模板同样被拒绝。
+        先把一边切回 none 或清空，再启用另一边。PHP 绑定不受影响：.php location 是
+        正则匹配，优先于代理的 location /，可以同时存在。
+        写入仍走"写配置 → nginx -t → 通过才 reload"；失败恢复上一份配置，响应 422
+        nginx_rejected。成功响应是更新后的站点行，含 proxy_target / proxy_websocket。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target]
+              properties:
+                target: { type: string, description: 上游 URL；空字符串表示清除代理 }
+                websocket: { type: boolean, description: 是否转发 WebSocket 升级头 }
+      responses:
+        "200": { description: 已生效，返回更新后的站点行 }
+        "400": { description: 上游 URL 不合法或与伪静态冲突（invalid_site） }
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { description: 面板没有管理这个站点 }
         "422": { description: nginx 拒绝，已回滚（nginx_rejected） }

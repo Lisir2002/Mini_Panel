@@ -89,6 +89,21 @@ func (s *Server) siteRewriteManager() (platform.SiteRewriteManager, string) {
 	return rm, ""
 }
 
+// siteProxyManager is the optional reverse-proxy interface. A provider without
+// it returns 403 capability with the reason below instead of pretending the
+// write endpoint exists.
+func (s *Server) siteProxyManager() (platform.SiteProxyManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	pm, ok := m.(platform.SiteProxyManager)
+	if !ok || pm == nil {
+		return nil, "该平台的站点 Provider 没有实现反向代理"
+	}
+	return pm, ""
+}
+
 // handleSitesList is GET /api/v1/sites. Only files the panel wrote itself are
 // listed; a hand-written vhost in the same directory is somebody else's
 // configuration and is not reported as a panel site.
@@ -253,6 +268,40 @@ func (s *Server) handleSiteRewrite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_rewrite", "更新伪静态失败："+err.Error())
+	}
+}
+
+// handleSiteProxy is PUT /api/v1/sites/{name}/proxy. The body is
+// {"target":"http://127.0.0.1:3000","websocket":false}; an empty target clears
+// the proxy and returns the site to its local static/PHP vhost. The provider
+// validates the URL and refuses to overwrite a rewrite template's location /,
+// then writes through test-before-reload.
+func (s *Server) handleSiteProxy(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteProxyManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Target    string `json:"target"`
+		WebSocket bool   `json:"websocket"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetProxy(chiParam(r, "name"), body.Target, body.WebSocket)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_proxy", "更新反向代理失败："+err.Error())
 	}
 }
 

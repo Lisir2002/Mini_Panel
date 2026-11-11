@@ -78,16 +78,22 @@
   不写任何东西、不装任何东西。`internal/platform` 依赖它，而不是反过来。
   第六片只加了一个纯函数 `internal/php/php.go:352 FPMVersions()`：从探测结果里筛出带 fpm 的
   版本，作为 `php_fpm_versions` 与页面选择器的唯一来源。站点版本绑定在平台层
-  （`internal/platform/platform_linux.go:215 resolvePHPBinding()`）先按现场探测确认版本确有
+  （`internal/platform/platform_linux.go:226 resolvePHPBinding()`）先按现场探测确认版本确有
   fpm，再把 socket 交给 `internal/nginx` 写进 vhost；**不创建 per-site pool**。
   第七片没有扩大 `SiteManager`，而是新增可选的
-  `internal/platform/sites.go:87 SiteSettingsManager`（`SetBasics`），由
+  `internal/platform/sites.go:97 SiteSettingsManager`（`SetBasics`），由
   `internal/platform/platform_linux.go:178` 接线到 nginx 的 `SetBasics`。这样旧 Provider 不必
   实现一个它做不到的写入口，页面也能从缺失的接口得出"本机不能编辑站点"，而不是画一个点了
-  没反应的按钮。第八片同样走可选接口：`internal/platform/sites.go:110 SiteRewriteManager`
+  没反应的按钮。第八片同样走可选接口：`internal/platform/sites.go:115 SiteRewriteManager`
   （`SetRewrite` / `RewritePresets`），由 `internal/platform/platform_linux.go:189` / `:200`
   接线；模板集本身在 `internal/nginx/rewrite.go:54 RewritePresets()`，是编译进二进制的封闭
-  词汇表，列表也由后端返回，页面不硬编码，因而不会与白名单漂移。
+  词汇表，列表也由后端返回，页面不硬编码，因而不会与白名单漂移。第九片沿用同一模式：
+  `internal/platform/sites.go:120 SiteProxyManager`（`SetProxy`），由
+  `internal/platform/platform_linux.go:214` 接线到 `internal/nginx/proxy.go:145 SetProxy()`；
+  反向代理的输入是一个经 `normalizeProxy`（`internal/nginx/proxy.go:36`）校验并规范化的 URL
+  与一个 WebSocket 布尔值，指令由 `proxyLocationBody`（`internal/nginx/proxy.go:125`）
+  固定生成；Provider 不实现该接口时端点返回 403 `capability` 并带上同一句理由，不假装
+  写入路径存在。
 * `internal/acme` 是 M2 第五片新增的包：它只负责一件事——用 `golang.org/x/crypto/acme`
   走完 RFC 8555 的 HTTP-01 签发（`internal/acme/acme.go:125 Issue()`），并把 token 写进
   调用方给的 webroot。它不知道 nginx、不知道站点、不碰面板配置；证书装进 vhost 由
@@ -146,7 +152,7 @@
   `site` / `ssl` 仍是 `unavailable`，在只实现了手工证书的构建里 `ssl` 也到不了 `available`。
 * 理由文案有下限："未实现"不算理由，必须写清**随哪个里程碑/Provider 交付**。
   同一种关闭状态在不同机器上要说不同的话：Linux 上"没装 ufw/firewalld/nft"与"装了但写入
-  Provider 还没上"是两句不同理由（`platform_linux.go:468-474`），运维必须能分清是机器的问题
+  Provider 还没上"是两句不同理由（`platform_linux.go:500-506`），运维必须能分清是机器的问题
   还是面板版本的问题。
 
 ### 2.3 Windows 的差异（不是"以后再说"，是现在就写进位图）
@@ -284,12 +290,12 @@
    `/healthz` 永远可达。**持有合法 `mp_session` 后任何路径都可访问**——这是有意的：SPA 的导航、
    刷新与深链必须落在原路径上，把它们全部改写到一个魔法路径会拿可用的界面换一个勾。
    因此**入口不能缓解 XSS，也不能缓解 Cookie 泄露**，任何"安全入口保护登录后的面板"的表述都是
-   错的；`entranceGate` 的注释（`internal/api/server.go:191-209`）已经把这段结论写死，
+   错的；`entranceGate` 的注释（`internal/api/server.go:192-210`）已经把这段结论写死，
    文档与 README 必须原样表达这条边界。**"登录后逐路径校验入口"是 M1 待办**（见
    `docs/里程碑.md`），在它实现之前不得写成现状。真正的访问控制 = 监听地址 + 会话令牌与有效期
    + `panel.ip_allowlist` + CSRF + 登录锁定。
    伪装响应的**形态**也是一条决定：中性 HTML 错误页，只含状态码文本，不含产品名与版本
-   （`internal/api/server.go:284 disguise()` 的注释）。不用 Go 默认 `http.Error` 的
+   （`internal/api/server.go:285 disguise()` 的注释）。不用 Go 默认 `http.Error` 的
    `text/plain`，因为"404 Not Found"那 10 个字节本身就是运行环境指纹，而这条响应的目的正是
    让探测者学不到东西；也不冒充 nginx 的错误页——这个进程就是 web server，一张普通 404 是
    事实，冒充别人的错误页在事故响应时误导运维的程度不亚于误导扫描器。页面里内联

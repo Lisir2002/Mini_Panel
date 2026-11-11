@@ -184,6 +184,11 @@ type Site struct {
 	// the site uses the default try_files). It is a closed vocabulary, never a
 	// config fragment supplied by a request.
 	Rewrite string `json:"rewrite,omitempty"`
+	// ProxyTarget is the validated upstream URL when the site is a reverse
+	// proxy. It is empty for ordinary sites. Rewrite and proxy are mutually
+	// exclusive because both own `location /`.
+	ProxyTarget    string `json:"proxy_target,omitempty"`
+	ProxyWebSocket bool   `json:"proxy_websocket,omitempty"`
 	// PHPVersion and PHPSocket name the fpm backend this site's .php location
 	// points at. The socket is supplied by the platform layer, which derives it
 	// from a discovered installation; it is never taken from an HTTP request.
@@ -204,15 +209,17 @@ type Spec struct {
 }
 
 type markerPayload struct {
-	Name       string     `json:"name"`
-	Domains    []string   `json:"domains"`
-	Root       string     `json:"root"`
-	CreatedAt  string     `json:"created_at"`
-	Index      []string   `json:"index,omitempty"`
-	Rewrite    string     `json:"rewrite,omitempty"`
-	TLS        *markerTLS `json:"tls,omitempty"`
-	PHPVersion string     `json:"php_version,omitempty"`
-	PHPSocket  string     `json:"php_socket,omitempty"`
+	Name           string     `json:"name"`
+	Domains        []string   `json:"domains"`
+	Root           string     `json:"root"`
+	CreatedAt      string     `json:"created_at"`
+	Index          []string   `json:"index,omitempty"`
+	Rewrite        string     `json:"rewrite,omitempty"`
+	ProxyTarget    string     `json:"proxy_target,omitempty"`
+	ProxyWebSocket bool       `json:"proxy_websocket,omitempty"`
+	TLS            *markerTLS `json:"tls,omitempty"`
+	PHPVersion     string     `json:"php_version,omitempty"`
+	PHPSocket      string     `json:"php_socket,omitempty"`
 }
 
 var (
@@ -390,7 +397,8 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 	s := Site{
 		Name: payload.Name, Domains: payload.Domains, Root: payload.Root,
 		ConfigPath: p, CreatedAt: payload.CreatedAt, Index: payload.Index,
-		Rewrite: payload.Rewrite, PHPVersion: payload.PHPVersion, PHPSocket: payload.PHPSocket,
+		Rewrite: payload.Rewrite, ProxyTarget: payload.ProxyTarget, ProxyWebSocket: payload.ProxyWebSocket,
+		PHPVersion: payload.PHPVersion, PHPSocket: payload.PHPSocket,
 	}
 	s.TLS = m.tlsFromMarker(payload)
 	if lp := m.Layout.LinkPath(payload.Name); lp != "" {
@@ -419,6 +427,14 @@ func parseMarker(body string) (markerPayload, bool) {
 			return markerPayload{}, false
 		}
 		if validateRewrite(p.Rewrite, p.PHPVersion != "") != nil {
+			return markerPayload{}, false
+		}
+		target, ws, err := normalizeProxy(p.ProxyTarget, p.ProxyWebSocket)
+		if err != nil {
+			return markerPayload{}, false
+		}
+		p.ProxyTarget, p.ProxyWebSocket = target, ws
+		if target != "" && normalizeRewrite(p.Rewrite) != "none" {
 			return markerPayload{}, false
 		}
 		return p, p.Name != "" && len(p.Domains) > 0 && p.Root != ""
@@ -746,10 +762,12 @@ func (m *Manager) Delete(name string) (Site, error) {
 func render(s Site) string {
 	payload, _ := json.Marshal(markerPayload{
 		Name: s.Name, Domains: s.Domains, Root: s.Root, CreatedAt: s.CreatedAt,
-		Index:      s.Index,
-		Rewrite:    s.Rewrite,
-		TLS:        markerFromTLS(s.Name, s.TLS),
-		PHPVersion: s.PHPVersion, PHPSocket: s.PHPSocket,
+		Index:          s.Index,
+		Rewrite:        s.Rewrite,
+		ProxyTarget:    s.ProxyTarget,
+		ProxyWebSocket: s.ProxyWebSocket,
+		TLS:            markerFromTLS(s.Name, s.TLS),
+		PHPVersion:     s.PHPVersion, PHPSocket: s.PHPSocket,
 	})
 	var b strings.Builder
 	b.WriteString(headerLine + "\n")
