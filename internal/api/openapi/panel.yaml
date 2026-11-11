@@ -188,8 +188,9 @@ paths:
         root / 检测到 Apache 而写 Provider 目前只有 nginx），不在这里另写一套说法。
         每行是 {name, domains, root, config_path, enabled, created_at, tls?}；enabled 在
         sites-enabled 布局里等价于软链接存在，conf.d 布局里恒为 true。tls 只在启用
-        HTTPS 后出现，字段为 {enabled, redirect, self_signed, cert_path?, key_path?,
-        not_after?, error?}；ssl 能力位仍是 degraded，ACME 续期尚未交付。
+        HTTPS 后出现，字段为 {enabled, redirect, self_signed, acme, cert_path?,
+        key_path?, not_after?, error?}；acme=true 的证书由面板自动续期，手工上传与
+        自签证书不会以这种方式出现。
       responses:
         "200": { description: 返回 total 与 items }
         "403": { $ref: "#/components/responses/CSRF" }
@@ -262,9 +263,9 @@ paths:
         "先测试后生效"写 vhost：nginx -t 通过才 reload；任一步失败都会恢复改动前的
         配置、证书与私钥，响应 422 nginx_rejected 时 nginx 仍在服务上一份配置。
         redirect=true 时同时写 80→443 的 301 跳转，否则保留 80 明文监听。
-        能力位 ssl 目前是 degraded：手工证书与自签可用，ACME 自动签发与续期尚未
-        交付，证书到期需要人工更换。ssl 为 unavailable 时本端点返回 403
-        capability，message 直接取位图里的 reason。
+        证书来源有三条：自签、上传、以及单独的 POST .../acme 自动签发；本端点不接受
+        ACME 模式，因为它可能等待数分钟，与快速本地写入的失败语义不同。ssl 为
+        unavailable 时本端点返回 403 capability，message 直接取位图里的 reason。
       parameters:
         - name: name
           in: path
@@ -304,6 +305,42 @@ paths:
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { description: 面板没有管理这个站点 }
         "422": { description: nginx 拒绝，已回滚 }
+  /api/v1/sites/{name}/acme:
+    post:
+      tags: [site]
+      summary: 通过 ACME HTTP-01 自动签发证书
+      description: |
+        M2 第五片：ACME 自动签发与续期。请求体 {redirect?}。面板为站点全部域名创建
+        RFC 8555 订单，把 CA 给出的 HTTP-01 token 写入站点根目录的
+        .well-known/acme-challenge/，等待授权通过后提交 CSR、下载证书链与私钥，最后按
+        与上传证书相同的校验与"先测试后生效"流程安装。
+        强制 HTTPS 的站点，其 80 端口配置会保留一个仅允许
+        /.well-known/acme-challenge/ 的 location；没有这个例外，首签成功后当天有效的
+        证书在续期时就再也无法通过 HTTP-01。续期由面板后台每 12 小时检查一次，到期前
+        30 天自动重签；手工上传与自签证书不会被自动替换。
+        通配符域名需要 DNS-01，本版本拒绝并返回 422 acme_unsupported，请改用上传证书。
+        CA 目录默认 Let's Encrypt；MINI_PANEL_ACME_DIRECTORY 可指向私有目录，
+        MINI_PANEL_ACME_CA_FILE 可附加信任一个 CA 证书（测试或私有 CA）。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                redirect: { type: boolean, description: 是否把 HTTP 301 到 HTTPS }
+      responses:
+        "200": { description: 签发并生效，返回含 tls.acme=true 的站点行 }
+        "400": { description: 请求体不是合法 JSON（bad_request） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: 通配符/挑战或 CA 失败（acme_unsupported / acme_failed），或 nginx 拒绝且已回滚（nginx_rejected） }
+        "500": { description: 账户密钥或证书目录等本地故障（site_tls） }
   /api/v1/lockout-risks:
     get:
       tags: [panel]

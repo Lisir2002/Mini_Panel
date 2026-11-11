@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -24,10 +25,12 @@ type fakeSites struct {
 	createErr   error
 	deleteErr   error
 	tlsErr      error
+	acmeErr     error
 	created     int
 	deleted     int
 	tlsSets     int
 	tlsClears   int
+	acmeCalls   int
 	lastCertLen int
 }
 
@@ -113,6 +116,27 @@ func (f *fakeSites) SetCertificate(name, certPEM, keyPEM string, redirect bool) 
 	return s, nil
 }
 
+func (f *fakeSites) ObtainACME(_ context.Context, name string, redirect bool) (platform.SiteInfo, error) {
+	if f.acmeErr != nil {
+		return platform.SiteInfo{}, f.acmeErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	s.TLS = &platform.SiteTLSInfo{
+		Enabled: true, Redirect: redirect, ACME: true,
+		NotAfter: "2027-01-11T00:00:00Z",
+	}
+	f.sites[name] = s
+	f.acmeCalls++
+	return s, nil
+}
+
+func (f *fakeSites) RenewDueACME(context.Context) []platform.ACMEAttempt {
+	return nil
+}
+
 func (f *fakeSites) ClearCertificate(name string) (platform.SiteInfo, error) {
 	if f.tlsErr != nil {
 		return platform.SiteInfo{}, f.tlsErr
@@ -160,8 +184,8 @@ func siteCaps(ready bool, reason string) *platform.Capabilities {
 			reason = "本机未检测到 nginx / openresty，站点创建需要一份可写的 nginx 配置目录"
 		}
 	}
-	sslState := platform.StateDegraded
-	sslReason := "站点 HTTPS 已支持上传证书与自签证书；ACME 自动签发与续期尚未交付，证书不会自动续期"
+	sslState := platform.StateAvailable
+	sslReason := ""
 	if !ready {
 		sslState = platform.StateUnavailable
 		sslReason = "站点证书需要可写的站点 Provider"
@@ -176,7 +200,7 @@ func siteCaps(ready bool, reason string) *platform.Capabilities {
 			"site_write": {State: st, Reason: reason},
 			platform.FeatSSL: {
 				State: sslState, Reason: sslReason,
-				FixAction: "在「网站」页为站点生成自签证书或上传证书链与私钥",
+				FixAction: "在「网站」页为站点生成自签证书、上传证书链与私钥，或使用 ACME 自动签发",
 				Verify:    "GET /api/v1/sites 的 tls.not_after",
 			},
 		},

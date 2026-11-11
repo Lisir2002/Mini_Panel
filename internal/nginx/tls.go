@@ -30,6 +30,7 @@ type TLSInfo struct {
 	Enabled    bool   `json:"enabled"`
 	Redirect   bool   `json:"redirect"`
 	SelfSigned bool   `json:"self_signed"`
+	ACME       bool   `json:"acme"`
 	CertPath   string `json:"cert_path,omitempty"`
 	KeyPath    string `json:"key_path,omitempty"`
 	NotAfter   string `json:"not_after,omitempty"`
@@ -44,6 +45,7 @@ type markerTLS struct {
 	Enabled    bool   `json:"enabled"`
 	Redirect   bool   `json:"redirect,omitempty"`
 	SelfSigned bool   `json:"self_signed,omitempty"`
+	ACME       bool   `json:"acme,omitempty"`
 	Cert       string `json:"cert,omitempty"`
 	Key        string `json:"key,omitempty"`
 }
@@ -53,7 +55,7 @@ func markerFromTLS(name string, t *TLSInfo) *markerTLS {
 		return nil
 	}
 	return &markerTLS{
-		Enabled: true, Redirect: t.Redirect, SelfSigned: t.SelfSigned,
+		Enabled: true, Redirect: t.Redirect, SelfSigned: t.SelfSigned, ACME: t.ACME,
 		Cert: t.CertPath, Key: t.KeyPath,
 	}
 }
@@ -72,7 +74,7 @@ func (m *Manager) tlsFromMarker(p markerPayload) *TLSInfo {
 	}
 	certPath, keyPath := m.certPaths(p.Name)
 	t := &TLSInfo{
-		Enabled: true, Redirect: p.TLS.Redirect, SelfSigned: p.TLS.SelfSigned,
+		Enabled: true, Redirect: p.TLS.Redirect, SelfSigned: p.TLS.SelfSigned, ACME: p.TLS.ACME,
 		CertPath: certPath, KeyPath: keyPath,
 	}
 	leaf, err := readLeaf(certPath)
@@ -112,7 +114,7 @@ func (m *Manager) SetSelfSigned(name string, redirect bool) (Site, error) {
 	if err != nil {
 		return Site{}, fmt.Errorf("生成自签证书: %w", err)
 	}
-	return m.setTLS(site, certPEM, keyPEM, redirect, true)
+	return m.setTLS(site, certPEM, keyPEM, redirect, true, false)
 }
 
 // SetCertificate applies an operator-supplied certificate chain and key. The
@@ -132,7 +134,27 @@ func (m *Manager) SetCertificate(name, certPEM, keyPEM string, redirect bool) (S
 	if certPEM == "" || keyPEM == "" {
 		return Site{}, fmt.Errorf("%w：证书与私钥都不能为空", ErrTLSInvalid)
 	}
-	return m.setTLS(site, []byte(certPEM+"\n"), []byte(keyPEM+"\n"), redirect, false)
+	return m.setTLS(site, []byte(certPEM+"\n"), []byte(keyPEM+"\n"), redirect, false, false)
+}
+
+// SetACMECertificate installs a certificate obtained by the ACME issuer. It uses
+// the same validation, test, reload and rollback path as an uploaded
+// certificate; only the marker's source bit differs, which is what lets the
+// renewal loop find certificates it is allowed to replace automatically.
+func (m *Manager) SetACMECertificate(name, certPEM, keyPEM string, redirect bool) (Site, error) {
+	if err := ValidateName(name); err != nil {
+		return Site{}, err
+	}
+	site, ok := m.readSite(FileName(name))
+	if !ok {
+		return Site{}, ErrNotFound
+	}
+	certPEM = strings.TrimSpace(certPEM)
+	keyPEM = strings.TrimSpace(keyPEM)
+	if certPEM == "" || keyPEM == "" {
+		return Site{}, fmt.Errorf("%w：CA 返回的证书与私钥不能为空", ErrTLSInvalid)
+	}
+	return m.setTLS(site, []byte(certPEM+"\n"), []byte(keyPEM+"\n"), redirect, false, true)
 }
 
 // ClearCertificate returns the site to plain HTTP. The certificate files are
@@ -170,7 +192,7 @@ func (m *Manager) ClearCertificate(name string) (Site, error) {
 	return site, nil
 }
 
-func (m *Manager) setTLS(site Site, certPEM, keyPEM []byte, redirect, selfSigned bool) (Site, error) {
+func (m *Manager) setTLS(site Site, certPEM, keyPEM []byte, redirect, selfSigned, acmeIssued bool) (Site, error) {
 	leaf, err := validateCertificate(certPEM, keyPEM, site.Domains, m.now())
 	if err != nil {
 		return Site{}, err
@@ -195,7 +217,7 @@ func (m *Manager) setTLS(site Site, certPEM, keyPEM []byte, redirect, selfSigned
 	}
 
 	site.TLS = &TLSInfo{
-		Enabled: true, Redirect: redirect, SelfSigned: selfSigned,
+		Enabled: true, Redirect: redirect, SelfSigned: selfSigned, ACME: acmeIssued,
 		CertPath: certPath, KeyPath: keyPath,
 		NotAfter: leaf.NotAfter.UTC().Format(time.RFC3339),
 	}
@@ -347,14 +369,26 @@ func generateSelfSigned(domains []string, now time.Time) (certPEM, keyPEM []byte
 
 // renderRedirect is the port-80 block used when "force HTTPS" is on. It carries
 // no marker: the marker lives in the 443 block, and readSite scans the whole
-// file for it. The redirect block has no document root on purpose — its only
-// job is to send the request to the TLS listener.
+// file for it.
+//
+// The ACME challenge location is deliberately before the catch-all redirect.
+// A certificate that is renewed every 60 days needs port 80 to answer HTTP-01
+// for a few seconds each time; redirecting that path would make the first
+// successful issuance unrenewable, which is the kind of "HTTPS is on" state that
+// quietly expires ninety days later.
 func renderRedirect(s Site) string {
 	var b strings.Builder
 	b.WriteString("server {\n")
 	b.WriteString("    listen 80;\n")
 	b.WriteString("    server_name " + strings.Join(s.Domains, " ") + ";\n\n")
-	b.WriteString("    return 301 https://$host$request_uri;\n")
+	b.WriteString("    root " + s.Root + ";\n\n")
+	b.WriteString("    location ^~ /.well-known/acme-challenge/ {\n")
+	b.WriteString("        default_type text/plain;\n")
+	b.WriteString("        try_files $uri =404;\n")
+	b.WriteString("    }\n\n")
+	b.WriteString("    location / {\n")
+	b.WriteString("        return 301 https://$host$request_uri;\n")
+	b.WriteString("    }\n")
 	b.WriteString("}\n")
 	return b.String()
 }
@@ -384,4 +418,54 @@ func renderServer(s Site, tlsOn bool) string {
 	b.WriteString("    }\n")
 	b.WriteString("}\n")
 	return b.String()
+}
+
+// Get returns one panel-owned site. The ACME layer needs the domains and the
+// document root before it can write a challenge; duplicating marker parsing
+// there would be a second reader of the same file format.
+func (m *Manager) Get(name string) (Site, error) {
+	if err := ValidateName(name); err != nil {
+		return Site{}, err
+	}
+	site, ok := m.readSite(FileName(name))
+	if !ok {
+		return Site{}, ErrNotFound
+	}
+	return site, nil
+}
+
+// PrepareACME makes sure a site that redirects port 80 to 443 currently has the
+// challenge exemption in its port-80 block. Configs written by the previous
+// slice did not have it, and a certificate obtained before that change would
+// otherwise be impossible to renew. The rewrite goes through the same
+// test-before-reload protocol as every other config change.
+func (m *Manager) PrepareACME(name string) (Site, error) {
+	site, err := m.Get(name)
+	if err != nil {
+		return Site{}, err
+	}
+	if site.TLS == nil || !site.TLS.Redirect {
+		return site, nil
+	}
+	want := render(site)
+	prev, err := os.ReadFile(site.ConfigPath)
+	if err != nil {
+		return Site{}, fmt.Errorf("读取站点配置: %w", err)
+	}
+	if string(prev) == want {
+		return site, nil
+	}
+	if err := m.writeConfig(site.ConfigPath, want); err != nil {
+		return Site{}, fmt.Errorf("写入站点配置: %w", err)
+	}
+	restore := func() { _ = m.writeConfig(site.ConfigPath, string(prev)) }
+	if out, err := m.TestConfig(); err != nil {
+		restore()
+		return Site{}, fmt.Errorf("%w：%v", ErrConfigRejected, strings.TrimSpace(string(out)))
+	}
+	if out, err := m.Reload(); err != nil {
+		restore()
+		return Site{}, fmt.Errorf("%w：reload 失败：%v", ErrConfigRejected, strings.TrimSpace(string(out)))
+	}
+	return site, nil
 }

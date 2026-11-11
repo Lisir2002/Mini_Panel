@@ -273,3 +273,91 @@ func testCert(t *testing.T, domains []string, notBefore, notAfter time.Time) (ce
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 }
+
+func TestSetACMECertificateMarksSourceAndServesChallenges(t *testing.T) {
+	m, rec := newTestManager(t)
+	if _, err := m.Create(Spec{Name: "blog", Domains: []string{"blog.example.com"}}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	now := m.Now()
+	certPEM, keyPEM := testCert(t, []string{"blog.example.com"}, now.Add(-time.Hour), now.Add(90*24*time.Hour))
+	rec.cmds = nil
+	site, err := m.SetACMECertificate("blog", string(certPEM), string(keyPEM), true)
+	if err != nil {
+		t.Fatalf("SetACMECertificate: %v", err)
+	}
+	if site.TLS == nil || !site.TLS.ACME || site.TLS.SelfSigned {
+		t.Fatalf("ACME TLS row = %+v", site.TLS)
+	}
+	if want := []string{"nginx -t", "nginx -s reload"}; strings.Join(rec.cmds, "|") != strings.Join(want, "|") {
+		t.Errorf("commands = %v, want %v", rec.cmds, want)
+	}
+	body, _ := os.ReadFile(m.Layout.ConfigPath("blog"))
+	for _, want := range []string{
+		"root " + site.Root + ";",
+		"location ^~ /.well-known/acme-challenge/ {",
+		"try_files $uri =404;",
+		"return 301 https://$host$request_uri;",
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("redirect block missing %q\n%s", want, body)
+		}
+	}
+	// The server-level redirect would swallow the challenge path. It must be
+	// inside location /, not immediately after server_name.
+	if strings.Contains(string(body), "server_name blog.example.com;\n\n    return 301") {
+		t.Errorf("challenge path is still swallowed by a server-level redirect\n%s", body)
+	}
+	list, _ := m.List()
+	if len(list) != 1 || list[0].TLS == nil || !list[0].TLS.ACME {
+		t.Errorf("ACME source did not survive marker round-trip: %+v", list)
+	}
+}
+
+func TestPrepareACMEUpgradesOldRedirectConfig(t *testing.T) {
+	m, rec := newTestManager(t)
+	if _, err := m.Create(Spec{Name: "blog", Domains: []string{"blog.example.com"}}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := m.SetSelfSigned("blog", true); err != nil {
+		t.Fatalf("SetSelfSigned: %v", err)
+	}
+	path := m.Layout.ConfigPath("blog")
+	body, _ := os.ReadFile(path)
+	old := strings.Replace(string(body),
+		`    root `+m.SiteRoot+`/blog;
+
+    location ^~ /.well-known/acme-challenge/ {
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }`,
+		"    return 301 https://$host$request_uri;", 1)
+	if old == string(body) {
+		t.Fatalf("test did not find the redirect block to downgrade\n%s", body)
+	}
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec.cmds = nil
+	if _, err := m.PrepareACME("blog"); err != nil {
+		t.Fatalf("PrepareACME: %v", err)
+	}
+	if want := []string{"nginx -t", "nginx -s reload"}; strings.Join(rec.cmds, "|") != strings.Join(want, "|") {
+		t.Errorf("upgrade commands = %v, want %v", rec.cmds, want)
+	}
+	got, _ := os.ReadFile(path)
+	if !strings.Contains(string(got), "location ^~ /.well-known/acme-challenge/") {
+		t.Errorf("challenge location not restored\n%s", got)
+	}
+	rec.cmds = nil
+	if _, err := m.PrepareACME("blog"); err != nil {
+		t.Fatalf("second PrepareACME: %v", err)
+	}
+	if len(rec.cmds) != 0 {
+		t.Errorf("up-to-date config was rewritten: %v", rec.cmds)
+	}
+}

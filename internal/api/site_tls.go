@@ -8,13 +8,12 @@ import (
 	"github.com/Lisir2002/Mini_Panel/internal/platform"
 )
 
-// Site HTTPS is the fourth slice of M2: an operator can generate a self-signed
-// certificate or upload a chain+key, and nginx is only reloaded after the same
-// test-before-take-effect protocol as site creation. ACME is still not here, so
-// the bitmap reports ssl as degraded and this handler refuses only when the
-// state is unavailable or foreign. A handler that gated on Has() would hide the
-// half that does work; a handler that ignored the bitmap would advertise the
-// half that does not.
+// Site HTTPS has three sources: manual upload, self-signed, and ACME HTTP-01.
+// The manual endpoints in this file stay local and fast; ACME lives on its own
+// route because it waits for a CA. All of them install through the same nginx
+// provider, so test-before-reload and rollback are not reimplemented per source.
+// The handlers accept the bitmap's degraded state as well as available, because
+// the manual half is genuinely usable on a provider without ACME.
 
 func (s *Server) siteTLSManager() (platform.SiteTLSManager, string) {
 	m, why := s.siteManager()
@@ -77,6 +76,52 @@ func (s *Server) handleSiteTLSSet(w http.ResponseWriter, r *http.Request) {
 	s.writeSiteTLSResult(w, site, err)
 }
 
+// siteACMEManager has the same ssl gate as the manual endpoints, plus the ACME
+// interface assertion. A provider that only knows how to install uploaded
+// certificates must not receive an issuance request; the bitmap stays degraded
+// there and this method explains the missing half rather than panicking on a
+// nil type assertion.
+func (s *Server) siteACMEManager() (platform.SiteACMEManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	if s.Caps == nil {
+		return nil, "面板未绑定能力位图，ACME 签发不可用"
+	}
+	switch s.Caps.State(platform.FeatSSL) {
+	case platform.StateAvailable, platform.StateDegraded:
+	default:
+		return nil, s.Caps.Reason(platform.FeatSSL)
+	}
+	am, ok := m.(platform.SiteACMEManager)
+	if !ok || am == nil {
+		return nil, "该平台的站点证书 Provider 没有实现 ACME 自动签发"
+	}
+	return am, ""
+}
+
+// handleSiteACME is POST /api/v1/sites/{name}/acme. It is a separate endpoint
+// from the TLS upload because it can spend minutes talking to the CA and
+// satisfying challenges; mixing that into the quick local upload call would make
+// every client timeout serve both operations badly.
+func (s *Server) handleSiteACME(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteACMEManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Redirect bool `json:"redirect"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.ObtainACME(r.Context(), chiParam(r, "name"), body.Redirect)
+	s.writeSiteTLSResult(w, site, err)
+}
+
 // handleSiteTLSClear is DELETE /api/v1/sites/{name}/tls: back to plain HTTP.
 // The certificate files are removed by the provider only after nginx accepted
 // the HTTP-only config.
@@ -102,6 +147,12 @@ func (s *Server) writeSiteTLSResult(w http.ResponseWriter, site platform.SiteInf
 		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
 	case errors.Is(err, platform.ErrSiteRefused):
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	case errors.Is(err, platform.ErrACMEUnsupported):
+		writeErr(w, http.StatusUnprocessableEntity, "acme_unsupported", err.Error())
+	case errors.Is(err, platform.ErrACMEFailed):
+		// The request was valid and the challenge interval has already been
+		// waited out; the failure is a DNS/port/CA fact the operator must see.
+		writeErr(w, http.StatusUnprocessableEntity, "acme_failed", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_tls", "站点证书操作失败："+err.Error())
 	}

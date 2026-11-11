@@ -30,7 +30,7 @@
 | --- | --- | --- | --- |
 | `github.com/go-chi/chi/v5` | v5.5.0 | `internal/api` 的路由与中间件 | MIT |
 | `github.com/shirou/gopsutil/v4` | v4.26.10 | `/api/v1/system/info` 的 cpu/mem/load/host | BSD-3 |
-| `golang.org/x/crypto` | v0.58.0 | `internal/sec` 的 bcrypt 与 HMAC-SHA1 | BSD-3 |
+| `golang.org/x/crypto` | v0.58.0 | `internal/sec` 的 bcrypt / HMAC-SHA1，以及 `internal/acme` 的 RFC 8555 客户端（`acme` 子包） | BSD-3 |
 | `golang.org/x/sys` | v0.50.0 | `internal/platform/platform_windows.go:10-11`（只在 `//go:build windows` 里） | BSD-3 |
 | `golang.org/x/term` | v0.48.0 | `cmd/minipanel/main.go:41`，仅为 `passwd` 的隐藏输入 | BSD-3 |
 | `modernc.org/sqlite` | v1.62.0 | `internal/store/store.go` 的 SQLite 驱动（纯 Go，无 cgo） | BSD-3 |
@@ -47,7 +47,9 @@
   toolchain 自己也算进去，所以它不适合当"第三方数量"来引用）。
 
 **不做的事**：不嵌 Python/php venv，不依赖系统 nginx 提供 UI，不引入 ORM/迁移框架（schema 版本化
-自己实现，见 `internal/store/store.go:68-89`），不引入第三方 2FA / ACME / 遥测 SDK。
+自己实现，见 `internal/store/store.go:68-89`），不引入第三方 2FA / 遥测 SDK。ACME 用
+`golang.org/x/crypto/acme`（RFC 8555 客户端，已在本仓库的 `x/crypto` 直接依赖里），
+不额外引入 ACME SDK；DNS-01 与 EAB 没做，见 `docs/功能设计.md` §5.4。
 
 ---
 
@@ -63,7 +65,7 @@
   `ConfigDir()`、`DataDir()`、`LogDir()`、`SiteRoot()`、`BackupRoot()`。
   M2/M3/M4 的写操作接口（`WebServerCtl`、`FirewallCtl`、`PHPCtl`、`ServiceManager`）**现在就声明**，
   这样到里程碑时不需要重新塑形核心层。M2 第一片之后它们的现状不再相同：`PHPCtl` 在 Linux 上
-  **已经是实现**（`internal/platform/platform_linux.go:25` 的 `var _ PHPCtl = linuxPlatform{}`，
+  **已经是实现**（`internal/platform/platform_linux.go:30` 的 `var _ PHPCtl = linuxPlatform{}`，
   方法体在 `:63`、`:68`、`:70`，底下是 `internal/php` 的现场探测），
   `WebServerCtl`、`FirewallCtl`、`ServiceManager` 仍然只有类型定义、没有实现、没有路由。
   "有没有实现"这件事由编译器管：那句 `var _ PHPCtl = linuxPlatform{}` 一改签名就编不过。
@@ -74,6 +76,12 @@
 * `internal/php` 是 M2 新增的一个小包：它只做一件事——把"这台机器上有哪些能跑的 PHP 版本、
   每个版本的 SAPI/pool/socket 路径在哪"从文件系统证据里读出来（`internal/php/php.go:119 DiscoverIn()`），
   不写任何东西、不装任何东西。`internal/platform` 依赖它，而不是反过来。
+* `internal/acme` 是 M2 第五片新增的包：它只负责一件事——用 `golang.org/x/crypto/acme`
+  走完 RFC 8555 的 HTTP-01 签发（`internal/acme/acme.go:125 Issue()`），并把 token 写进
+  调用方给的 webroot。它不知道 nginx、不知道站点、不碰面板配置；证书装进 vhost 由
+  `internal/nginx` 的 `SetACMECertificate` 完成，平台层只做接线。账号密钥路径由调用方给，
+  默认在 `/etc/minipanel/acme/account.key`（0600、父目录 0700）。
+  `/proc`、`/etc/nginx`、SQLite 都不在这个包里出现——这是它能被 Pebble 单独集成测试的原因。
 * 平台差异通过 **构建标签**分文件选择，而不是运行期判断：
   `platform_linux.go`（`//go:build linux`）、`platform_windows.go`（`//go:build windows`）、
   `platform_other.go`（`//go:build !linux && !windows`）。
@@ -93,11 +101,14 @@
 * `newBase()`（`internal/platform/detect.go:18-76`）先把每一项功能置为 `unavailable` 并填好具体理由，
   平台实现再对它**当场验证过的**部分调用 `Allow()`，或调用 `Degrade()` 说清"主路径能做、缺的是哪一半"。
   默认拒绝，而不是默认允许。
-  **实际状态**：`Allow()` 全仓库只被调用一次（`internal/platform/detect.go:74`），
-  生产代码里的 `Degrade()` 只有 M2 的 PHP 探测那两处
-  （`internal/platform/platform_linux.go:356`、`:318`），
-  `features` 里唯一的 `available` 仍然是 `audit`。探测到的**事实**（有 ufw、有 sshd、
-  有 nginx、有 PHP 8.3）只写进 `Capabilities` 的描述字段，不写成"功能可用"。
+  **实际状态**：`Allow()` 在生产代码里有五处——`internal/platform/detect.go:74` 点亮任何主机都成立的
+  `audit`，`internal/platform/platform_linux.go:382` / `:383` / `:389` 在"nginx 可识别、进程是 root、
+  `SiteACMEManager` 可用"时点亮 `site` / `site_write` / `ssl`。生产代码里的 `Degrade()` 有四处：
+  `platform_linux.go:379` / `:380`（nginx 在但不是 root）与 `:467` / `:470`（PHP 有运行时但缺后端 /
+  缺绑站写入路径）。因此 `available` 不是只有 `audit`：`site`、`site_write`、`ssl` 会在条件成立的
+  主机上进入这一档；`php`、`database`、`firewall` 等仍停在 `degraded` / `unavailable`。
+  探测到的其它**事实**（有 ufw、有 sshd、有 PHP 8.3）只写进 `Capabilities` 的描述字段，
+  不写成"功能可用"。
 * `Deny()` / `Degrade()` / `Allow()` 三个入口都走同一个 `set()`：`Allow` 会清掉旧理由与
   fix/verify，`Deny` 与 `Degrade` 对未知 feature 名不 panic
   （`internal/platform/capabilities.go:202 Deny()` / `:208 Degrade()` / `:220 Allow()`）。
@@ -109,12 +120,16 @@
   `TestDetectPHPFromRootedHosts` 与 M2 第二片的 `TestPHPCtlPathsAreTargetsAndStatesAreReads`
   （都在 `internal/platform/platform_php_test.go`，后者钉的是"`PHPCtl` 给的目标不随目录增删而变，
   变的是另一次读"）。入口是 `make check-honesty`。
-* 第一条测试里除了"关了必须有理由"，还有一条**白名单**：
-  `internal/platform/capabilities_test.go:179 implemented := map[string]bool{FeatAudit: true}`，随后双向断言
-  （`:184-195` 白名单外报 `available` 报错；`:196-200` 白名单内的项没报成 `available` 也报错）。
-  这一条把纪律从"不许没有理由"升级成"当前版本只许 `audit` 是功能"——任何
+* 第一条测试里除了"关了必须有理由"，还有一张**白名单**：
+  `internal/platform/capabilities_test.go:179 implemented := map[string]bool{FeatAudit: true}` 是
+  **无条件白名单**（只有 `audit` 在任何主机上都算已交付）；`site` / `site_write` / `ssl` 走
+  `:217 siteWriterReady()` / `:231 siteTLSReady()` 的**条件白名单**，谓词直接问平台实现
+  "此刻有没有可写的 nginx / 有没有 ACME"，随后双向断言（`:185-195` 白名单外报 `available` 报错；
+  `:197-208` 条件成立却没报成 `available` 也报错）。
+  这一条把纪律从"不许没有理由"升级成"当前版本只许这些项是功能"——任何
   "探测到机制就 `Allow` 成功能"的写法，包括只在某一个平台上成立的写法，都会让测试变红。
-  白名单只管 `available`，因此 M2 把 `php` 写成 `degraded` 不需要、也不允许动这张表。
+  条件白名单只由 `Detect()` 的现场证据决定，所以同一份二进制在没装 nginx 的机器上
+  `site` / `ssl` 仍是 `unavailable`，在只实现了手工证书的构建里 `ssl` 也到不了 `available`。
 * 理由文案有下限："未实现"不算理由，必须写清**随哪个里程碑/Provider 交付**。
   同一种关闭状态在不同机器上要说不同的话：Linux 上"没装 ufw/firewalld/nft"与"装了但写入
   Provider 还没上"是两句不同理由（`platform_linux.go:248-254`），运维必须能分清是机器的问题
@@ -168,8 +183,9 @@
   并扫描规格，出现 `mod_name` / `class` / `{module}` / `{action}` 这类反射式片段直接失败；
   路径参数按**名字白名单**放行，白名单是 `{key, id, name}`：`key` 是 M0 的设置项枚举，
   `id` 是 M1 会话页加的 `sessions.ref`（先过 `^[0-9a-f]{16}$` 再作为绑定参数进 SQL），
-  `name` 目前没有任何端点在用——留着是因为它是"标识"而不是"动词"。动词、模块名、方法名
-  进 URL 是反射式接口的起点，这条白名单就是拦这个的。
+  `name` 从 M2 第三片起用于 `/api/v1/sites/{name}...`，由 `internal/nginx.ValidateName`
+  统一校验字符集与长度（同一函数也用在写文件前），未知名字返回 404 而不是 500。
+  动词、模块名、方法名进 URL 是反射式接口的起点，这条白名单就是拦这个的。
 * YAML 解析是**逐行的**，不是引入 YAML 库：这个文件的版式由我们自己生成、由本测试守护，
   为此拖一个依赖进测试路径不划算。因此改 YAML 时保持缩进约定（`paths:` 在 0 列，路径 2 列，
   HTTP 方法 4 列），否则测试会以"规格描述了不存在的接口"的形式报出来。
@@ -254,12 +270,12 @@
    `/healthz` 永远可达。**持有合法 `mp_session` 后任何路径都可访问**——这是有意的：SPA 的导航、
    刷新与深链必须落在原路径上，把它们全部改写到一个魔法路径会拿可用的界面换一个勾。
    因此**入口不能缓解 XSS，也不能缓解 Cookie 泄露**，任何"安全入口保护登录后的面板"的表述都是
-   错的；`entranceGate` 的注释（`internal/api/server.go:184-202`）已经把这段结论写死，
+   错的；`entranceGate` 的注释（`internal/api/server.go:204-245`）已经把这段结论写死，
    文档与 README 必须原样表达这条边界。**"登录后逐路径校验入口"是 M1 待办**（见
    `docs/里程碑.md`），在它实现之前不得写成现状。真正的访问控制 = 监听地址 + 会话令牌与有效期
    + `panel.ip_allowlist` + CSRF + 登录锁定。
    伪装响应的**形态**也是一条决定：中性 HTML 错误页，只含状态码文本，不含产品名与版本
-   （`internal/api/server.go:275 disguise()` 的注释）。不用 Go 默认 `http.Error` 的
+   （`internal/api/server.go:278 disguise()` 的注释）。不用 Go 默认 `http.Error` 的
    `text/plain`，因为"404 Not Found"那 10 个字节本身就是运行环境指纹，而这条响应的目的正是
    让探测者学不到东西；也不冒充 nginx 的错误页——这个进程就是 web server，一张普通 404 是
    事实，冒充别人的错误页在事故响应时误导运维的程度不亚于误导扫描器。页面里内联
@@ -353,22 +369,27 @@ bcrypt 口令哈希、有效会话 ID 和整份审计记录：会话 ID 泄露�
 ### 8.2 设计纪律：探测到机制 ≠ 拥有功能
 
 看到 `ufw` 在 `/usr/sbin` 里，不代表面板会写防火墙规则；机器上有 `php8.1` 二进制，不代表面板
-能切换版本；ACME 客户端是纯 Go 的、文件备份在 POSIX 上很简单，也**不代表这一版点得动**。
+能切换版本；文件备份在 POSIX 上很简单，也**不代表备份按钮点得动**。ACME 是这条纪律的近期样本：
+`golang.org/x/crypto/acme` 从 M0 就随 `x/crypto` 在依赖图里，但直到第五片把账号密钥、challenge
+写入、nginx 安装与续期循环都接上，`ssl` 才允许 `available`——"依赖里有 ACME 客户端"本身不是能力。
 "探测到机制就报成功能"产出的正是这个项目改写面板的初衷所要消灭的东西：一个看着能点、点了没
 反应的按钮，或者一整块被藏起来的已交付功能。
 
 因此这条纪律是**测试强制**的，不是文档口径（M2 第一片是它的正面样本：`internal/php` 当场探到
-PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:356`
-报的是"检测到了什么、缺哪个后端"，而 `php_version_switch`、`php_ext_source`、`site` 仍然停在
-`newBase()` 里那句 `unavailable` 理由上，探测到多版本不等于能切版本）：
+PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:440`
+起读现场，`:467` 报的是"检测到了什么、缺哪个后端"，而 `php_version_switch`、`php_ext_source`
+仍然停在 `newBase()` 里那句 `unavailable` 理由上，探测到多版本不等于能切版本）：
 
 * `newBase()` 默认拒绝每一项功能并写好理由（`internal/platform/detect.go:18-76`，拒绝表 `:50`）；
 * `TestDetectedCapabilitiesAreExplained`（`internal/platform/capabilities_test.go:110`）除了
-  "关了必须有理由"，还有一条**白名单**：`capabilities_test.go:179` 把本版本已实现的功能写成
-  `{FeatAudit: true}`，白名单外任何 `available` 都失败，白名单内的项没报成 `available` 也失败。
-  白名单只管 `available` 这一档，所以 M2 把 `php` 报成 `degraded` 既不需要、也不允许动这张表。
-  **本版本唯一算作"功能"的是审计日志**；身份、会话、入口、CSRF、锁定、2FA、能力契约、自检 CLI
-  是**面板自身**已交付的部分，它们不在 `features` 名单里，也就不可能被探测"顺带"点亮；
+  "关了必须有理由"，还有一张**白名单**：`capabilities_test.go:179` 的
+  `implemented` 是无条件项（当前 `{FeatAudit: true}`），`:217` 与 `:231` 的
+  `siteWriterReady` / `siteTLSReady` 是条件项（`site`、`site_write`、`ssl`）。
+  白名单外任何 `available` 都失败，条件成立却没报成 `available` 也失败。
+  所以本版本的 `available` 可以是 `audit`，也可以是现场证明可写的 `site` / `site_write` / `ssl`；
+  `php` 被报成 `degraded` 既不需要、也不允许动这张表。身份、会话、入口、CSRF、锁定、2FA、
+  能力契约、自检 CLI 是**面板自身**已交付的部分，它们不在 `features` 名单里，也就不可能被探测
+  "顺带"点亮；
 * `TestCapabilitiesAreSelfConsistent`（`internal/api/m0_test.go`）从 HTTP 外面把同一条规则再打一遍，
   防止只有包内自测而接口面撒谎。
 
@@ -452,8 +473,10 @@ M2 第二片补上了一条曾经记在本表里的缺口：**`doctor` 打印的
 | `-wal` / `-shm` 的 0600 | `TestFilePermissionsAreOwnerOnly` 只 `os.Stat` 主库文件 | 代码 `internal/store/store.go:46-57` 的三元素循环 |
 | 面板证书与私钥的 0600 | `internal/sec` 只有一个测试文件且不碰证书 | 代码 `internal/sec/tls.go:74-86` |
 | `444`（挂断型）伪装真的会断连 | `disguise()` 的 Hijacker 分支只在配置 444 时走到，M0 测试跑的是 404 | 代码 `internal/api/server.go:275` |
+| ACME 只对 Pebble 跑过端到端，没有对 Let's Encrypt 生产环境真签过 | `grep -rn "pebble" --include='*_test.go' .` 只命中 `internal/acme/pebble_test.go`；它默认跳过（`pebble` 不在 PATH 时 `t.Skip`），CI 不会自动跑 | 协议流程由 `internal/acme` 的 9 个单元用例覆盖；端到端复核命令写在 README「如何验证」；生产签发仍受 80 端口可达与域名解析两个外部条件约束 |
+| DNS-01 / 通配符签发没有实现，也没有测试 | `grep -rn "DNS01\|dns-01\|Wildcard" --include='*.go' internal/` 只应命中通配符拒绝逻辑，不应有 DNS 客户端 | 代码在写任何配置之前拒绝（`internal/acme/acme.go` 的 `normalizeDomains` + `internal/platform/platform_linux.go` 的 `obtainACME`），HTTP 返回 `422 acme_unsupported`；通配符站点只能上传证书 |
 | 前端"灰 + 理由"的实际渲染 | 仓库里没有 UI 自动化：`make web` 编译前端并断言产物只有一个文件，`make check-ui` 断言能力 key 全覆盖与端点全覆盖，但**"页面画出来对不对"这一步仍然靠人**（真实浏览器的 puppeteer 脚本刻意不入仓库，它依赖本机 chrome） | `make check-ui` 的三条 + `make check-honesty` 保证理由必然存在；每轮里程碑手工跑一遍浏览器断言并在 README"如何验证"里记下条数 |
-| `minipanel passwd` 的 **tty 分支**（真关回显那一条） | 测试文件自己写明 `go test` 下 stdin 不是 tty（`cmd/minipanel/main_test.go:212-213`），所以 `term.IsTerminal` 为真的分支走不到；管道分支与全部校验分支**已经**在 CI 里 | 代码 `cmd/minipanel/main.go:637`（`IsTerminal`）→ `:643`（`term.ReadPassword`）、`:652`（`readLine`）；本轮用 `pty.fork()` 手工验证主端流里不回声明文。这是 §8.2 那条纪律的反面教材：**文案说"不回显"而代码没关 ECHO** 曾经成立过，只有断言能防它回来；补法是在测试里自建 pty，或把该分支抽成可注入接口 |
+| `minipanel passwd` 的 **tty 分支**（真关回显那一条） | 测试文件自己写明 `go test` 下 stdin 不是 tty（`cmd/minipanel/main_test.go:212-213`），所以 `term.IsTerminal` 为真的分支走不到；管道分支与全部校验分支**已经**在 CI 里 | 代码 `cmd/minipanel/main.go:685`（`IsTerminal`）→ `:691`（`term.ReadPassword`）、`:700`（`readLine`）；本轮用 `pty.fork()` 手工验证主端流里不回声明文。这是 §8.2 那条纪律的反面教材：**文案说"不回显"而代码没关 ECHO** 曾经成立过，只有断言能防它回来；补法是在测试里自建 pty，或把该分支抽成可注入接口 |
 | 入口字母表本身没有断言 | 形状是断言过的（`sec_test.go:77` 要求 `/` 前缀且 `len(e) == 9`，把 8 字符改短会红），但 `entranceAlphabet` 在测试里一次都没被引用（`grep -rn "entranceAlphabet" --include='*_test.go' .` 为空）：没人断言它是 31 个符号。往字母表里加回易混字符，只能靠 `:82` 那条禁集撞上来才发现 | 禁集断言 + §8.3 的 `-count=200` 重复；注释 `internal/sec/sec.go:108-115` 写明了 31 符号 × 8 字符 ≈ 39.6 bit |
 | PHP 探测只认 Debian/Ubuntu 的布局 | `grep -rn remi internal/php/` 为空——`/etc/php/<版本>` + `/usr/{,s}bin` 之外的形状（RPM 系、remi/SCL 的 `/etc/opt/remi/php83`）没有任何 fixture 覆盖 | 代码 `internal/php/php.go:110-118` 的注释把这个假设写明了；找不到就报"未检测到"，而不是猜一个路径出来。M2 第二片给它加了一个**被动探测器**：`cmd/minipanel/php.go:124 phpBitmapMismatch()` 第四条规则——`PHPCtl` 报的 socket 在内核里是 LISTEN、而位图 `php_modes` 里没有 fpm，这两件事只可能来自两边看的不是同一处，于是 doctor 打一行"注意："点名"非 Debian 布局"。它不能修好探测，但能让这种机器上的错法从"静默 502"变成"自检先说出来"；正解仍然是补一组 redhat 形状的假 root，而不是往探测里塞 if |
 | socket 判活只说"有人在听"，不说听的**是不是 php-fpm**，也没做过一次 FastCGI 握手 | `grep -rn "net\.Dial\|fcgi" internal/php/ cmd/minipanel/php.go` 为空（本轮实测无输出）：`SocketStatus` 唯一的信息源是内核按路径记的账，路径背后是什么进程它不知道 | 代码 `internal/php/php.go:292 socketStatus()` 只在 `St` 列为 `01` 时报 listening；表读不到时返回 `unknown` 而不是猜"没人听"（`internal/php/php_test.go:448` 断言这条），文案对应 `cmd/minipanel/php.go:79 socketWords()` 里那句"读不到 /proc/net/unix，判断不了"。"这个后端真的能执行 PHP 吗"要等 M2 的站点写入侧发一次 FastCGI 请求才算验证过 |

@@ -6,9 +6,9 @@ import { store } from "../store";
 // M2 第三、四片：静态站点与站点证书。这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
-//   * 这里创建的是纯静态站点：没有 PHP 绑定。ssl 是 degraded——手工上传证书与自签证书
-//     可用，ACME 自动签发与续期尚未交付，因此页面上只说"证书需要人工更换"，不把
-//     "HTTPS" 画成一次点击就永久有效的开关。
+//   * 这里创建的是纯静态站点：没有 PHP 绑定。ssl 可用时证书有三条来源：ACME
+//     HTTP-01 自动签发与续期、手工上传、自签。通配符只能用上传，因为 HTTP-01 无法
+//     验证 *.example.com——页面在 ACME 选项旁直接说明，而不是等请求失败后才解释。
 //   * 删除只删配置、软链接与面板管理的证书；网站根目录故意保留——删 vhost 不是删数据。
 const state = ref(null);
 const error = ref("");
@@ -26,7 +26,9 @@ const rows = computed(() => state.value?.items || []);
 
 const tlsOpen = ref(false);
 const tlsTarget = ref(null);
-const tlsForm = ref({ mode: "selfsigned", redirect: true, cert_pem: "", key_pem: "" });
+const tlsForm = ref({ mode: "acme", redirect: true, cert_pem: "", key_pem: "" });
+const hasWildcard = computed(() => (tlsTarget.value?.domains || []).some((d) => d.startsWith("*.")));
+const acmeUsable = computed(() => !hasWildcard.value && ["available", "degraded"].includes(sslFeat.value?.state));
 
 function parseDomains(text) {
   return String(text || "")
@@ -73,7 +75,13 @@ async function remove(name) {
 function openTLS(r) {
   error.value = ""; msg.value = "";
   tlsTarget.value = r;
-  tlsForm.value = { mode: "selfsigned", redirect: true, cert_pem: "", key_pem: "" };
+  const wildcard = (r.domains || []).some((d) => d.startsWith("*."));
+  tlsForm.value = {
+    mode: wildcard ? "upload" : "acme",
+    redirect: true,
+    cert_pem: "",
+    key_pem: "",
+  };
   tlsOpen.value = true;
 }
 
@@ -92,15 +100,25 @@ async function pickPEM(ev, key) {
 async function saveTLS() {
   error.value = ""; msg.value = ""; busy.value = true;
   try {
-    const body = { mode: tlsForm.value.mode, redirect: tlsForm.value.redirect };
-    if (tlsForm.value.mode === "upload") {
-      body.cert_pem = tlsForm.value.cert_pem;
-      body.key_pem = tlsForm.value.key_pem;
+    const body = { redirect: tlsForm.value.redirect };
+    const name = encodeURIComponent(tlsTarget.value.name);
+    let site;
+    if (tlsForm.value.mode === "acme") {
+      // 独立端点：签发要等 CA 做 HTTP-01 验证，不能和本地证书写入共用超时语义。
+      site = await api("/api/v1/sites/" + name + "/acme",
+        { method: "POST", body: JSON.stringify(body) });
+      msg.value = site.name + " 已通过 ACME 签发并启用 HTTPS；面板会在到期前 30 天自动续期。";
+    } else {
+      body.mode = tlsForm.value.mode;
+      if (tlsForm.value.mode === "upload") {
+        body.cert_pem = tlsForm.value.cert_pem;
+        body.key_pem = tlsForm.value.key_pem;
+      }
+      site = await api("/api/v1/sites/" + name + "/tls",
+        { method: "POST", body: JSON.stringify(body) });
+      msg.value = site.name + " 已启用 HTTPS" + (site.tls?.self_signed ? "（自签证书）" : "") +
+        "；nginx 已通过 nginx -t 并重载。证书到期前请手工更换。";
     }
-    const site = await api("/api/v1/sites/" + encodeURIComponent(tlsTarget.value.name) + "/tls",
-      { method: "POST", body: JSON.stringify(body) });
-    msg.value = site.name + " 已启用 HTTPS" + (site.tls?.self_signed ? "（自签证书）" : "") +
-      "；nginx 已通过 nginx -t 并重载。证书到期前请手工更换。";
     tlsOpen.value = false;
     await load();
   } catch (e) {
@@ -122,6 +140,7 @@ async function clearTLS(name) {
 
 function tlsLabel(r) {
   if (!r.tls?.enabled) return "HTTP";
+  if (r.tls.acme) return "HTTPS · ACME";
   return r.tls.self_signed ? "HTTPS · 自签" : "HTTPS · 已上传";
 }
 
@@ -196,6 +215,7 @@ onMounted(load);
               <span class="mp-tag" :class="r.tls?.enabled ? 'on' : 'flat'">{{ tlsLabel(r) }}</span>
               <div v-if="r.tls?.enabled && r.tls.not_after" class="mp-muted mp-tiny">
                 到期 {{ r.tls.not_after }}<span v-if="r.tls.redirect"> · 80→443</span>
+                <span v-if="r.tls.acme"> · 自动续期</span>
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
@@ -222,16 +242,26 @@ onMounted(load);
       </table>
 
       <el-dialog v-model="tlsOpen" :title="'HTTPS · ' + (tlsTarget?.name || '')" width="min(640px, 94vw)">
-        <el-alert v-if="sslFeat" type="info" :closable="false" style="margin-bottom:10px"
-          :title="sslFeat.state === 'degraded'
-            ? 'ssl 能力位为 degraded：手工证书与自签证书可用；ACME 自动签发与续期尚未交付，证书到期需要人工更换。'
-            : (sslFeat.reason || '')" />
+        <el-alert v-if="sslFeat && sslFeat.state !== 'available'" type="info" :closable="false" style="margin-bottom:10px"
+          :title="sslFeat.reason || ''" />
         <el-form label-position="top" @submit.prevent="saveTLS">
           <el-form-item label="证书来源">
             <el-radio-group v-model="tlsForm.mode">
+              <el-radio value="acme" :disabled="!acmeUsable">
+                ACME 自动签发（Let's Encrypt，到期前自动续期）
+              </el-radio>
               <el-radio value="selfsigned">生成自签证书（适合内网 / 测试）</el-radio>
               <el-radio value="upload">上传证书链与私钥</el-radio>
             </el-radio-group>
+            <div v-if="hasWildcard" class="mp-hint" style="margin-top:6px">
+              该站点含通配符域名（如 *.example.com）。HTTP-01 无法验证通配符，请上传包含该 SAN 的证书；
+              DNS-01 自动签发尚未交付。
+            </div>
+            <div v-else-if="tlsForm.mode === 'acme'" class="mp-hint" style="margin-top:6px">
+              CA 会从公网访问该域名的 80 端口 <code class="mp-code">/.well-known/acme-challenge/</code>。
+              请确认域名已解析到本机、80 端口可达；签发通常需要几十秒。强制 HTTPS 时，这个挑战路径
+              不会被 301 到 443，否则证书将无法续期。
+            </div>
           </el-form-item>
           <template v-if="tlsForm.mode === 'upload'">
             <el-form-item label="证书链 PEM（fullchain）">
@@ -258,10 +288,10 @@ onMounted(load);
       </el-dialog>
 
       <div class="mp-hint">
-        本片交付静态站点与站点证书（自签 / 手工上传）。PHP 版本绑定、ACME 自动签发与续期、
-        域名编辑是 M2 的后续片，对应能力位图里的 <code class="mp-code">php</code> 与
-        <code class="mp-code">ssl</code>（均为 degraded）。新建站点的根目录是 0755 的空目录，
-        放一个 <code class="mp-code">index.html</code> 就能访问。
+        证书来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符证书仍需上传（DNS-01
+        尚未交付）；手工上传与自签证书不会被自动替换。PHP 版本绑定与域名编辑是 M2 的后续片，
+        能力位图里的 <code class="mp-code">php</code> 仍为 degraded。新建站点的根目录是 0755
+        的空目录，放一个 <code class="mp-code">index.html</code> 就能访问。
       </div>
     </template>
   </div>

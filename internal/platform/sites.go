@@ -1,6 +1,9 @@
 package platform
 
-import "errors"
+import (
+	"context"
+	"errors"
+)
 
 // SiteSpec and SiteInfo are the platform-neutral shapes the HTTP layer speaks.
 // The nginx writer and any future Apache/IIS provider convert to and from
@@ -27,6 +30,7 @@ type SiteTLSInfo struct {
 	Enabled    bool   `json:"enabled"`
 	Redirect   bool   `json:"redirect"`
 	SelfSigned bool   `json:"self_signed"`
+	ACME       bool   `json:"acme"`
 	CertPath   string `json:"cert_path,omitempty"`
 	KeyPath    string `json:"key_path,omitempty"`
 	NotAfter   string `json:"not_after,omitempty"`
@@ -52,15 +56,32 @@ type SiteProvider interface {
 	Sites() (SiteManager, bool)
 }
 
-// SiteTLSManager is the optional certificate side of a site writer. It is a
-// separate interface because the manual/self-signed slice does not make SSL a
-// full capability: ACME is still missing, and the bitmap reports ssl as
-// degraded. A platform without this interface simply cannot offer the HTTPS
-// controls, and the UI hides them behind the same bitmap.
+// SiteTLSManager is the optional certificate side of a site writer. Manual
+// upload, self-signed generation and clearing all go through it. A platform
+// without this interface cannot offer the HTTPS controls, and the UI hides them
+// behind the same bitmap.
 type SiteTLSManager interface {
 	SetSelfSigned(name string, redirect bool) (SiteInfo, error)
 	SetCertificate(name, certPEM, keyPEM string, redirect bool) (SiteInfo, error)
 	ClearCertificate(name string) (SiteInfo, error)
+}
+
+// SiteACMEManager is the automatic-issuance half. It is separate from
+// SiteTLSManager because issuing an HTTP-01 certificate is a long network
+// operation with its own failure modes, while the manual endpoints stay fast and
+// local. The renewal method is called by the panel's scheduler, not by an HTTP
+// handler, so it returns per-site results instead of one error.
+type SiteACMEManager interface {
+	ObtainACME(ctx context.Context, name string, redirect bool) (SiteInfo, error)
+	RenewDueACME(ctx context.Context) []ACMEAttempt
+}
+
+// ACMEAttempt is one renewal decision. Error is the operator-readable failure;
+// a successful attempt is one row with Renewed=true.
+type ACMEAttempt struct {
+	Name    string `json:"name"`
+	Renewed bool   `json:"renewed"`
+	Error   string `json:"error,omitempty"`
 }
 
 // WebServerProvider exposes the config test/reload surface of the detected
@@ -74,9 +95,11 @@ type WebServerProvider interface {
 // The API maps these onto HTTP status codes. They are sentinel errors so a
 // provider can wrap its own detail while callers still branch on the kind.
 var (
-	ErrSiteExists     = errors.New("同名站点已存在")
-	ErrSiteMissing    = errors.New("面板没有管理这个站点（不存在，或不是面板创建的）")
-	ErrSiteInvalid    = errors.New("站点参数不合法")
-	ErrSiteRefused    = errors.New("写入被 nginx 拒绝，已回滚")
-	ErrSiteTLSInvalid = errors.New("站点证书不合法")
+	ErrSiteExists      = errors.New("同名站点已存在")
+	ErrSiteMissing     = errors.New("面板没有管理这个站点（不存在，或不是面板创建的）")
+	ErrSiteInvalid     = errors.New("站点参数不合法")
+	ErrSiteRefused     = errors.New("写入被 nginx 拒绝，已回滚")
+	ErrSiteTLSInvalid  = errors.New("站点证书不合法")
+	ErrACMEUnsupported = errors.New("ACME HTTP-01 不支持该站点")
+	ErrACMEFailed      = errors.New("ACME 签发失败")
 )

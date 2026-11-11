@@ -4,12 +4,17 @@ package platform
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
+	mpacme "github.com/Lisir2002/Mini_Panel/internal/acme"
 	"github.com/Lisir2002/Mini_Panel/internal/nginx"
 	"github.com/Lisir2002/Mini_Panel/internal/php"
 )
@@ -177,6 +182,107 @@ func (l linuxSites) ClearCertificate(name string) (SiteInfo, error) {
 	return toSiteInfo(s), nil
 }
 
+// acmeOps serialises certificate issuance. Two HTTP-01 orders touching the same
+// site root or the same account key would otherwise race on challenge files and
+// account registration; the panel has no use for parallel issuance on one host.
+var acmeOps sync.Mutex
+
+func (l linuxSites) ObtainACME(ctx context.Context, name string, redirect bool) (SiteInfo, error) {
+	acmeOps.Lock()
+	defer acmeOps.Unlock()
+	return l.obtainACME(ctx, name, redirect)
+}
+
+// obtainACME assumes acmeOps is held. It reads the site twice on purpose: the
+// first read exists to reject wildcards before touching a config, and the
+// second (inside PrepareACME) is the state after the challenge-serving rewrite.
+func (l linuxSites) obtainACME(ctx context.Context, name string, redirect bool) (SiteInfo, error) {
+	pre, err := l.m.Get(name)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	for _, d := range pre.Domains {
+		if strings.HasPrefix(d, "*.") {
+			return SiteInfo{}, fmt.Errorf("%w：%s 是通配符，需要 DNS-01；当前只能上传通配符证书", ErrACMEUnsupported, d)
+		}
+	}
+	if _, err := l.m.PrepareACME(name); err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	issuer, err := newACMEIssuer()
+	if err != nil {
+		return SiteInfo{}, fmt.Errorf("%w：%v", ErrACMEFailed, err)
+	}
+	creds, err := issuer.Issue(ctx, pre.Domains, pre.Root)
+	if err != nil {
+		return SiteInfo{}, mapACMEErr(err)
+	}
+	s, err := l.m.SetACMECertificate(name, string(creds.CertPEM), string(creds.KeyPEM), redirect)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
+// RenewDueACME walks only certificates whose marker says ACME issued them. A
+// manually uploaded or self-signed certificate is never silently replaced: it
+// may be the operator's only copy of a wildcard or internal CA certificate.
+func (l linuxSites) RenewDueACME(ctx context.Context) []ACMEAttempt {
+	sites, err := l.m.List()
+	if err != nil {
+		return []ACMEAttempt{{Name: "*", Error: "读取站点列表失败：" + err.Error()}}
+	}
+	now := time.Now()
+	out := []ACMEAttempt{}
+	for _, s := range sites {
+		if err := ctx.Err(); err != nil {
+			return append(out, ACMEAttempt{Name: "*", Error: "续期被中断：" + err.Error()})
+		}
+		if s.TLS == nil || !s.TLS.ACME {
+			continue
+		}
+		if !mpacme.RenewalDue(s.TLS.NotAfter, now) {
+			continue
+		}
+		acmeOps.Lock()
+		_, err := l.obtainACME(ctx, s.Name, s.TLS.Redirect)
+		acmeOps.Unlock()
+		a := ACMEAttempt{Name: s.Name, Renewed: err == nil}
+		if err != nil {
+			a.Error = err.Error()
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func newACMEIssuer() (*mpacme.Issuer, error) {
+	dir := envOr("MINI_PANEL_ACME_DIRECTORY", mpacme.DefaultDirectoryURL)
+	key := filepath.Join(rooted("/etc/minipanel/acme"), "account.key")
+	return mpacme.NewIssuer(dir, key, envOr("MINI_PANEL_ACME_CA_FILE", ""))
+}
+
+func mapACMEErr(err error) error {
+	switch {
+	case errors.Is(err, mpacme.ErrUnsupported):
+		detail := strings.TrimPrefix(err.Error(), mpacme.ErrUnsupported.Error())
+		detail = strings.TrimPrefix(detail, "：")
+		if detail == "" {
+			return fmt.Errorf("%w", ErrACMEUnsupported)
+		}
+		return fmt.Errorf("%w：%s", ErrACMEUnsupported, detail)
+	case errors.Is(err, mpacme.ErrFailed):
+		detail := strings.TrimPrefix(err.Error(), mpacme.ErrFailed.Error())
+		detail = strings.TrimPrefix(detail, "：")
+		if detail == "" {
+			return fmt.Errorf("%w", ErrACMEFailed)
+		}
+		return fmt.Errorf("%w：%s", ErrACMEFailed, detail)
+	default:
+		return err
+	}
+}
+
 func toSiteInfo(s nginx.Site) SiteInfo {
 	out := SiteInfo{
 		Name: s.Name, Domains: s.Domains, Root: s.Root,
@@ -184,7 +290,7 @@ func toSiteInfo(s nginx.Site) SiteInfo {
 	}
 	if s.TLS != nil {
 		out.TLS = &SiteTLSInfo{
-			Enabled: s.TLS.Enabled, Redirect: s.TLS.Redirect, SelfSigned: s.TLS.SelfSigned,
+			Enabled: s.TLS.Enabled, Redirect: s.TLS.Redirect, SelfSigned: s.TLS.SelfSigned, ACME: s.TLS.ACME,
 			CertPath: s.TLS.CertPath, KeyPath: s.TLS.KeyPath, NotAfter: s.TLS.NotAfter, Error: s.TLS.Error,
 		}
 	}
@@ -275,14 +381,12 @@ func (p linuxPlatform) Detect() (*Capabilities, error) {
 	default:
 		c.Allow(FeatWebSite)
 		c.Allow(featSiteWrite)
-		// The certificate slice ships manual upload and self-signed certs, not
-		// ACME. Calling that "available" would be the same half-truth this
-		// project exists to avoid, so ssl stays degraded with the missing half
-		// named. The site page gates its HTTPS controls on this state and says
-		// the same sentence.
-		c.Degrade(FeatSSL, "站点 HTTPS 已支持上传证书与自签证书；ACME 自动签发与续期尚未交付，证书不会自动续期",
-			"在「网站」页为站点生成自签证书或上传证书链与私钥；到期前手工更换",
-			"GET /api/v1/sites 的 tls.not_after，或 curl -kI https://<域名>/")
+		// All three certificate paths ship in this binary: self-signed, uploaded,
+		// and ACME HTTP-01 with automatic renewal. Wildcards still require an
+		// uploaded certificate because HTTP-01 cannot prove them; that is a
+		// limitation of the challenge type, not a missing certificate feature,
+		// and the site page names it next to the ACME choice.
+		c.Allow(FeatSSL)
 	}
 
 	switch {

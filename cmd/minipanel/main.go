@@ -274,6 +274,7 @@ func cmdServe(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	startACMERenewal(ctx, e)
 	select {
 	case err := <-errCh:
 		return err
@@ -286,6 +287,53 @@ func cmdServe(args []string) error {
 		}
 		return nil
 	}
+}
+
+// acmeRenewEvery is the background scan interval. Certificates are checked, not
+// blindly renewed: only ACME-issued ones inside the thirty-day window are touched.
+const acmeRenewEvery = 12 * time.Hour
+
+// startACMERenewal starts the only background task this milestone adds. It is
+// deliberately tied to the serve context: the same SIGTERM that stops HTTP also
+// cancels a challenge halfway through, and the issuer removes the token on the
+// way out. Manual and self-signed certificates are never selected.
+func startACMERenewal(ctx context.Context, e *env) {
+	sp, ok := e.plat.(platform.SiteProvider)
+	if !ok {
+		return
+	}
+	m, ok := sp.Sites()
+	if !ok || m == nil {
+		return
+	}
+	am, ok := m.(platform.SiteACMEManager)
+	if !ok || am == nil {
+		return
+	}
+	e.log.Info("ACME 自动续期已启用", "scan_every", acmeRenewEvery.String(), "renew_before", "720h")
+	go func() {
+		// Give the listener a moment to settle, then scan immediately rather
+		// than waiting twelve hours to notice a certificate that is already
+		// inside the renewal window.
+		t := time.NewTimer(10 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			for _, a := range am.RenewDueACME(ctx) {
+				switch {
+				case a.Error != "" && ctx.Err() == nil:
+					e.log.Error("ACME 续期失败", "site", a.Name, "error", a.Error)
+				case a.Renewed:
+					e.log.Info("ACME 证书已续期", "site", a.Name)
+				}
+			}
+			t.Reset(acmeRenewEvery)
+		}
+	}()
 }
 
 // isLoopbackBind mirrors the check the API makes, so the warning and the

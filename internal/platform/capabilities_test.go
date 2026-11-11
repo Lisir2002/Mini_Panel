@@ -180,6 +180,7 @@ func TestDetectedCapabilitiesAreExplained(t *testing.T) {
 	conditional := map[string]func(*Capabilities) bool{
 		FeatWebSite:   siteWriterReady,
 		featSiteWrite: siteWriterReady,
+		FeatSSL:       siteTLSReady,
 	}
 	for name, f := range c.Features {
 		if f.State != StateAvailable {
@@ -220,6 +221,24 @@ func siteWriterReady(*Capabilities) bool {
 	}
 	m, ok := sp.Sites()
 	return ok && m != nil
+}
+
+// siteTLSReady requires the optional ACME interface as well as the base site
+// writer: ssl is advertised as available only when all three certificate paths
+// (self-signed, upload, ACME HTTP-01) are reachable on this host. A provider that
+// implements only manual TLS is a legitimate build, and its ssl must stay
+// degraded rather than claiming automatic renewal the binary cannot do.
+func siteTLSReady(*Capabilities) bool {
+	sp, ok := Current().(SiteProvider)
+	if !ok {
+		return false
+	}
+	m, ok := sp.Sites()
+	if !ok || m == nil {
+		return false
+	}
+	_, ok = m.(SiteACMEManager)
+	return ok
 }
 
 func TestPathsAreAbsoluteAndConsistent(t *testing.T) {

@@ -128,6 +128,7 @@ func (s *Server) routes() chi.Router {
 			r.Delete("/sites/{name}", s.handleSiteDelete)
 			r.Post("/sites/{name}/tls", s.handleSiteTLSSet)
 			r.Delete("/sites/{name}/tls", s.handleSiteTLSClear)
+			r.Post("/sites/{name}/acme", s.handleSiteACME)
 
 			// M1: the last page of the milestone. Read-only by construction — the
 			// remedies it lists are commands, and this panel has no endpoint that

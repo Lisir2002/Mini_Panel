@@ -218,3 +218,78 @@ func TestSiteTLSUploadIsAuditedWithoutLeakingPEMs(t *testing.T) {
 		t.Errorf("TLS write missing from the audit trail: %+v", entries)
 	}
 }
+
+// ACME is a separate endpoint because it talks to a CA. These tests pin the
+// HTTP contract: capability gate, provider call, error kinds, and CSRF. The CA
+// protocol itself is tested in internal/acme (including a Pebble integration
+// run), not by pretending a fake Sites object issued a certificate.
+func TestSiteACMEIssuesAndMarksSource(t *testing.T) {
+	p, fs := newSitePanel(t, true)
+	seedSite(t, p, fs, "blog")
+	r, body := p.do(http.MethodPost, "/api/v1/sites/blog/acme",
+		`{"redirect":true}`, p.csrfHeader())
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("acme = %d %s", r.StatusCode, body)
+	}
+	var site platform.SiteInfo
+	if err := json.Unmarshal([]byte(body), &site); err != nil {
+		t.Fatalf("acme json: %v\n%s", err, body)
+	}
+	if site.TLS == nil || !site.TLS.ACME || !site.TLS.Redirect || site.TLS.SelfSigned {
+		t.Errorf("acme tls row = %+v", site.TLS)
+	}
+	if fs.acmeCalls != 1 {
+		t.Errorf("acme calls = %d, want 1", fs.acmeCalls)
+	}
+	entries, _, err := audit.New(p.st).List(50, 0)
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	var found bool
+	for _, e := range entries {
+		if e.Action == "POST /api/v1/sites/{name}/acme" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("ACME issuance missing from the audit trail")
+	}
+}
+
+func TestSiteACMEMapsErrors(t *testing.T) {
+	cases := []struct {
+		err  error
+		kind string
+	}{
+		{platform.ErrSiteMissing, "not_found"},
+		{fmt.Errorf("%w：*.example.com 是通配符", platform.ErrACMEUnsupported), "acme_unsupported"},
+		{fmt.Errorf("%w：CA 未通过验证", platform.ErrACMEFailed), "acme_failed"},
+		{fmt.Errorf("%w：nginx: bad", platform.ErrSiteRefused), "nginx_rejected"},
+	}
+	for _, c := range cases {
+		p, fs := newSitePanel(t, true)
+		seedSite(t, p, fs, "blog")
+		fs.acmeErr = c.err
+		r, body := p.do(http.MethodPost, "/api/v1/sites/blog/acme", `{}`, p.csrfHeader())
+		if r.StatusCode != http.StatusUnprocessableEntity && c.kind != "not_found" {
+			t.Errorf("err %v = %d %s, want 422 %s", c.err, r.StatusCode, body, c.kind)
+		}
+		if c.kind == "not_found" && r.StatusCode != http.StatusNotFound {
+			t.Errorf("missing site = %d %s, want 404", r.StatusCode, body)
+		}
+		if !strings.Contains(body, `"kind":"`+c.kind+`"`) {
+			t.Errorf("err %v body = %s, want kind %s", c.err, body, c.kind)
+		}
+	}
+}
+
+func TestSiteACMEWritesRequireCSRF(t *testing.T) {
+	p, fs := newSitePanel(t, true)
+	seedSite(t, p, fs, "blog")
+	if r, _ := p.do(http.MethodPost, "/api/v1/sites/blog/acme", `{}`, nil); r.StatusCode != http.StatusForbidden {
+		t.Errorf("acme without csrf = %d, want 403", r.StatusCode)
+	}
+	if fs.acmeCalls != 0 {
+		t.Errorf("ACME provider called without CSRF")
+	}
+}
