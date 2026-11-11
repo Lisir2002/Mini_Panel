@@ -3,8 +3,8 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四：静态站点、站点证书、PHP 版本绑定、
-// 基础设置编辑、伪静态模板、反向代理、整站跳转、防盗链、访问密码、真实 IP 解析与按路径跳转表。
+// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五：静态站点、站点证书、PHP 版本绑定、
+// 基础设置编辑、伪静态模板、反向代理、整站跳转、防盗链、访问密码、真实 IP 解析、按路径跳转表与流量限制。
 // 这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
@@ -31,6 +31,11 @@ import { store } from "../store";
 //   * 按路径跳转表只编辑"精确路径 + 301/302 + 绝对目标"三类字段；后端为每条规则渲染固定
 //     location = 块并追加常量 $is_args$args，调用方不能提交任何 nginx 配置文本。整表替换、
 //     空表清除，最多 10 条；它不占用 location /，因此与整站跳转、代理、伪静态共存。
+//   * 流量限制只编辑"请求速率 + 突发 + 单 IP 连接数 + 超限状态码"四个数值字段；后端把 zone 名、
+//     $binary_remote_addr 键与 10m 大小都固定下来，调用方不能提交任何 nginx 文本或自定义 zone。
+//     由于 nginx 要求 limit_*_zone 落在 http 上下文，后端会在同一次"写文件 → nginx -t → reload"
+//     事务里同时写站点 vhost 与一张面板自有的 http 级表文件，任一步失败两个文件一起回滚；本机
+//     nginx.conf 若没有通配 include，后端返回带理由的 400，页面原样显示，不假装限流已生效。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
 //     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
 //     而不是等请求失败后才解释。
@@ -95,6 +100,17 @@ const redirectPathsOpen = ref(false);
 const redirectPathsTarget = ref(null);
 const redirectPathRules = ref([]);
 const maxRedirectPathRules = 10;
+
+const limitOpen = ref(false);
+const limitTarget = ref(null);
+// 四个字段全空表示清除限流，是始终允许的救援路径。rate 用文本而非数字，
+// 因为它是 "10r/s" / "200r/m" 这类形状，由后端解析并规范化。
+const limitForm = ref({ request_rate: "", burst: "", connections: "", status: "" });
+const limitStatuses = [
+  { value: "", label: "默认 503" },
+  { value: "429", label: "429 Too Many Requests" },
+  { value: "503", label: "503 Service Unavailable" },
+];
 
 function blankRedirectPathRule() {
   return { path: "", target: "", code: 301 };
@@ -627,6 +643,69 @@ async function saveRedirectPaths() {
   } finally { busy.value = false; }
 }
 
+function limitLabel(r) {
+  const l = r.limits;
+  if (!l) return "";
+  const parts = [];
+  if (l.request_rate) parts.push(l.request_rate + (l.burst ? " (burst " + l.burst + ")" : ""));
+  if (l.connections) parts.push("并发 " + l.connections);
+  parts.push("超限 " + (l.status || 503));
+  return parts.join(" · ");
+}
+
+function openLimit(r) {
+  error.value = ""; msg.value = "";
+  limitTarget.value = r;
+  const l = r.limits || {};
+  limitForm.value = {
+    request_rate: l.request_rate || "",
+    burst: l.burst ? String(l.burst) : "",
+    connections: l.connections ? String(l.connections) : "",
+    status: l.status ? String(l.status) : "",
+  };
+  limitOpen.value = true;
+}
+
+// 四个字段留空即清除限流；这里只做前端能判断的形状检查，真正的速率解析、
+// 数值上界与"rate 之外的字段必须配合 rate"规则都由后端权威裁定，页面不复制一套。
+async function saveLimit() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const rate = limitForm.value.request_rate.trim();
+    const body = {};
+    if (rate) body.request_rate = rate;
+    const burst = limitForm.value.burst.trim();
+    const conns = limitForm.value.connections.trim();
+    const status = limitForm.value.status.trim();
+    if (burst) {
+      if (!rate) {
+        error.value = "突发值只在设置了请求速率上限时才有意义；请先填写速率，或把突发留空。";
+        busy.value = false;
+        return;
+      }
+      body.burst = Number(burst);
+    }
+    if (conns) body.connections = Number(conns);
+    if (status) body.status = Number(status);
+    // 四项全空时 body 就是 {}，即后端文档里的清除限流救援路径。
+    const site = await api("/api/v1/sites/" + encodeURIComponent(limitTarget.value.name) + "/traffic-limit",
+      { method: "PUT", body: JSON.stringify(body) });
+    if (site.limits) {
+      msg.value = site.name + " 已启用流量限制（" + limitLabel(site) +
+        "）；vhost 与 http 级 zone 表在同一次 nginx -t 通过后重载。";
+    } else {
+      msg.value = site.name + " 已清除流量限制；若这是本机最后一个限流站点，面板会一并删除它生成的 zone 表文件。";
+    }
+    limitOpen.value = false;
+    await load();
+  } catch (e) {
+    // 400 invalid_site（速率/数值不合法，或本机 nginx.conf 没有 http 级通配 include）
+    // 与 422 nginx_rejected 都带后端原文；后端返回前 vhost 与 zone 表已一起恢复，页面原样显示。
+    error.value = e.message;
+    await load();
+  } finally { busy.value = false; }
+}
+
 onMounted(load);
 </script>
 <template>
@@ -735,6 +814,7 @@ onMounted(load);
                 路径跳转 {{ r.redirect_paths.length }} 条 ·
                 <code class="mp-code">{{ redirectPathsWords(r) }}</code>
               </div>
+              <div v-if="r.limits" class="mp-muted mp-tiny">流量限制 · {{ limitLabel(r) }}</div>
             </td>
             <td>
               <span class="mp-tag on" v-if="r.enabled">已启用</span>
@@ -760,7 +840,7 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:620px;white-space:nowrap">
+            <td style="width:720px;white-space:nowrap">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
@@ -777,6 +857,9 @@ onMounted(load);
                 {{ r.auth_user ? "访问密码" : "加密码" }}
               </el-button>
               <el-button size="small" text type="primary" @click="openRealIP(r)">真实 IP</el-button>
+              <el-button size="small" text type="primary" @click="openLimit(r)">
+                {{ r.limits ? "限流" : "流量限制" }}
+              </el-button>
               <el-button size="small" text type="primary" :disabled="!phpAvailable && !r.php_version" @click="openPHP(r)">
                 PHP
               </el-button>
@@ -978,6 +1061,59 @@ onMounted(load);
         </template>
       </el-dialog>
 
+      <el-dialog v-model="limitOpen" :title="'流量限制 · ' + (limitTarget?.name || '')" width="min(620px, 94vw)">
+        <el-alert v-if="limitTarget?.limits" type="info" :closable="false" style="margin-bottom:10px"
+          :title="'该站点当前限流：' + limitLabel(limitTarget) + '。四个字段全部留空并保存即可清除。'" />
+        <el-form label-position="top" @submit.prevent="saveLimit">
+          <el-form-item label="请求速率上限（如 10r/s、200r/m、100r）">
+            <el-input v-model="limitForm.request_rate" maxlength="16" placeholder="留空表示不做速率限制"
+              style="width:260px" />
+            <div class="mp-hint" style="margin-top:4px">
+              面板按 <code class="mp-code">$binary_remote_addr</code>（单个客户端 IP）统计请求速率，
+              超出后按下面的状态码拒绝。速率由后端解析与规范化，只接受
+              <code class="mp-code">r/s</code>、<code class="mp-code">r/m</code> 或裸数字（每秒）形状。
+            </div>
+          </el-form-item>
+          <el-form-item label="突发（burst，仅在设置了速率时有效）">
+            <el-input v-model="limitForm.burst" maxlength="7" placeholder="如 20；留空则不写 burst"
+              style="width:200px" />
+            <div class="mp-hint" style="margin-top:4px">
+              面板渲染 burst 时固定附带 <code class="mp-code">nodelay</code>：允许的突发请求立即放行，
+              超出部分才排队或拒绝。这个开关不由页面控制。
+            </div>
+          </el-form-item>
+          <el-form-item label="单 IP 并发连接数上限">
+            <el-input v-model="limitForm.connections" maxlength="7" placeholder="如 5；留空表示不限制连接数"
+              style="width:200px" />
+          </el-form-item>
+          <el-form-item label="超限时返回的状态码">
+            <el-select v-model="limitForm.status" style="width:220px">
+              <el-option v-for="opt in limitStatuses" :key="opt.value" :label="opt.label" :value="opt.value" />
+            </el-select>
+            <div class="mp-hint" style="margin-top:4px">
+              只支持 429 与 503；留空沿用 nginx 默认的 503。
+            </div>
+          </el-form-item>
+          <div class="mp-hint">
+            速率、连接数至少要给出一个，否则突发与状态码没有作用，后端会返回 400。nginx 要求
+            共享内存区（zone）定义在 http 上下文，因此面板会在同一次 <code class="mp-code">nginx -t</code>
+            通过后才 reload 的事务里，同时写站点 vhost 与一张它自有的 http 级表文件；任一步失败两个文件
+            一起恢复原样。表里只允许面板存在限流的站点，最后一个限流清除时该文件会被删除。
+            本机 nginx.conf 若没有通配形式的 http 级 include，后端不会猜测位置，直接返回带理由的 400。
+          </div>
+          <div class="mp-hint">
+            限流是 server 级指令，不占用 <code class="mp-code">location /</code>，可与伪静态、代理、
+            整站跳转、按路径跳转、防盗链、访问密码、真实 IP 与 PHP 绑定共存。
+          </div>
+        </el-form>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="limitOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy" @click="saveLimit">
+            {{ limitForm.request_rate.trim() || limitForm.connections.trim() || limitForm.status.trim() || limitForm.burst.trim() ? "保存" : (limitTarget?.limits ? "清除限流" : "保存") }}
+          </el-button>
+        </template>
+      </el-dialog>
+
       <el-dialog v-model="hotlinkOpen" :title="'防盗链 · ' + (hotlinkTarget?.name || '')" width="min(620px, 94vw)">
         <el-alert v-if="hotlinkTarget?.proxy_target" type="info" :closable="false" style="margin-bottom:10px"
           title="该站点正在使用反向代理：静态资源不在本机，防盗链无从生效。后端会拒绝启用；请先在“代理”对话框里清空上游 URL。" />
@@ -1174,7 +1310,9 @@ onMounted(load);
         已绑定 PHP 的站点。反向代理同样只接受一个校验过的上游 URL（可选 WebSocket），
         固定写入代理头，与伪静态模板互斥。按路径跳转只写若干条精确 <code class="mp-code">location =</code>
         例外，保留查询串且不占用 <code class="mp-code">location /</code>，所以能够与整站跳转、代理和
-        伪静态共存。新建站点的根目录是 0755 的空目录，
+        伪静态共存。流量限制只收速率、突发、单 IP 连接数与超限状态码四个值，zone 名与键都由
+        后端固定；它写 vhost 的同时会在同一次事务里维护一张面板自有的 http 级 zone 表，本机
+        nginx.conf 没有通配 include 时后端拒绝并说明原因。新建站点的根目录是 0755 的空目录，
         放一个 <code class="mp-code">index.html</code>（或绑定 PHP 后放 index.php）就能访问。
       </div>
     </template>

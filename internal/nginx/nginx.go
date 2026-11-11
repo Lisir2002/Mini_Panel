@@ -229,6 +229,10 @@ type Site struct {
 	// peer would let any client forge the address in the access log.
 	RealIPFrom   []string `json:"real_ip_from,omitempty"`
 	RealIPHeader string   `json:"real_ip_header,omitempty"`
+	// Limits is the site's traffic ceiling, nil when the site is not limited.
+	// The shared memory zones it names are defined in a separate panel-owned
+	// file at http level, written in the same transaction as this vhost.
+	Limits *TrafficLimit `json:"limits,omitempty"`
 	// PHPVersion and PHPSocket name the fpm backend this site's .php location
 	// points at. The socket is supplied by the platform layer, which derives it
 	// from a discovered installation; it is never taken from an HTTP request.
@@ -261,6 +265,7 @@ type markerPayload struct {
 	RedirectCode      int            `json:"redirect_code,omitempty"`
 	RedirectKeepPath  bool           `json:"redirect_keep_path,omitempty"`
 	RedirectPaths     []RedirectRule `json:"redirect_paths,omitempty"`
+	Limits            *TrafficLimit  `json:"limits,omitempty"`
 	Hotlink           bool           `json:"hotlink,omitempty"`
 	HotlinkAllowEmpty bool           `json:"hotlink_allow_empty,omitempty"`
 	AuthUser          string         `json:"auth_user,omitempty"`
@@ -454,6 +459,7 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 		RealIPFrom: payload.RealIPFrom, RealIPHeader: payload.RealIPHeader,
 		PHPVersion: payload.PHPVersion, PHPSocket: payload.PHPSocket,
 	}
+	s.Limits = limitsFromMarker(payload)
 	s.TLS = m.tlsFromMarker(payload)
 	if lp := m.Layout.LinkPath(payload.Name); lp != "" {
 		if fi, err := os.Lstat(lp); err == nil && fi.Mode()&os.ModeSymlink != 0 {
@@ -498,6 +504,21 @@ func parseMarker(body string) (markerPayload, bool) {
 			return markerPayload{}, false
 		}
 		p.RedirectPaths = pathRules
+		if p.Limits != nil {
+			limit, err := normalizeTrafficLimit(*p.Limits)
+			if err != nil {
+				return markerPayload{}, false
+			}
+			if !limit.active() {
+				p.Limits = nil
+			} else if !limitZoneRe.MatchString(limitZoneName(p.Name)) {
+				// A zone name that cannot be rendered safely makes the whole
+				// file foreign rather than letting it reach the http context.
+				return markerPayload{}, false
+			} else {
+				p.Limits = &limit
+			}
+		}
 		if !p.Hotlink {
 			p.HotlinkAllowEmpty = false
 		}
@@ -746,26 +767,27 @@ func (m *Manager) SetBasics(name string, domains []string, root string, index []
 // test, reload, and restore the exact previous bytes on either failure. It
 // deliberately reports "no change" as success without a reload.
 func (m *Manager) applyConfig(path, want string) error {
-	prev, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("读取站点配置: %w", err)
-	}
-	if string(prev) == want {
-		return nil
-	}
-	if err := m.writeConfig(path, want); err != nil {
-		return fmt.Errorf("写入站点配置: %w", err)
-	}
-	restore := func() { _ = m.writeConfig(path, string(prev)) }
-	if out, err := m.TestConfig(); err != nil {
-		restore()
-		return fmt.Errorf("%w：%v", ErrConfigRejected, strings.TrimSpace(string(out)))
-	}
-	if out, err := m.Reload(); err != nil {
-		restore()
-		return fmt.Errorf("%w：reload 失败：%v", ErrConfigRejected, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return m.applyFiles([]configFile{{Path: path, Body: &want}})
+}
+
+// configFile is one file inside a single test-before-reload transaction. Body
+// of nil, or of empty string, means the file must not be there afterwards —
+// which is how a panel-owned file disappears without ever leaving an empty
+// config behind. OwnedCheck guards files whose name the panel chose but whose
+// current bytes it did not write: the check runs before anything is touched,
+// so a foreign file is refused rather than replaced.
+type configFile struct {
+	Path       string
+	Body       *string
+	OwnedCheck func(string) bool
+}
+
+// fileSnapshot is what rollback needs for one file: its exact previous bytes,
+// and whether it existed at all.
+type fileSnapshot struct {
+	path    string
+	prev    []byte
+	existed bool
 }
 
 // rollbackCreate restores the exact pre-create state: previous bytes when the
@@ -801,10 +823,6 @@ func (m *Manager) Delete(name string) (Site, error) {
 		return Site{}, ErrNotFound
 	}
 	confPath := m.Layout.ConfigPath(name)
-	prev, err := os.ReadFile(confPath)
-	if err != nil {
-		return Site{}, fmt.Errorf("读取站点配置: %w", err)
-	}
 	linkPath := m.Layout.LinkPath(name)
 	linkTarget := ""
 	if linkPath != "" {
@@ -813,27 +831,33 @@ func (m *Manager) Delete(name string) (Site, error) {
 		}
 	}
 
-	if err := os.Remove(confPath); err != nil {
-		return Site{}, fmt.Errorf("删除站点配置: %w", err)
+	// The zone table is rebuilt from the remaining sites as part of the same
+	// transaction, so deleting the last limited site cannot leave a vhost
+	// naming a zone that no longer exists — and cannot leave an empty config
+	// file in an http-level include either.
+	rows, err := m.limitsRows("", nil, name)
+	if err != nil {
+		return Site{}, err
 	}
-	if linkPath != "" {
-		_ = os.Remove(linkPath)
-	}
-	restore := func() {
-		_ = os.MkdirAll(filepath.Dir(confPath), 0o755)
-		_ = os.WriteFile(confPath, prev, 0o644)
-		if linkPath != "" && linkTarget != "" {
-			_ = os.Symlink(linkTarget, linkPath)
+	table := renderLimits(rows)
+	files := []configFile{{Path: confPath, Body: nil}}
+	if len(rows) > 0 || m.limitsFileExists() {
+		tablePath, err := m.limitsPath()
+		if err != nil {
+			return Site{}, err
 		}
+		files = append(files, configFile{Path: tablePath, Body: &table, OwnedCheck: parseLimitsMarker})
 	}
-
-	if out, err := m.TestConfig(); err != nil {
-		restore()
-		return Site{}, fmt.Errorf("%w：%v", ErrConfigRejected, strings.TrimSpace(string(out)))
+	if err := m.applyFiles(files); err != nil {
+		return Site{}, err
 	}
-	if out, err := m.Reload(); err != nil {
-		restore()
-		return Site{}, fmt.Errorf("%w：reload 失败：%v", ErrConfigRejected, strings.TrimSpace(string(out)))
+	if linkPath != "" && linkTarget != "" {
+		// The enabled symlink is not part of the nginx transaction: the vhost
+		// file it points at is gone, so nginx is already consistent. Recreating
+		// a dangling link on a later failure would only hide the deleted site.
+		_ = os.Remove(linkPath)
+	} else if linkPath != "" {
+		_ = os.Remove(linkPath)
 	}
 	// The certificate is panel data tied to this site, so it goes with the
 	// config. The document root stays; that is operator data.
@@ -861,6 +885,7 @@ func render(s Site) string {
 		RedirectCode:      s.RedirectCode,
 		RedirectKeepPath:  s.RedirectKeepPath,
 		RedirectPaths:     s.RedirectPaths,
+		Limits:            s.Limits,
 		Hotlink:           s.Hotlink,
 		HotlinkAllowEmpty: s.HotlinkAllowEmpty,
 		AuthUser:          s.AuthUser,

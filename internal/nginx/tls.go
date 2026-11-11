@@ -440,6 +440,13 @@ func renderServer(s Site, tlsOn bool) string {
 			b.WriteString("\n" + acmeExemptLocation())
 		}
 	}
+	if s.Limits != nil {
+		// Server-level traffic limits. They reference zones the panel defines
+		// in its own http-level table file, written in the same transaction,
+		// and they do not own `location /`, so they coexist with every other
+		// site feature.
+		b.WriteString("\n" + trafficLimitLines(s.Name, *s.Limits))
+	}
 	if len(s.RedirectPaths) > 0 {
 		// Exact path exceptions render before `location /`. They do not own the
 		// catch-all, so they can coexist with the site's static, proxy, rewrite

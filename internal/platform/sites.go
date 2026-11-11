@@ -64,8 +64,11 @@ type SiteInfo struct {
 	// forwarding header. They are empty when the site logs the peer address.
 	RealIPFrom   []string `json:"real_ip_from,omitempty"`
 	RealIPHeader string   `json:"real_ip_header,omitempty"`
-	PHPVersion   string   `json:"php_version,omitempty"`
-	PHPSocket    string   `json:"php_socket,omitempty"`
+	// Limits is the site's traffic ceiling; nil means the site is not limited.
+	// The provider owns the shared-memory zone definitions that go with it.
+	Limits     *SiteTrafficLimit `json:"limits,omitempty"`
+	PHPVersion string            `json:"php_version,omitempty"`
+	PHPSocket  string            `json:"php_socket,omitempty"`
 	// PHPSocketState is the live state of PHPSocket (listening / idle / absent /
 	// not_socket / unknown), computed on every read. It is not persisted: "the
 	// site points at 8.3" and "php8.3-fpm is answering" are two separate facts,
@@ -92,6 +95,24 @@ type SiteRedirectRule struct {
 	Path   string `json:"path"`
 	Target string `json:"target"`
 	Code   int    `json:"code"`
+}
+
+// SiteTrafficLimit is one site's traffic ceiling in platform-neutral form. The
+// provider validates the rate shape and the numeric bounds, derives the zone
+// names from the site name, and writes the nginx zone definitions themselves —
+// they have to live outside the vhost, so a caller cannot name a zone.
+type SiteTrafficLimit struct {
+	// RequestRate is a rate the provider understands, e.g. "10r/s" or "200r/m".
+	// Empty means no request-rate limit.
+	RequestRate string `json:"request_rate,omitempty"`
+	// Burst is only meaningful with a request rate; nginx takes it on the
+	// limit_req line together with a fixed nodelay.
+	Burst int `json:"burst,omitempty"`
+	// Connections caps concurrent connections per client address. 0 means none.
+	Connections int `json:"connections,omitempty"`
+	// Status is the status nginx returns when a limit is exceeded. Only 429 and
+	// 503 are accepted; 0 means nginx's own default (503).
+	Status int `json:"status,omitempty"`
 }
 
 // SiteManager is the write side of FeatWebSite. It is deliberately small: the
@@ -196,6 +217,16 @@ type SiteAuthManager interface {
 // fixed set_real_ip_from / real_ip_header block. Clearing is always allowed.
 type SiteRealIPManager interface {
 	SetRealIP(name string, from []string, header string) (SiteInfo, error)
+}
+
+// SiteTrafficLimitManager is the optional traffic-limit half of a site writer.
+// It is separate because a provider needs somewhere to put an http-level
+// include: nginx defines the shared-memory zones outside any server block, so
+// a host whose config has no wildcard include cannot offer this feature at all,
+// and that reason has to reach the UI instead of a half-written config.
+// Clearing (an empty limit) is always allowed.
+type SiteTrafficLimitManager interface {
+	SetLimits(name string, limit SiteTrafficLimit) (SiteInfo, error)
 }
 
 // SiteTLSManager is the optional certificate side of a site writer. Manual

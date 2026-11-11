@@ -211,7 +211,10 @@ paths:
         （代理或整站跳转会让本机静态资源块不可达）。
         auth_user 非空表示整站启用了 HTTP Basic Auth，值是用户名；口令与它的哈希都不会
         出现在任何响应里。real_ip_from / real_ip_header 非空表示对列出的可信代理读取
-        转发头来还原客户端地址；空表示直接使用对端地址。
+        转发头来还原客户端地址；空表示直接使用对端地址。limits 非空表示站点启用了流量限制，
+        字段为 {request_rate?, burst?, connections?, status?}；request_rate 是归一化后的
+        速率（如 10r/s），burst 只在有速率时出现，status 为 0 时省略且表示 nginx 默认的 503。
+        它引用的共享内存区由面板写在 http 级的独立文件里，与站点 vhost 同一次事务落盘。
       responses:
         "200": { description: 返回 total 与 items }
         "403": { $ref: "#/components/responses/CSRF" }
@@ -547,6 +550,67 @@ paths:
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { description: 面板没有管理这个站点 }
         "422": { description: nginx 拒绝，已回滚（nginx_rejected） }
+  /api/v1/sites/{name}/traffic-limit:
+    put:
+      tags: [site]
+      summary: 启用、更换或关闭站点的流量限制
+      description: |
+        M2 第十五片：请求体 {request_rate, burst, connections, status}。四个字段全部
+        留空（或省略）表示清除本站限流，这是始终允许的救援路径。
+        request_rate 只接受 10r/s、200r/m、100r 这类形状（数值 1-1000000），scheme 与
+        单位都先归一化再落配置；connections 是单个客户端 IP 的并发连接上限（0-100000）；
+        两者至少要给出一个，否则 burst 与 status 没有作用，返回 400 invalid_site。
+        burst 只在设置了 request_rate 时被接受（0-100000），渲染时固定附带 nodelay；
+        status 只接受 429 与 503，留空表示沿用 nginx 默认的 503。
+        面板渲染的指令是固定的，调用方不能提交任何 nginx 配置文本：vhost 里写
+        limit_req zone=<站点派生名>_req [burst=N nodelay]、limit_conn <同名>_conn N，
+        以及可选的 limit_req_status / limit_conn_status；zone 名由站点名派生
+        （mp_ 前缀，连字符换成下划线），键固定为 $binary_remote_addr，zone 大小固定 10m。
+        limit_req_zone / limit_conn_zone 必须落在 http 上下文，因此面板另写一个自己拥有的
+        表文件到本机 nginx.conf 里已存在通配 include（sites-enabled/* 或 conf.d/*.conf）
+        的目录；每次改动都按当前站点列表整表重建，最后一个限流消失时删除该文件。
+        找不到这样的 include 时返回 400 invalid_site 并说明原因：面板不会猜测一个无法
+        确认会被 nginx 读取的位置，也不会写出引用了不存在 zone 的 vhost。
+        vhost 与该表文件在同一次"写文件 → nginx -t → 通过才 reload"事务里落盘，任一步
+        失败两个文件都恢复原字节（表原本不存在则删除），响应 422 nginx_rejected。
+        限流是 server 级指令，不占用 location /，因此与静态、伪静态、反向代理、整站跳转、
+        按路径跳转、防盗链、访问密码、真实 IP 与 PHP 绑定共存。
+        同一次事务还会重写整张 zone 表，因此并发修改两个站点的限流可能相互覆盖最后写入者；
+        面板的站点写操作都按"整份配置重生成"设计，不做增量合并。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                request_rate:
+                  type: string
+                  description: 请求速率上限，如 10r/s、200r/m、100r；留空表示不做速率限制
+                burst:
+                  type: integer
+                  minimum: 0
+                  maximum: 100000
+                  description: 允许的突发请求数，仅在设置 request_rate 时有效
+                connections:
+                  type: integer
+                  minimum: 0
+                  maximum: 100000
+                  description: 单个客户端 IP 的并发连接上限；0 表示不限制连接数
+                status:
+                  type: integer
+                  description: 超限返回的状态码，只接受 429 或 503；留空用 nginx 默认的 503
+      responses:
+        "200": { description: 已生效，返回更新后的站点行（含 limits） }
+        "400": { description: 速率、突发、连接数或状态码不合法，或本机 nginx.conf 没有 http 级通配 include（invalid_site） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx 拒绝，vhost 与限流表都已回滚（nginx_rejected） }
   /api/v1/sites/{name}/hotlink:
     put:
       tags: [site]

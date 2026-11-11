@@ -32,6 +32,7 @@ type fakeSites struct {
 	proxyErr         error
 	redirectErr      error
 	redirectPathErr  error
+	limitErr         error
 	hotlinkErr       error
 	authErr          error
 	realIPErr        error
@@ -47,6 +48,7 @@ type fakeSites struct {
 	proxySets        int
 	redirectSets     int
 	redirectPathSets int
+	limitSets        int
 	hotlinkSets      int
 	authSets         int
 	realIPSets       int
@@ -202,6 +204,29 @@ func (f *fakeSites) SetRedirectPaths(name string, rules []platform.SiteRedirectR
 	}
 	f.sites[name] = s
 	f.redirectPathSets++
+	return s, nil
+}
+
+// SetLimits records the traffic ceiling on the row. The fake mirrors the
+// production contract in one respect that matters to the HTTP layer: an empty
+// limit clears it, and the row never carries zone names because those are the
+// provider's business.
+func (f *fakeSites) SetLimits(name string, limit platform.SiteTrafficLimit) (platform.SiteInfo, error) {
+	if f.limitErr != nil {
+		return platform.SiteInfo{}, f.limitErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	if limit.RequestRate == "" && limit.Burst == 0 && limit.Connections == 0 && limit.Status == 0 {
+		s.Limits = nil
+	} else {
+		keep := limit
+		s.Limits = &keep
+	}
+	f.sites[name] = s
+	f.limitSets++
 	return s, nil
 }
 

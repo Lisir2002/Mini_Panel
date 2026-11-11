@@ -177,6 +177,22 @@ func (s *Server) siteRealIPManager() (platform.SiteRealIPManager, string) {
 	return rm, ""
 }
 
+// siteTrafficLimitManager is the optional traffic-limit interface. A provider
+// without it cannot place nginx's http-level zone definitions at all, so the
+// endpoint answers 403 capability with that reason rather than half-writing a
+// config the running server would refuse.
+func (s *Server) siteTrafficLimitManager() (platform.SiteTrafficLimitManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	lm, ok := m.(platform.SiteTrafficLimitManager)
+	if !ok || lm == nil {
+		return nil, "该平台的站点 Provider 没有实现流量限制"
+	}
+	return lm, ""
+}
+
 // handleSitesList is GET /api/v1/sites. Only files the panel wrote itself are
 // listed; a hand-written vhost in the same directory is somebody else's
 // configuration and is not reported as a panel site.
@@ -442,6 +458,38 @@ func (s *Server) handleSiteRedirectPaths(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_redirect_paths", "更新按路径跳转失败："+err.Error())
+	}
+}
+
+// handleSiteLimits is PUT /api/v1/sites/{name}/traffic-limit. The body is
+// {"request_rate":"10r/s","burst":20,"connections":5,"status":429}; an empty
+// object (or all fields at their zero values) clears the site's limits. The
+// provider validates the rate shape and the numeric bounds, derives the zone
+// names from the site name, and writes the http-level zone table alongside the
+// vhost in one test-before-reload transaction.
+func (s *Server) handleSiteLimits(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteTrafficLimitManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var limit platform.SiteTrafficLimit
+	if err := decodeBody(r, &limit); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetLimits(chiParam(r, "name"), limit)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_traffic_limit", "更新流量限制失败："+err.Error())
 	}
 }
 

@@ -29,6 +29,25 @@ func newPlatform() Platform { return linuxPlatform{} }
 // instead of leaving a handler to type-assert at runtime.
 var _ PHPCtl = linuxPlatform{}
 
+// The site write features are reached through runtime type assertions in the
+// API, so a signature change here would otherwise only surface as a 403
+// "capability" on a host that does implement the feature. Asserting the whole
+// set keeps that class of bug a build failure.
+var (
+	_ SitePHPManager          = linuxSites{}
+	_ SiteSettingsManager     = linuxSites{}
+	_ SiteRewriteManager      = linuxSites{}
+	_ SiteProxyManager        = linuxSites{}
+	_ SiteRedirectManager     = linuxSites{}
+	_ SiteRedirectPathManager = linuxSites{}
+	_ SiteHotlinkManager      = linuxSites{}
+	_ SiteAuthManager         = linuxSites{}
+	_ SiteRealIPManager       = linuxSites{}
+	_ SiteTrafficLimitManager = linuxSites{}
+	_ SiteTLSManager          = linuxSites{}
+	_ SiteACMEManager         = linuxSites{}
+)
+
 func (linuxPlatform) ID() string { return "linux" }
 
 func (linuxPlatform) ConfigDir() string  { return rooted("/etc/minipanel") }
@@ -279,6 +298,20 @@ func (l linuxSites) SetRealIP(name string, from []string, header string) (SiteIn
 	return toSiteInfo(s), nil
 }
 
+// SetLimits replaces or clears a site's traffic ceiling. The nginx writer owns
+// the rate shape, the numeric bounds, the zone names and the http-level zone
+// table; this adapter translates the neutral struct and errors.
+func (l linuxSites) SetLimits(name string, limit SiteTrafficLimit) (SiteInfo, error) {
+	s, err := l.m.SetLimits(name, nginx.TrafficLimit{
+		RequestRate: limit.RequestRate, Burst: limit.Burst,
+		Connections: limit.Connections, Status: limit.Status,
+	})
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
 // resolvePHPBinding is the only version→socket translation. It returns empty
 // strings for "static site" and a typed error for anything discovery did not
 // prove, so the API can say "this host does not have PHP 8.2 (fpm)" instead of
@@ -458,6 +491,12 @@ func toSiteInfo(s nginx.Site) SiteInfo {
 		out.RedirectPaths = make([]SiteRedirectRule, len(s.RedirectPaths))
 		for i, r := range s.RedirectPaths {
 			out.RedirectPaths[i] = SiteRedirectRule{Path: r.Path, Target: r.Target, Code: r.Code}
+		}
+	}
+	if s.Limits != nil {
+		out.Limits = &SiteTrafficLimit{
+			RequestRate: s.Limits.RequestRate, Burst: s.Limits.Burst,
+			Connections: s.Limits.Connections, Status: s.Limits.Status,
 		}
 	}
 	if s.PHPVersion != "" {
