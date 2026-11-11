@@ -2,6 +2,7 @@ package php
 
 import (
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -342,6 +343,117 @@ func TestSAPIOrderIsStable(t *testing.T) {
 		if s := sapis(got[0]); s != "cli,fpm,cgi,apache2" {
 			t.Fatalf("run %d: SAPIs = %q", n, s)
 		}
+	}
+}
+
+// TestStatesOfTheReportedPaths runs against the real kernel table, which is why
+// it reads like a probe rather than a table: the claim being tested is that
+// SocketStatus does not report "listening" unless the kernel has a LISTEN entry
+// on that exact path. The php-fpm failure this exists for is the ordinary one —
+// the daemon was stopped or killed and its socket file is still sitting in
+// /run/php, so anything that only stats the file calls a dead backend alive.
+func TestStatesOfTheReportedPaths(t *testing.T) {
+	if _, err := os.ReadFile(procNetUnix); err != nil {
+		t.Skipf("没有 %s，listening/idle 这一半在本机无法验证：%v", procNetUnix, err)
+	}
+	dir := t.TempDir()
+
+	if got := SocketStatus(""); got != SocketNone {
+		t.Errorf("SocketStatus(\"\") = %q, want %q（没有人给出路径，这句话没有可检查的对象）", got, SocketNone)
+	}
+	if got := DirStatus(""); got != DirNone {
+		t.Errorf("DirStatus(\"\") = %q, want %q", got, DirNone)
+	}
+	if got := DirStatus(dir); got != DirPresent {
+		t.Errorf("DirStatus(existing dir) = %q, want %q", got, DirPresent)
+	}
+	if got := DirStatus(filepath.Join(dir, "never-created")); got != DirAbsent {
+		t.Errorf("DirStatus(missing) = %q, want %q", got, DirAbsent)
+	}
+
+	// A regular file on the socket's name is a different problem than nothing
+	// there, and it is the kind of thing that happens when someone unpacks a
+	// backup over /run.
+	regular := filepath.Join(dir, "php8.3-fpm.sock")
+	if err := os.WriteFile(regular, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := SocketStatus(regular); got != SocketNotSocket {
+		t.Errorf("SocketStatus(regular file) = %q, want %q", got, SocketNotSocket)
+	}
+	if got := DirStatus(regular); got != DirNotDir {
+		t.Errorf("DirStatus(regular file) = %q, want %q", got, DirNotDir)
+	}
+
+	live := filepath.Join(dir, "live.sock")
+	a, err := net.ResolveUnixAddr("unix", live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.ListenUnix("unix", a)
+	if err != nil {
+		t.Skipf("本机建不了 unix socket（%v），这一半验证不了", err)
+	}
+	// Go's unix listener unlinks its path at Close by default, which would make
+	// the stale case below impossible to reach and would silently turn it into
+	// "absent". A php-fpm that was SIGKILLed does not unlink anything: the inode
+	// stays under /run and only the kernel's table entry goes away. Turning the
+	// unlink off is what makes the test describe that host.
+	ln.SetUnlinkOnClose(false)
+	if got := SocketStatus(live); got != SocketListening {
+		t.Errorf("SocketStatus while listening = %q, want %q", got, SocketListening)
+	}
+	// The stale-file case: closing the listener takes the entry out of the kernel
+	// table but leaves the inode on disk. If this ever reports listening, the
+	// panel would be describing a service that is not running.
+	ln.Close()
+	if got := SocketStatus(live); got != SocketIdle {
+		t.Errorf("SocketStatus after the listener exited = %q, want %q（文件还在，内核里没人听）", got, SocketIdle)
+	}
+	if got := SocketStatus(filepath.Join(dir, "never-created")); got != SocketAbsent {
+		t.Errorf("SocketStatus(missing) = %q, want %q", got, SocketAbsent)
+	}
+}
+
+// TestSocketStatusUsesThePathColumnVerbatim is the parser test: two real socket
+// files, a fabricated table that lists only one of them, and a row shape set
+// chosen so a sloppy Fields() index would read the wrong column. Nothing here
+// depends on what else the machine happens to have running.
+func TestSocketStatusUsesThePathColumnVerbatim(t *testing.T) {
+	dir := t.TempDir()
+	named := filepath.Join(dir, "php 8.3-fpm.sock") // a space in the path: the Path column is the tail, not fields[7]
+	other := filepath.Join(dir, "other.sock")
+	for _, p := range []string{named, other} {
+		ln, err := net.Listen("unix", p)
+		if err != nil {
+			t.Skipf("本机建不了 unix socket（%v）", err)
+		}
+		defer ln.Close()
+	}
+	table := filepath.Join(dir, "unix")
+	body := "Num       RefCount Protocol Flags    Type St Inode Path\n" +
+		"ffff0: 00000002 00000000 00010000 0001 01 111 " + named + "\n" + // LISTEN on the one we ask about
+		"ffff1: 00000000 00000000 00000000 0001 03 222 " + other + "\n" + // CONNECTED, must not count
+		"ffff2: 00000002 00000000 00010000 0001 01 333\n" + // unnamed socket, no path column
+		"ffff3: 00000002 00000000 00010000 0001 01 444 " + filepath.Join(dir, "gone.sock") + "\n" // listed but not on disk
+	if err := os.WriteFile(table, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := socketStatus(named, table); got != SocketListening {
+		t.Errorf("socketStatus(named) = %q, want %q", got, SocketListening)
+	}
+	if got := socketStatus(other, table); got != SocketIdle {
+		t.Errorf("socketStatus(connected-only entry) = %q, want %q（st=03 不是 LISTEN）", got, SocketIdle)
+	}
+	if got := socketStatus(named, filepath.Join(dir, "no-such-table")); got != SocketUnknown {
+		t.Errorf("socketStatus(unreadable table) = %q, want %q（读不到就是不知道，不是没人听）", got, SocketUnknown)
+	}
+	listening, err := listeningSocketPaths(table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listening) != 2 {
+		t.Errorf("listening table = %v, want the two st=01 rows with a path", listening)
 	}
 }
 

@@ -64,10 +64,13 @@
   M2/M3/M4 的写操作接口（`WebServerCtl`、`FirewallCtl`、`PHPCtl`、`ServiceManager`）**现在就声明**，
   这样到里程碑时不需要重新塑形核心层。M2 第一片之后它们的现状不再相同：`PHPCtl` 在 Linux 上
   **已经是实现**（`internal/platform/platform_linux.go:22` 的 `var _ PHPCtl = linuxPlatform{}`，
-  方法体在 `:53`、`:58`、`:60`，底下是 `internal/php` 的现场探测），
+  方法体在 `:60`、`:65`、`:67`，底下是 `internal/php` 的现场探测），
   `WebServerCtl`、`FirewallCtl`、`ServiceManager` 仍然只有类型定义、没有实现、没有路由。
   "有没有实现"这件事由编译器管：那句 `var _ PHPCtl = linuxPlatform{}` 一改签名就编不过。
-  接口声明见 `internal/platform/paths.go:70`。
+  接口声明见 `internal/platform/paths.go:77`——那里同时写明 `PoolDir`/`SocketPath` 给的是
+  **目标路径**，"这个名字上此刻有没有东西、内核里有没有人在听"是
+  `internal/php/php.go:270 DirStatus()` / `:286 SocketStatus()` 的另一次读，不是这个接口的方法
+  （M2 第二片把两次读分开，但没有改接口形状）。
 * `internal/php` 是 M2 新增的一个小包：它只做一件事——把"这台机器上有哪些能跑的 PHP 版本、
   每个版本的 SAPI/pool/socket 路径在哪"从文件系统证据里读出来（`internal/php/php.go:119 DiscoverIn()`），
   不写任何东西、不装任何东西。`internal/platform` 依赖它，而不是反过来。
@@ -92,7 +95,7 @@
   默认拒绝，而不是默认允许。
   **实际状态**：`Allow()` 全仓库只被调用一次（`internal/platform/detect.go:74`），
   生产代码里的 `Degrade()` 只有 M2 的 PHP 探测那两处
-  （`internal/platform/platform_linux.go:164`、`:167`），
+  （`internal/platform/platform_linux.go:171`、`:174`），
   `features` 里唯一的 `available` 仍然是 `audit`。探测到的**事实**（有 ufw、有 sshd、
   有 nginx、有 PHP 8.3）只写进 `Capabilities` 的描述字段，不写成"功能可用"。
 * `Deny()` / `Degrade()` / `Allow()` 三个入口都走同一个 `set()`：`Allow` 会清掉旧理由与
@@ -100,10 +103,12 @@
   （`internal/platform/capabilities.go:202 Deny()` / `:208 Degrade()` / `:220 Allow()`）。
   `Has()` 只认 `available`，`degraded` 一律算不可用（`internal/platform/capabilities.go:181 Has()`），
   所以"M2 把 php 报成 degraded"不会让任何一道按 `Has()` 把关的接口放行。
-* 四条测试：`TestDetectedCapabilitiesAreExplained`、`TestCapabilityStatesAreSymmetric`
-  （`internal/platform/capabilities_test.go`），以及从 HTTP 外面重复断言的
-  `TestCapabilitiesAreSelfConsistent`（`internal/api/m0_test.go`）与 PHP 的
-  `TestDetectPHPFromRootedHosts`（`internal/platform/platform_php_test.go`）。入口是 `make check-honesty`。
+* 五条测试：`TestDetectedCapabilitiesAreExplained`、`TestCapabilityStatesAreSymmetric`
+  （`internal/platform/capabilities_test.go`），从 HTTP 外面重复断言的
+  `TestCapabilitiesAreSelfConsistent`（`internal/api/m0_test.go`），PHP 的
+  `TestDetectPHPFromRootedHosts` 与 M2 第二片的 `TestPHPCtlPathsAreTargetsAndStatesAreReads`
+  （都在 `internal/platform/platform_php_test.go`，后者钉的是"`PHPCtl` 给的目标不随目录增删而变，
+  变的是另一次读"）。入口是 `make check-honesty`。
 * 第一条测试里除了"关了必须有理由"，还有一条**白名单**：
   `internal/platform/capabilities_test.go:174 implemented := map[string]bool{FeatAudit: true}`，随后双向断言
   （`:175-182` 白名单外报 `available` 报错；`:183-187` 白名单内的项没报成 `available` 也报错）。
@@ -112,7 +117,7 @@
   白名单只管 `available`，因此 M2 把 `php` 写成 `degraded` 不需要、也不允许动这张表。
 * 理由文案有下限："未实现"不算理由，必须写清**随哪个里程碑/Provider 交付**。
   同一种关闭状态在不同机器上要说不同的话：Linux 上"没装 ufw/firewalld/nft"与"装了但写入
-  Provider 还没上"是两句不同理由（`platform_linux.go:97-103`），运维必须能分清是机器的问题
+  Provider 还没上"是两句不同理由（`platform_linux.go:104-110`），运维必须能分清是机器的问题
   还是面板版本的问题。
 
 ### 2.3 Windows 的差异（不是"以后再说"，是现在就写进位图）
@@ -353,7 +358,7 @@ bcrypt 口令哈希、有效会话 ID 和整份审计记录：会话 ID 泄露�
 反应的按钮，或者一整块被藏起来的已交付功能。
 
 因此这条纪律是**测试强制**的，不是文档口径（M2 第一片是它的正面样本：`internal/php` 当场探到
-PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:164`
+PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:171`
 报的是"检测到了什么、缺哪个后端"，而 `php_version_switch`、`php_ext_source`、`site` 仍然停在
 `newBase()` 里那句 `unavailable` 理由上，探测到多版本不等于能切版本）：
 
@@ -423,6 +428,21 @@ go test -count=200 -run TestEntranceShape ./internal/sec/   # 本轮 ok：200 �
 （`:237 TestUsageCoversEveryCommand`）；banner 显示在用的端口与地址、入口关闭时写"未设置"
 （`:257 TestBannerReportsLiveConfigValues`）。
 
+M2 第二片补上了一条曾经记在本表里的缺口：**`doctor` 打印的 socket 路径没有校验是不是真的有人在听**。
+现在 `internal/php/php.go:286 SocketStatus()` 读内核表 `/proc/net/unix` 判活
+（解析在 `:323 listeningSocketPaths()`，`St` 列 `01` 才是 LISTEN，Path 是行尾整段而不是某个固定列），
+`cmd/minipanel/php.go:30 phpProbe()` 把它和 `PHPCtl` 给的路径分开成两次读，`phpSummary()` 的句子
+因此变成"路径来自 PHPCtl，状态是此刻现场读的"。压它的三条：`internal/php/php_test.go` 的
+`TestStatesOfTheReportedPaths`（现场 bind 一个 unix socket、`SetUnlinkOnClose(false)` 后关闭，
+得到"文件在但内核里没人听"这个真实形状）、`TestSocketStatusUsesThePathColumnVerbatim`（伪造内核表，
+钉住列解析与"CONNECTED 不算在听"）、`cmd/minipanel/php_test.go` 的
+`TestDoctorTellsStoppedFpmApartFromRunningFpm`（同一台假主机的两种内核状态，doctor 必须说出不同句子）。
+本机没有跑着的 php-fpm，所以"listening / idle"两句话是在测试自己造的 listener 上验证的，不是实测报告；
+本轮另外在一台 rooted 假主机上用 **python** 现场 bind 一个 unix socket 跑过一遍 `minipanel doctor`
+（活着 → "内核里有进程在听"，`close()` 不 unlink → "文件在但内核里没人听，fpm 大概是停了"，两次都不出
+"注意："），原始输出记在 README「如何验证」里。特意换 python 而不是 Go，是为了让这条判断不依赖某个
+运行时的退出清理行为。
+
 下面是**代码已经保证、测试还没断言**的部分。列出来是为了让人知道哪些地方要靠 review 兜住，
 而不是假装"全都有测试压着"。
 
@@ -433,10 +453,10 @@ go test -count=200 -run TestEntranceShape ./internal/sec/   # 本轮 ok：200 �
 | 面板证书与私钥的 0600 | `internal/sec` 只有一个测试文件且不碰证书 | 代码 `internal/sec/tls.go:74-86` |
 | `444`（挂断型）伪装真的会断连 | `disguise()` 的 Hijacker 分支只在配置 444 时走到，M0 测试跑的是 404 | 代码 `internal/api/server.go:268` |
 | 前端"灰 + 理由"的实际渲染 | 仓库里没有 UI 自动化：`make web` 编译前端并断言产物只有一个文件，`make check-ui` 断言能力 key 全覆盖与端点全覆盖，但**"页面画出来对不对"这一步仍然靠人**（真实浏览器的 puppeteer 脚本刻意不入仓库，它依赖本机 chrome） | `make check-ui` 的三条 + `make check-honesty` 保证理由必然存在；每轮里程碑手工跑一遍浏览器断言并在 README"如何验证"里记下条数 |
-| `minipanel passwd` 的 **tty 分支**（真关回显那一条） | 测试文件自己写明 `go test` 下 stdin 不是 tty（`cmd/minipanel/main_test.go:212-213`），所以 `term.IsTerminal` 为真的分支走不到；管道分支与全部校验分支**已经**在 CI 里 | 代码 `cmd/minipanel/main.go:631`（`IsTerminal`）→ `:637`（`term.ReadPassword`）、`:646`（`readLine`）；本轮用 `pty.fork()` 手工验证主端流里不回声明文。这是 §8.2 那条纪律的反面教材：**文案说"不回显"而代码没关 ECHO** 曾经成立过，只有断言能防它回来；补法是在测试里自建 pty，或把该分支抽成可注入接口 |
+| `minipanel passwd` 的 **tty 分支**（真关回显那一条） | 测试文件自己写明 `go test` 下 stdin 不是 tty（`cmd/minipanel/main_test.go:212-213`），所以 `term.IsTerminal` 为真的分支走不到；管道分支与全部校验分支**已经**在 CI 里 | 代码 `cmd/minipanel/main.go:637`（`IsTerminal`）→ `:643`（`term.ReadPassword`）、`:652`（`readLine`）；本轮用 `pty.fork()` 手工验证主端流里不回声明文。这是 §8.2 那条纪律的反面教材：**文案说"不回显"而代码没关 ECHO** 曾经成立过，只有断言能防它回来；补法是在测试里自建 pty，或把该分支抽成可注入接口 |
 | 入口字母表本身没有断言 | 形状是断言过的（`sec_test.go:77` 要求 `/` 前缀且 `len(e) == 9`，把 8 字符改短会红），但 `entranceAlphabet` 在测试里一次都没被引用（`grep -rn "entranceAlphabet" --include='*_test.go' .` 为空）：没人断言它是 31 个符号。往字母表里加回易混字符，只能靠 `:82` 那条禁集撞上来才发现 | 禁集断言 + §8.3 的 `-count=200` 重复；注释 `internal/sec/sec.go:108-115` 写明了 31 符号 × 8 字符 ≈ 39.6 bit |
-| PHP 探测只认 Debian/Ubuntu 的布局 | `grep -rn remi internal/php/` 为空——`/etc/php/<版本>` + `/usr/{,s}bin` 之外的形状（RPM 系、remi/SCL 的 `/etc/opt/remi/php83`）没有任何 fixture 覆盖 | 代码 `internal/php/php.go:110-118` 的注释把这个假设写明了；找不到就报"未检测到"，而不是猜一个路径出来。补法是加一组 redhat 形状的假 root，而不是往探测里塞 if |
-| `doctor` 打印的 pool/socket 路径没有校验 socket 是否在听 | `grep -n "net.Dial" cmd/minipanel/php.go` 为空：这一行只把 `PHPCtl` 给的路径原样印出来 | 文案自己带着这句尾注（`cmd/minipanel/php.go:49 phpSummary()` 拼出来的"路径由 PHPCtl 给出，未校验 socket 是否存活"），`TestDoctorPHPCtlLineIsTheInterface` 钉的是"来源必须是接口"而不是"socket 必须是活的" |
+| PHP 探测只认 Debian/Ubuntu 的布局 | `grep -rn remi internal/php/` 为空——`/etc/php/<版本>` + `/usr/{,s}bin` 之外的形状（RPM 系、remi/SCL 的 `/etc/opt/remi/php83`）没有任何 fixture 覆盖 | 代码 `internal/php/php.go:110-118` 的注释把这个假设写明了；找不到就报"未检测到"，而不是猜一个路径出来。M2 第二片给它加了一个**被动探测器**：`cmd/minipanel/php.go:124 phpBitmapMismatch()` 第四条规则——`PHPCtl` 报的 socket 在内核里是 LISTEN、而位图 `php_modes` 里没有 fpm，这两件事只可能来自两边看的不是同一处，于是 doctor 打一行"注意："点名"非 Debian 布局"。它不能修好探测，但能让这种机器上的错法从"静默 502"变成"自检先说出来"；正解仍然是补一组 redhat 形状的假 root，而不是往探测里塞 if |
+| socket 判活只说"有人在听"，不说听的**是不是 php-fpm**，也没做过一次 FastCGI 握手 | `grep -rn "net\.Dial\|fcgi" internal/php/ cmd/minipanel/php.go` 为空（本轮实测无输出）：`SocketStatus` 唯一的信息源是内核按路径记的账，路径背后是什么进程它不知道 | 代码 `internal/php/php.go:292 socketStatus()` 只在 `St` 列为 `01` 时报 listening；表读不到时返回 `unknown` 而不是猜"没人听"（`internal/php/php_test.go:448` 断言这条），文案对应 `cmd/minipanel/php.go:79 socketWords()` 里那句"读不到 /proc/net/unix，判断不了"。"这个后端真的能执行 PHP 吗"要等 M2 的站点写入侧发一次 FastCGI 请求才算验证过 |
 | `MINI_PANEL_DEBUG=1` 目前没有可观察效果 | `newLogger()`（`cmd/minipanel/main.go:165`）会降到 Debug 级，但 `grep -rn "\.Debug(" --include='*.go' internal cmd \| grep -v _test` 为空 | 它只是留口。`README.md` 快速上手一节已按"今天不会多出任何输出"来写，等真出现 Debug 埋点这条缺口自动消失 |
 
 补齐建议按价值排序：证书生成与 SAN 重签 → 444 分支 → passwd 的 pty 分支 → `-wal`/`-shm` 权限断言。

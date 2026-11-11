@@ -184,3 +184,56 @@ func TestDetectPHPFromRootedHosts(t *testing.T) {
 		})
 	}
 }
+
+// TestPHPCtlPathsAreTargetsAndStatesAreReads pins the split doctor's PHP line
+// depends on: PHPCtl names where a backend lives, and the php package says
+// whether it is there at this instant. The first must not move when the second
+// does — if PoolDir went blank the moment the directory disappeared, the write
+// side would have no way to ask "where does this pool go" about a pool it has
+// not created yet, which is the whole call M2 has to make.
+func TestPHPCtlPathsAreTargetsAndStatesAreReads(t *testing.T) {
+	root := t.TempDir()
+	dirs := []string{"/etc/php/8.3/cli", "/etc/php/8.3/fpm/pool.d", "/run/php"}
+	for _, d := range dirs {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{"/usr/bin/php8.3", "/usr/sbin/php-fpm8.3"} {
+		full := filepath.Join(root, f)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("MINI_PANEL_ROOT", root)
+
+	ctl, ok := Current().(PHPCtl)
+	if !ok {
+		t.Fatal("this platform does not implement PHPCtl, so there is nothing to pin")
+	}
+	pool, sock := ctl.PoolDir("8.3"), ctl.SocketPath("8.3")
+	if want := filepath.Join(root, "/etc/php/8.3/fpm/pool.d"); pool != want {
+		t.Errorf("PoolDir = %q, want %q", pool, want)
+	}
+	if got := php.DirStatus(pool); got != php.DirPresent {
+		t.Errorf("DirStatus(%q) = %q, want present — the fixture just made it", pool, got)
+	}
+	// A rooted fixture has no running php-fpm, so the socket path exists as a
+	// name and nothing more.
+	if got := php.SocketStatus(sock); got != php.SocketAbsent {
+		t.Errorf("SocketStatus(%q) = %q, want absent", sock, got)
+	}
+
+	if err := os.RemoveAll(pool); err != nil {
+		t.Fatal(err)
+	}
+	if again := ctl.PoolDir("8.3"); again != pool {
+		t.Errorf("PoolDir changed from %q to %q when the directory went away; the target is a calculation, not an ls", pool, again)
+	}
+	if got := php.DirStatus(pool); got != php.DirAbsent {
+		t.Errorf("DirStatus after RemoveAll = %q, want absent — this is the read that had to change", got)
+	}
+}

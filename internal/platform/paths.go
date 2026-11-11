@@ -67,6 +67,13 @@ type FirewallRule struct {
 // discovery (internal/php), Windows still answers from build-tag constants. The
 // fpm/cgi split is expressed through Capabilities, not through a method here —
 // a caller that needs "can this host run a site" reads the bitmap.
+//
+// PoolDir and SocketPath name paths. Whether those paths mean anything *right
+// now* is a separate question, answered by php.DirStatus / php.SocketStatus in
+// the package that produced the path. The split is not an oversight: this
+// interface is the shape M0 declared so M2 would not have to reshape the core,
+// and "does the kernel say someone is listening" is state of the machine, not a
+// per-version property of PHP. A caller that wants both asks twice.
 type PHPCtl interface {
 	Versions() ([]string, error)
 	PoolDir(version string) string

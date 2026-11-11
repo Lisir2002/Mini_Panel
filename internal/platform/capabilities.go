@@ -140,7 +140,7 @@ type Capabilities struct {
 	Hostname     string `json:"hostname"`
 
 	WebServers    []WebServerName        `json:"web_servers"`  // implemented in M2
-	PHPModes      []PHPRuntimeMode       `json:"php_modes"`    // fpm on unix, cgi on windows
+	PHPModes      []PHPRuntimeMode       `json:"php_modes"`    // Linux: from internal/php detection; Windows: still a build-tag constant
 	PHPVersions   []string               `json:"php_versions"` // installed, detected live
 	PHPExtInstall []ExtensionInstallMode `json:"php_ext_install"`
 	ReloadMode    ReloadMode             `json:"reload_mode"`

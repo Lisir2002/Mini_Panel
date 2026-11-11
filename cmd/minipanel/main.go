@@ -523,9 +523,15 @@ func cmdDoctor(args []string) error {
 			// php_ctl_* are the PHPCtl answers, kept separate from
 			// capabilities.php_versions on purpose: the test compares them, and a
 			// single merged key would hide the disagreement it exists to catch.
+			// The *_state keys are a second, independent claim about the same two
+			// paths — "here is where the socket is" and "is anyone answering" are
+			// not one sentence, and merging them is how a stopped fpm gets
+			// reported as a working backend.
 			"php_ctl_versions": phpInfo.versions,
 			"php_pool_dir":     phpInfo.poolDir,
+			"php_pool_state":   phpInfo.poolState,
 			"php_socket":       phpInfo.socket,
+			"php_socket_state": phpInfo.socketState,
 			"php_note":         phpInfo.note,
 			"schema_version":   schemaVer,
 			"users":            users,

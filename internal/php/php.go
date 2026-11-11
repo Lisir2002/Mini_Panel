@@ -222,9 +222,10 @@ func describe(root, version, defaultBin, defaultVersion string) Install {
 func PoolDir(version string) string { return poolDirIn(Root(), version) }
 
 // SocketPath is the listen socket php-fpm creates for one version, which is what
-// an nginx vhost has to point `fastcgi_pass` at. It is reported as a path, not as
-// "this socket is alive": M2's write side checks liveness before it claims a
-// site can serve PHP.
+// an nginx vhost has to point `fastcgi_pass` at. It is a path, not a liveness
+// claim — SocketStatus(path) is the question "is anyone answering right now", and
+// keeping the two apart is what stops the panel describing a stopped fpm as a
+// backend a site can use.
 func SocketPath(version string) string { return socketIn(Root(), version) }
 
 func poolDirIn(root, version string) string {
@@ -233,6 +234,106 @@ func poolDirIn(root, version string) string {
 
 func socketIn(root, version string) string {
 	return filepath.Join(root, "/run/php", "php"+version+"-fpm.sock")
+}
+
+// Path states. A path is not a fact about the present moment: an operator who
+// reads `socket /run/php/php8.3-fpm.sock` in a self-check reasonably assumes
+// something is answering on the other end, and on the most common broken host
+// (php-fpm installed but stopped, or removed and its socket file left behind)
+// that assumption is exactly what M2's site handler would trip over. So this
+// package answers two questions separately — where (PoolDir, SocketPath) and
+// what is true of it right now (DirStatus, SocketStatus).
+const (
+	// DirStatus values.
+	DirNone    = "none"    // nobody named a path, so there is nothing to look at
+	DirPresent = "present" // the directory is on disk right now
+	DirAbsent  = "absent"  // the path is the canonical Debian location; nothing is there
+	DirNotDir  = "not_dir" // something else occupies that name
+
+	// SocketStatus values.
+	SocketNone      = "none"       // this version has no fpm, so no socket to report
+	SocketAbsent    = "absent"     // no file: fpm never ran here, or this is not the Debian layout
+	SocketNotSocket = "not_socket" // a regular file sits on that name — worse than "nobody listening"
+	SocketIdle      = "idle"       // socket file present, no listening socket in the kernel table
+	SocketListening = "listening"  // the kernel table has a LISTEN entry on this exact path
+	SocketUnknown   = "unknown"    // /proc/net/unix unreadable: the honest answer is "cannot tell"
+)
+
+// procNetUnix is the kernel's unix socket table. It is deliberately not prefixed
+// by MINI_PANEL_ROOT: what a dev run relocates is the panel's footprint (/etc,
+// /var, /run), while this is state about the machine the process is standing on.
+// Reading the real table is also what lets the tests below assert against truth
+// rather than against a fixture of our own making.
+const procNetUnix = "/proc/net/unix"
+
+// DirStatus reports whether a directory this package named actually exists.
+func DirStatus(path string) string {
+	if path == "" {
+		return DirNone
+	}
+	st, err := os.Stat(path)
+	switch {
+	case err != nil:
+		return DirAbsent
+	case st.IsDir():
+		return DirPresent
+	default:
+		return DirNotDir
+	}
+}
+
+// SocketStatus reports whether anyone is listening on the socket at path.
+func SocketStatus(path string) string { return socketStatus(path, procNetUnix) }
+
+// socketStatus splits "is there a file" from "is anyone listening", because those
+// two disagree routinely: php-fpm leaves the socket file behind when it is
+// stopped, and a panel that only stats the file would report a backend that is
+// not there.
+func socketStatus(path, table string) string {
+	if path == "" {
+		return SocketNone
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return SocketAbsent
+	}
+	if st.Mode()&os.ModeSocket == 0 {
+		return SocketNotSocket
+	}
+	listening, err := listeningSocketPaths(table)
+	if err != nil {
+		// Not being able to read the table is not evidence of nobody listening.
+		return SocketUnknown
+	}
+	if listening[path] {
+		return SocketListening
+	}
+	return SocketIdle
+}
+
+// listeningSocketPaths parses the kernel unix table and returns the bound paths
+// in state SS_LISTENING ("01"). The line format is
+// Num RefCount Protocol Flags Type St Inode Path, header included.
+//
+// Two limitations, both pointing the safe way: only stream listening sockets are
+// matched, which is what php-fpm uses; and the kernel stores the path as the
+// binding process saw it, so a listener from another mount namespace can show up
+// as SocketIdle even though something is alive. Under-claiming is fine here, the
+// reverse would be a lie about a running service.
+func listeningSocketPaths(table string) (map[string]bool, error) {
+	b, err := os.ReadFile(table)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 8 || f[5] != "01" {
+			continue
+		}
+		out[strings.Join(f[7:], " ")] = true
+	}
+	return out, nil
 }
 
 // Versions returns just the version strings, in the same order Discover does.

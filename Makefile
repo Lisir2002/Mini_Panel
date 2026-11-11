@@ -115,8 +115,12 @@ check-contract:
 	$(GO) test -count=1 -run 'TestOpenAPIContractMatchesRoutes|TestSpecDeclaresTheSecurityContract' ./internal/api/
 
 ## check-honesty  能力位图自洽：非 available 的每一项都必须带可读理由，状态由现场证据得出
+##                PHP 这一块还多一条：doctor 打印的路径与它打印的"在不在/有没有人听"
+##                必须来自两次独立的读，而不是把 PHPCtl 的目标当成现场证据。
 check-honesty:
-	$(GO) test -count=1 -run 'TestDetectedCapabilitiesAreExplained|TestCapabilityStatesAreSymmetric|TestPathsAreAbsoluteAndConsistent|TestDetectPHP' ./internal/platform/
+	$(GO) test -count=1 -run 'TestDetectedCapabilitiesAreExplained|TestCapabilityStatesAreSymmetric|TestPathsAreAbsoluteAndConsistent|TestDetectPHP|TestPHPCtlPathsAreTargetsAndStatesAreReads' ./internal/platform/
+	$(GO) test -count=1 -run 'TestStatesOfTheReportedPaths|TestSocketStatusUsesThePathColumnVerbatim' ./internal/php/
+	$(GO) test -count=1 -run 'TestDoctor|TestSocketListeningWithoutFpmModeIsAContradiction' ./cmd/minipanel/
 	$(GO) test -count=1 -run 'TestCapabilitiesAreSelfConsistent' ./internal/api/
 
 ## check-docs  README 与 docs/ 里的 path:line 指针必须落在真实文件的有效行上，

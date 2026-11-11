@@ -45,11 +45,18 @@ func envOr(k, def string) string {
 	return def
 }
 
-// Versions, PoolDir and SocketPath are PHPCtl: the read side of what the php
-// package observed, plus the two paths M2's write side needs. They re-probe the
-// host on every call instead of reading a cached bitmap, because a panel that
-// answers "which PHP versions exist" from startup-time data lies the moment the
-// operator installs one, and discovery is cheap enough to run live.
+// Versions, PoolDir and SocketPath are PHPCtl. Versions re-probes the host on
+// every call instead of reading a cached bitmap, because a panel that answers
+// "which PHP versions exist" from startup-time data lies the moment the operator
+// installs one, and discovery is cheap enough to run live.
+//
+// PoolDir and SocketPath are the other half of the promise and they answer a
+// different question: they name where a version's pool directory and listen
+// socket are *supposed* to be, which is what the write side needs and is not the
+// same claim as "it is there". Existence and liveness are asked separately, via
+// php.DirStatus / php.SocketStatus — and `minipanel doctor` prints both answers
+// next to each other, so a stopped php-fpm on a host that still has the file
+// cannot be read as a working backend.
 func (linuxPlatform) Versions() ([]string, error) {
 	installs, _ := php.Discover()
 	return php.Versions(installs), nil
