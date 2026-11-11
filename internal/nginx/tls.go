@@ -426,6 +426,15 @@ func renderServer(s Site, tlsOn bool) string {
 		b.WriteString("    ssl_protocols TLSv1.2 TLSv1.3;\n")
 		b.WriteString("    ssl_session_cache shared:SSL:10m;\n")
 	}
+	if s.AuthUser != "" {
+		// Server-level Basic Auth. When TLS is on, the HTTP-01 challenge path is
+		// exempted: the issuer validates over port 80 without credentials, and a
+		// protected challenge directory would silently stop renewals.
+		b.WriteString("\n" + authLines(s))
+		if tlsOn {
+			b.WriteString("\n" + acmeExemptLocation())
+		}
+	}
 	b.WriteString("\n    location / {\n")
 	switch {
 	case s.RedirectTarget != "":

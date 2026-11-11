@@ -93,7 +93,8 @@ func (linuxPlatform) WebServer() (WebServerCtl, bool) {
 }
 
 func (linuxPlatform) Sites() (SiteManager, bool) {
-	m, err := nginx.NewWithCertDir(nginxRoot(), linuxPlatform{}.SiteRoot(), rooted("/etc/minipanel/certs"))
+	m, err := nginx.NewWithDirs(nginxRoot(), linuxPlatform{}.SiteRoot(),
+		rooted("/etc/minipanel/certs"), rooted("/etc/minipanel/auth"))
 	if err != nil {
 		return nil, false
 	}
@@ -235,6 +236,17 @@ func (l linuxSites) SetRedirect(name, target string, code int, keepPath bool) (S
 // errors and the returned row.
 func (l linuxSites) SetHotlink(name string, enabled, allowEmpty bool) (SiteInfo, error) {
 	s, err := l.m.SetHotlink(name, enabled, allowEmpty)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
+// SetAuth enables, replaces or clears the fixed Basic Auth gate. The nginx
+// writer owns username/password validation, the hash and the one-unit rollback
+// of config + password file; this adapter only translates the result.
+func (l linuxSites) SetAuth(name, username, password string) (SiteInfo, error) {
+	s, err := l.m.SetAuth(name, username, password)
 	if err != nil {
 		return SiteInfo{}, mapNginxErr(err)
 	}
@@ -411,6 +423,7 @@ func toSiteInfo(s nginx.Site) SiteInfo {
 		RedirectTarget: s.RedirectTarget, RedirectCode: s.RedirectCode,
 		RedirectKeepPath: s.RedirectKeepPath,
 		Hotlink:          s.Hotlink, HotlinkAllowEmpty: s.HotlinkAllowEmpty,
+		AuthUser:   s.AuthUser,
 		ConfigPath: s.ConfigPath, Enabled: s.Enabled, CreatedAt: s.CreatedAt,
 		PHPVersion: s.PHPVersion, PHPSocket: s.PHPSocket,
 	}

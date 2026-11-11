@@ -3,8 +3,8 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七、八、九、十、十一：静态站点、站点证书、PHP 版本绑定、基础设置编辑、
-// 伪静态模板、反向代理、整站跳转与防盗链。
+// M2 第三、四、六、七、八、九、十、十一、十二：静态站点、站点证书、PHP 版本绑定、基础设置编辑、
+// 伪静态模板、反向代理、整站跳转、防盗链与访问密码。
 // 这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
@@ -22,6 +22,9 @@ import { store } from "../store";
 //   * 防盗链只接受"开 / 关"与"是否放行无 Referer 请求"；扩展名表、valid_referers 参数与
 //     403 都是后端常量。它是正则 location，可与伪静态共存；代理与整站跳转会让本机静态资源
 //     不可达，因此两边互斥，页面在三个对话框里给同一句提示。
+//   * 访问密码是固定的 HTTP Basic Auth：页面只收用户名与口令，realm、指令与 {SHA} 口令文件
+//     都由后端决定，口令不会回显（对话框每次保存都要求重新输入）。它整站生效、不占用
+//     location /，因此与其它站点功能共存；HTTPS 站点的 ACME 续期路径由后端自动豁免。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
 //     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
 //     而不是等请求失败后才解释。
@@ -73,6 +76,10 @@ const redirectForm = ref({ target: "", code: 301, keep_path: true });
 const hotlinkOpen = ref(false);
 const hotlinkTarget = ref(null);
 const hotlinkForm = ref({ enabled: false, allow_empty: true });
+
+const authOpen = ref(false);
+const authTarget = ref(null);
+const authForm = ref({ username: "", password: "" });
 
 function parseDomains(text) {
   return String(text || "")
@@ -430,9 +437,44 @@ async function saveHotlink() {
   } finally { busy.value = false; }
 }
 
+function openAuth(r) {
+  error.value = ""; msg.value = "";
+  authTarget.value = r;
+  // 口令永远不会从后端读回：已启用的站点只回填用户名，保存时必须重新输入口令。
+  authForm.value = { username: r.auth_user || "", password: "" };
+  authOpen.value = true;
+}
+
+async function saveAuth() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const username = authForm.value.username.trim();
+    const password = authForm.value.password;
+    if (!!username !== !!password) {
+      error.value = "用户名与口令必须同时给出；两项都留空表示关闭访问密码。";
+      return;
+    }
+    const site = await api("/api/v1/sites/" + encodeURIComponent(authTarget.value.name) + "/auth",
+      { method: "PUT", body: JSON.stringify({ username, password }) });
+    if (site.auth_user) {
+      msg.value = site.name + " 已启用访问密码（用户名 " + site.auth_user +
+        "）；口令只以 {SHA} 形式写入面板的 0600 文件，vhost 已通过 nginx -t（vhost 未变时不会重载）。";
+    } else {
+      msg.value = site.name + " 已关闭访问密码，口令文件已删除；nginx 已通过 nginx -t 并重载。";
+    }
+    authForm.value = { username: "", password: "" };
+    authOpen.value = false;
+    await load();
+  } catch (e) {
+    // 400 invalid_site（用户名 / 口令不合法）与 422 nginx_rejected 都带后端原文；
+    // 后端返回前配置与口令文件已一起恢复，页面原样显示。
+    error.value = e.message;
+    await load();
+  } finally { busy.value = false; }
+}
+
 onMounted(load);
 </script>
-
 <template>
   <div class="mp-card">
     <h3>网站</h3>
@@ -529,6 +571,9 @@ onMounted(load);
               <div v-if="r.hotlink" class="mp-muted mp-tiny">
                 防盗链 · {{ r.hotlink_allow_empty ? "允许直接访问" : "仅本站来源" }}
               </div>
+              <div v-if="r.auth_user" class="mp-muted mp-tiny">
+                访问密码 · 用户名 <code class="mp-code">{{ r.auth_user }}</code>
+              </div>
             </td>
             <td>
               <span class="mp-tag on" v-if="r.enabled">已启用</span>
@@ -554,7 +599,7 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:430px;white-space:nowrap">
+            <td style="width:470px;white-space:nowrap">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
@@ -565,6 +610,9 @@ onMounted(load);
               </el-button>
               <el-button size="small" text type="primary" @click="openHotlink(r)">
                 {{ r.hotlink ? "防盗链" : "防盗" }}
+              </el-button>
+              <el-button size="small" text type="primary" @click="openAuth(r)">
+                {{ r.auth_user ? "访问密码" : "加密码" }}
               </el-button>
               <el-button size="small" text type="primary" :disabled="!phpAvailable && !r.php_version" @click="openPHP(r)">
                 PHP
@@ -761,6 +809,43 @@ onMounted(load);
           <el-button size="small" type="primary" :loading="busy"
             :disabled="hotlinkForm.enabled && (!!hotlinkTarget?.proxy_target || !!hotlinkTarget?.redirect_target)" @click="saveHotlink">
             {{ hotlinkForm.enabled ? "保存" : (hotlinkTarget?.hotlink ? "关闭防盗链" : "保存") }}
+          </el-button>
+        </template>
+      </el-dialog>
+
+      <el-dialog v-model="authOpen" :title="'访问密码 · ' + (authTarget?.name || '')" width="min(620px, 94vw)">
+        <el-alert v-if="authTarget?.auth_user" type="info" :closable="false" style="margin-bottom:10px"
+          title="该站点已启用访问密码。口令不会从后端读回：只改用户名或更换口令都要重新输入一次口令；两项都留空则关闭。" />
+        <el-form label-position="top" @submit.prevent="saveAuth">
+          <el-form-item label="用户名">
+            <el-input v-model="authForm.username" maxlength="32" placeholder="例如 guest"
+              autocomplete="off" style="width:260px" />
+            <div class="mp-hint" style="margin-top:4px">
+              1-32 位字母、数字、点、下划线或连字符，且以字母或数字开头。
+            </div>
+          </el-form-item>
+          <el-form-item label="口令（8-128 个字符）">
+            <el-input v-model="authForm.password" type="password" show-password maxlength="128"
+              placeholder="保存时必填；不会回显，也不会写进 nginx 配置" autocomplete="new-password"
+              style="width:320px" />
+            <div class="mp-hint" style="margin-top:4px">
+              后端把它写成 <code class="mp-code">{SHA}</code>（base64(SHA-1)）行，存进面板管理的
+              0600 口令文件；vhost 里只有 <code class="mp-code">auth_basic</code> 与
+              <code class="mp-code">auth_basic_user_file</code> 两条固定指令，不接受自定义片段。
+            </div>
+            <div class="mp-hint">
+              访问密码整站生效，不占用 <code class="mp-code">location /</code>，可与伪静态、代理、
+              跳转、防盗链和 PHP 绑定共存；HTTPS 站点的 ACME 续期路径会自动豁免口令。
+            </div>
+            <div class="mp-hint">
+              {SHA} 是无盐快速摘要，只用于挡住随手访问，不是强口令存储；口令文件权限为 0600。
+            </div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="authOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy" @click="saveAuth">
+            {{ authForm.username ? "保存" : (authTarget?.auth_user ? "关闭访问密码" : "保存") }}
           </el-button>
         </template>
       </el-dialog>

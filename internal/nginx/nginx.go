@@ -138,6 +138,10 @@ type Manager struct {
 	// confused with deleting somebody's certificate, and so the private key can
 	// stay 0600 instead of inheriting the vhost's 0644.
 	CertDir string
+	// AuthDir holds the panel-managed htpasswd files, one per site. Like CertDir
+	// it is outside the vhost tree so a config glob cannot mistake a password
+	// file for a server block.
+	AuthDir string
 	Run     Runner
 	Now     func() time.Time
 }
@@ -153,6 +157,13 @@ func New(base, siteRoot string) (*Manager, error) {
 
 // NewWithCertDir is New with an explicit certificate directory.
 func NewWithCertDir(base, siteRoot, certDir string) (*Manager, error) {
+	return NewWithDirs(base, siteRoot, certDir, filepath.Join(base, "minipanel-auth"))
+}
+
+// NewWithDirs is the full constructor: the platform layer passes the panel's
+// own certificate and credential directories instead of leaving them inside the
+// nginx tree.
+func NewWithDirs(base, siteRoot, certDir, authDir string) (*Manager, error) {
 	l, err := Detect(base)
 	if err != nil {
 		return nil, err
@@ -163,7 +174,10 @@ func NewWithCertDir(base, siteRoot, certDir string) (*Manager, error) {
 	if certDir == "" {
 		certDir = filepath.Join(base, "minipanel-certs")
 	}
-	return &Manager{Layout: l, SiteRoot: siteRoot, CertDir: certDir, Run: ExecRunner, Now: time.Now}, nil
+	if authDir == "" {
+		authDir = filepath.Join(base, "minipanel-auth")
+	}
+	return &Manager{Layout: l, SiteRoot: siteRoot, CertDir: certDir, AuthDir: authDir, Run: ExecRunner, Now: time.Now}, nil
 }
 
 // Site is one row of the site list: the facts the panel generated, not a
@@ -201,6 +215,12 @@ type Site struct {
 	// the local asset block unreachable.
 	Hotlink           bool `json:"hotlink,omitempty"`
 	HotlinkAllowEmpty bool `json:"hotlink_allow_empty,omitempty"`
+	// AuthUser is the Basic Auth username when the whole vhost is protected.
+	// AuthFile is the panel-owned password file for this site; it is derived
+	// from AuthDir on every read and never stored in the marker, because the
+	// directory is host state rather than a property of the site.
+	AuthUser string `json:"auth_user,omitempty"`
+	AuthFile string `json:"-"`
 	// PHPVersion and PHPSocket name the fpm backend this site's .php location
 	// points at. The socket is supplied by the platform layer, which derives it
 	// from a discovered installation; it is never taken from an HTTP request.
@@ -234,6 +254,7 @@ type markerPayload struct {
 	RedirectKeepPath  bool       `json:"redirect_keep_path,omitempty"`
 	Hotlink           bool       `json:"hotlink,omitempty"`
 	HotlinkAllowEmpty bool       `json:"hotlink_allow_empty,omitempty"`
+	AuthUser          string     `json:"auth_user,omitempty"`
 	TLS               *markerTLS `json:"tls,omitempty"`
 	PHPVersion        string     `json:"php_version,omitempty"`
 	PHPSocket         string     `json:"php_socket,omitempty"`
@@ -418,6 +439,7 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 		RedirectTarget: payload.RedirectTarget, RedirectCode: payload.RedirectCode,
 		RedirectKeepPath: payload.RedirectKeepPath,
 		Hotlink:          payload.Hotlink, HotlinkAllowEmpty: payload.HotlinkAllowEmpty,
+		AuthUser: payload.AuthUser, AuthFile: authPath(m.AuthDir, payload.Name),
 		PHPVersion: payload.PHPVersion, PHPSocket: payload.PHPSocket,
 	}
 	s.TLS = m.tlsFromMarker(payload)
@@ -461,6 +483,9 @@ func parseMarker(body string) (markerPayload, bool) {
 		p.RedirectTarget, p.RedirectCode, p.RedirectKeepPath = redirect, code, keepPath
 		if !p.Hotlink {
 			p.HotlinkAllowEmpty = false
+		}
+		if p.AuthUser != "" && !authUserRe.MatchString(p.AuthUser) {
+			return markerPayload{}, false
 		}
 		if p.Hotlink && (target != "" || redirect != "") {
 			return markerPayload{}, false
@@ -793,6 +818,9 @@ func (m *Manager) Delete(name string) (Site, error) {
 	if site.TLS != nil {
 		m.removeCerts(name)
 	}
+	// Same for the password file: it is only meaningful to this vhost, and
+	// leaving a credential file behind after the gate is gone is pure residue.
+	_ = os.Remove(authPath(m.AuthDir, name))
 	return site, nil
 }
 
@@ -812,6 +840,7 @@ func render(s Site) string {
 		RedirectKeepPath:  s.RedirectKeepPath,
 		Hotlink:           s.Hotlink,
 		HotlinkAllowEmpty: s.HotlinkAllowEmpty,
+		AuthUser:          s.AuthUser,
 		TLS:               markerFromTLS(s.Name, s.TLS),
 		PHPVersion:        s.PHPVersion, PHPSocket: s.PHPSocket,
 	})

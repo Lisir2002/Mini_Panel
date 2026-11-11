@@ -51,10 +51,14 @@ type SiteInfo struct {
 	// Hotlink is the fixed Referer check for static assets; HotlinkAllowEmpty
 	// says whether requests without a Referer are allowed through. Both are
 	// omitted until hotlink protection is enabled.
-	Hotlink           bool   `json:"hotlink,omitempty"`
-	HotlinkAllowEmpty bool   `json:"hotlink_allow_empty,omitempty"`
-	PHPVersion        string `json:"php_version,omitempty"`
-	PHPSocket         string `json:"php_socket,omitempty"`
+	Hotlink           bool `json:"hotlink,omitempty"`
+	HotlinkAllowEmpty bool `json:"hotlink_allow_empty,omitempty"`
+	// AuthUser is the Basic Auth username when the whole site is password
+	// protected. The password itself is never stored in SiteInfo: only the
+	// provider's 0600 file holds a {SHA} hash, and no endpoint returns it.
+	AuthUser   string `json:"auth_user,omitempty"`
+	PHPVersion string `json:"php_version,omitempty"`
+	PHPSocket  string `json:"php_socket,omitempty"`
 	// PHPSocketState is the live state of PHPSocket (listening / idle / absent /
 	// not_socket / unknown), computed on every read. It is not persisted: "the
 	// site points at 8.3" and "php8.3-fpm is answering" are two separate facts,
@@ -151,6 +155,15 @@ type SiteRedirectManager interface {
 // fixed by the provider. Disabling is always allowed.
 type SiteHotlinkManager interface {
 	SetHotlink(name string, enabled, allowEmpty bool) (SiteInfo, error)
+}
+
+// SiteAuthManager is the optional HTTP Basic Auth half of a site writer. The
+// operator supplies a username and a password; the provider hashes it into its
+// own 0600 file, renders the fixed auth_basic directives and never accepts a
+// config fragment. Clearing (empty username and password) is always allowed so
+// a site whose password was lost can be recovered.
+type SiteAuthManager interface {
+	SetAuth(name, username, password string) (SiteInfo, error)
 }
 
 // SiteTLSManager is the optional certificate side of a site writer. Manual

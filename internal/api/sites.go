@@ -132,6 +132,21 @@ func (s *Server) siteHotlinkManager() (platform.SiteHotlinkManager, string) {
 	return hm, ""
 }
 
+// siteAuthManager is the optional HTTP Basic Auth interface. Clearing is part
+// of the same endpoint, so a host without this interface cannot offer the
+// password dialog at all.
+func (s *Server) siteAuthManager() (platform.SiteAuthManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	am, ok := m.(platform.SiteAuthManager)
+	if !ok || am == nil {
+		return nil, "该平台的站点 Provider 没有实现访问密码"
+	}
+	return am, ""
+}
+
 // handleSitesList is GET /api/v1/sites. Only files the panel wrote itself are
 // listed; a hand-written vhost in the same directory is somebody else's
 // configuration and is not reported as a panel site.
@@ -398,6 +413,40 @@ func (s *Server) handleSiteHotlink(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_hotlink", "更新防盗链失败："+err.Error())
+	}
+}
+
+// handleSiteAuth is PUT /api/v1/sites/{name}/auth. The body is
+// {"username":"guest","password":"..."}; an empty username and password clears
+// the gate. The provider hashes the password into its own 0600 file and writes
+// the fixed auth_basic directives through test-before-reload; the password is
+// never echoed back and never appears in the response.
+func (s *Server) handleSiteAuth(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteAuthManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetAuth(chiParam(r, "name"), body.Username, body.Password)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_auth", "更新访问密码失败："+err.Error())
 	}
 }
 

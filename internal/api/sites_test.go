@@ -32,6 +32,7 @@ type fakeSites struct {
 	proxyErr     error
 	redirectErr  error
 	hotlinkErr   error
+	authErr      error
 	created      int
 	deleted      int
 	tlsSets      int
@@ -44,6 +45,7 @@ type fakeSites struct {
 	proxySets    int
 	redirectSets int
 	hotlinkSets  int
+	authSets     int
 	lastCertLen  int
 }
 
@@ -190,6 +192,23 @@ func (f *fakeSites) SetHotlink(name string, enabled, allowEmpty bool) (platform.
 	s.HotlinkAllowEmpty = enabled && allowEmpty
 	f.sites[name] = s
 	f.hotlinkSets++
+	return s, nil
+}
+
+// SetAuth records the username and never keeps the password: the real provider
+// hashes it into a 0600 file, and the HTTP contract only promises the username
+// back.
+func (f *fakeSites) SetAuth(name, username, password string) (platform.SiteInfo, error) {
+	if f.authErr != nil {
+		return platform.SiteInfo{}, f.authErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	s.AuthUser = strings.TrimSpace(username)
+	f.sites[name] = s
+	f.authSets++
 	return s, nil
 }
 

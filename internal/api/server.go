@@ -135,6 +135,7 @@ func (s *Server) routes() chi.Router {
 			r.Put("/sites/{name}/proxy", s.handleSiteProxy)
 			r.Put("/sites/{name}/redirect", s.handleSiteRedirect)
 			r.Put("/sites/{name}/hotlink", s.handleSiteHotlink)
+			r.Put("/sites/{name}/auth", s.handleSiteAuth)
 			r.Post("/sites/{name}/tls", s.handleSiteTLSSet)
 			r.Delete("/sites/{name}/tls", s.handleSiteTLSClear)
 			r.Post("/sites/{name}/acme", s.handleSiteACME)
