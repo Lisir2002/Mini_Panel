@@ -427,9 +427,12 @@ func renderServer(s Site, tlsOn bool) string {
 		b.WriteString("    ssl_session_cache shared:SSL:10m;\n")
 	}
 	b.WriteString("\n    location / {\n")
-	if s.ProxyTarget != "" {
+	switch {
+	case s.RedirectTarget != "":
+		b.WriteString(redirectLocationBody(s))
+	case s.ProxyTarget != "":
 		b.WriteString(proxyLocationBody(s))
-	} else {
+	default:
 		b.WriteString("        " + rewriteLocation(s) + "\n")
 	}
 	b.WriteString("    }\n")

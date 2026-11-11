@@ -59,7 +59,7 @@ func TestProxyTargetValidation(t *testing.T) {
 		"http://example.com/a/%2e%2e/b",
 		"http://example.com/\u4e2d\u6587",
 		"http://[::1",
-		strings.Repeat("a", maxProxyTarget+1),
+		strings.Repeat("a", maxUpstreamTarget+1),
 	}
 	for _, in := range invalid {
 		if _, _, err := normalizeProxy(in, false); !errors.Is(err, ErrInvalid) {

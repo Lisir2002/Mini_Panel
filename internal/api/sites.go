@@ -104,6 +104,20 @@ func (s *Server) siteProxyManager() (platform.SiteProxyManager, string) {
 	return pm, ""
 }
 
+// siteRedirectManager is the optional site-wide redirect interface. A provider
+// without it returns 403 capability with the reason below.
+func (s *Server) siteRedirectManager() (platform.SiteRedirectManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	rm, ok := m.(platform.SiteRedirectManager)
+	if !ok || rm == nil {
+		return nil, "该平台的站点 Provider 没有实现整站跳转"
+	}
+	return rm, ""
+}
+
 // handleSitesList is GET /api/v1/sites. Only files the panel wrote itself are
 // listed; a hand-written vhost in the same directory is somebody else's
 // configuration and is not reported as a panel site.
@@ -302,6 +316,41 @@ func (s *Server) handleSiteProxy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_proxy", "更新反向代理失败："+err.Error())
+	}
+}
+
+// handleSiteRedirect is PUT /api/v1/sites/{name}/redirect. The body is
+// {"target":"https://new.example.com","code":301,"keep_path":true}; an empty
+// target clears the redirect. The provider validates the URL and refuses to
+// overwrite a rewrite template or proxy location /, then writes through
+// test-before-reload.
+func (s *Server) handleSiteRedirect(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteRedirectManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Target   string `json:"target"`
+		Code     int    `json:"code"`
+		KeepPath bool   `json:"keep_path"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetRedirect(chiParam(r, "name"), body.Target, body.Code, body.KeepPath)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_redirect", "更新整站跳转失败："+err.Error())
 	}
 }
 

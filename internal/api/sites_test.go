@@ -30,6 +30,7 @@ type fakeSites struct {
 	settingsErr  error
 	rewriteErr   error
 	proxyErr     error
+	redirectErr  error
 	created      int
 	deleted      int
 	tlsSets      int
@@ -40,6 +41,7 @@ type fakeSites struct {
 	settingsSets int
 	rewriteSets  int
 	proxySets    int
+	redirectSets int
 	lastCertLen  int
 }
 
@@ -153,6 +155,24 @@ func (f *fakeSites) SetProxy(name, target string, websocket bool) (platform.Site
 	s.ProxyWebSocket = websocket
 	f.sites[name] = s
 	f.proxySets++
+	return s, nil
+}
+
+// SetRedirect records the target, status code and keep-path flag. URL
+// validation and the three-way location / exclusion live in the nginx writer.
+func (f *fakeSites) SetRedirect(name, target string, code int, keepPath bool) (platform.SiteInfo, error) {
+	if f.redirectErr != nil {
+		return platform.SiteInfo{}, f.redirectErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	s.RedirectTarget = strings.TrimSpace(target)
+	s.RedirectCode = code
+	s.RedirectKeepPath = keepPath
+	f.sites[name] = s
+	f.redirectSets++
 	return s, nil
 }
 

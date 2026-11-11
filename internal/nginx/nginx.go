@@ -189,6 +189,12 @@ type Site struct {
 	// exclusive because both own `location /`.
 	ProxyTarget    string `json:"proxy_target,omitempty"`
 	ProxyWebSocket bool   `json:"proxy_websocket,omitempty"`
+	// RedirectTarget is the validated absolute URL when the site redirects
+	// every request. Redirect, proxy and rewrite all own `location /`, so at
+	// most one of them may be set.
+	RedirectTarget   string `json:"redirect_target,omitempty"`
+	RedirectCode     int    `json:"redirect_code,omitempty"`
+	RedirectKeepPath bool   `json:"redirect_keep_path,omitempty"`
 	// PHPVersion and PHPSocket name the fpm backend this site's .php location
 	// points at. The socket is supplied by the platform layer, which derives it
 	// from a discovered installation; it is never taken from an HTTP request.
@@ -209,17 +215,20 @@ type Spec struct {
 }
 
 type markerPayload struct {
-	Name           string     `json:"name"`
-	Domains        []string   `json:"domains"`
-	Root           string     `json:"root"`
-	CreatedAt      string     `json:"created_at"`
-	Index          []string   `json:"index,omitempty"`
-	Rewrite        string     `json:"rewrite,omitempty"`
-	ProxyTarget    string     `json:"proxy_target,omitempty"`
-	ProxyWebSocket bool       `json:"proxy_websocket,omitempty"`
-	TLS            *markerTLS `json:"tls,omitempty"`
-	PHPVersion     string     `json:"php_version,omitempty"`
-	PHPSocket      string     `json:"php_socket,omitempty"`
+	Name             string     `json:"name"`
+	Domains          []string   `json:"domains"`
+	Root             string     `json:"root"`
+	CreatedAt        string     `json:"created_at"`
+	Index            []string   `json:"index,omitempty"`
+	Rewrite          string     `json:"rewrite,omitempty"`
+	ProxyTarget      string     `json:"proxy_target,omitempty"`
+	ProxyWebSocket   bool       `json:"proxy_websocket,omitempty"`
+	RedirectTarget   string     `json:"redirect_target,omitempty"`
+	RedirectCode     int        `json:"redirect_code,omitempty"`
+	RedirectKeepPath bool       `json:"redirect_keep_path,omitempty"`
+	TLS              *markerTLS `json:"tls,omitempty"`
+	PHPVersion       string     `json:"php_version,omitempty"`
+	PHPSocket        string     `json:"php_socket,omitempty"`
 }
 
 var (
@@ -398,7 +407,9 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 		Name: payload.Name, Domains: payload.Domains, Root: payload.Root,
 		ConfigPath: p, CreatedAt: payload.CreatedAt, Index: payload.Index,
 		Rewrite: payload.Rewrite, ProxyTarget: payload.ProxyTarget, ProxyWebSocket: payload.ProxyWebSocket,
-		PHPVersion: payload.PHPVersion, PHPSocket: payload.PHPSocket,
+		RedirectTarget: payload.RedirectTarget, RedirectCode: payload.RedirectCode,
+		RedirectKeepPath: payload.RedirectKeepPath,
+		PHPVersion:       payload.PHPVersion, PHPSocket: payload.PHPSocket,
 	}
 	s.TLS = m.tlsFromMarker(payload)
 	if lp := m.Layout.LinkPath(payload.Name); lp != "" {
@@ -434,7 +445,22 @@ func parseMarker(body string) (markerPayload, bool) {
 			return markerPayload{}, false
 		}
 		p.ProxyTarget, p.ProxyWebSocket = target, ws
-		if target != "" && normalizeRewrite(p.Rewrite) != "none" {
+		redirect, code, keepPath, err := normalizeRedirect(p.RedirectTarget, p.RedirectCode, p.RedirectKeepPath)
+		if err != nil {
+			return markerPayload{}, false
+		}
+		p.RedirectTarget, p.RedirectCode, p.RedirectKeepPath = redirect, code, keepPath
+		owners := 0
+		if target != "" {
+			owners++
+		}
+		if redirect != "" {
+			owners++
+		}
+		if normalizeRewrite(p.Rewrite) != "none" {
+			owners++
+		}
+		if owners > 1 {
 			return markerPayload{}, false
 		}
 		return p, p.Name != "" && len(p.Domains) > 0 && p.Root != ""
@@ -762,12 +788,15 @@ func (m *Manager) Delete(name string) (Site, error) {
 func render(s Site) string {
 	payload, _ := json.Marshal(markerPayload{
 		Name: s.Name, Domains: s.Domains, Root: s.Root, CreatedAt: s.CreatedAt,
-		Index:          s.Index,
-		Rewrite:        s.Rewrite,
-		ProxyTarget:    s.ProxyTarget,
-		ProxyWebSocket: s.ProxyWebSocket,
-		TLS:            markerFromTLS(s.Name, s.TLS),
-		PHPVersion:     s.PHPVersion, PHPSocket: s.PHPSocket,
+		Index:            s.Index,
+		Rewrite:          s.Rewrite,
+		ProxyTarget:      s.ProxyTarget,
+		ProxyWebSocket:   s.ProxyWebSocket,
+		RedirectTarget:   s.RedirectTarget,
+		RedirectCode:     s.RedirectCode,
+		RedirectKeepPath: s.RedirectKeepPath,
+		TLS:              markerFromTLS(s.Name, s.TLS),
+		PHPVersion:       s.PHPVersion, PHPSocket: s.PHPSocket,
 	})
 	var b strings.Builder
 	b.WriteString(headerLine + "\n")

@@ -3,8 +3,8 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七、八、九片：静态站点、站点证书、PHP 版本绑定、基础设置编辑、
-// 伪静态模板与反向代理。
+// M2 第三、四、六、七、八、九、十片：静态站点、站点证书、PHP 版本绑定、基础设置编辑、
+// 伪静态模板、反向代理与整站跳转。
 // 这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
@@ -17,6 +17,8 @@ import { store } from "../store";
 //   * 反向代理只接受一个上游 URL 与 WebSocket 开关；后端按 url.Parse 与字符白名单校验，
 //     页面不提供任何"自定义 nginx 片段"输入框。它与伪静态互斥：两者都占用 location /，
 //     页面在两边对话框里都提示先清空一边，后端也会拒绝并把文件保持原样。
+//   * 整站跳转只接受一个绝对 URL、301/302 与"保留路径"开关；配置是固定的一行 return。
+//     它同样占用 location /，与伪静态、反向代理三向互斥，页面和对话框都按同一句话提示。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
 //     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
 //     而不是等请求失败后才解释。
@@ -60,6 +62,10 @@ const rewriteForm = ref({ preset: "none" });
 const proxyOpen = ref(false);
 const proxyTarget = ref(null);
 const proxyForm = ref({ target: "", websocket: false });
+
+const redirectOpen = ref(false);
+const redirectTarget = ref(null);
+const redirectForm = ref({ target: "", code: 301, keep_path: true });
 
 function parseDomains(text) {
   return String(text || "")
@@ -338,6 +344,48 @@ async function saveProxy() {
   } finally { busy.value = false; }
 }
 
+function redirectLabel(r) {
+  if (!r.redirect_target) return "";
+  return "跳转 " + (r.redirect_code || 301) + " · " + r.redirect_target +
+    (r.redirect_keep_path ? " · 保留路径" : "");
+}
+
+function openRedirect(r) {
+  error.value = ""; msg.value = "";
+  redirectTarget.value = r;
+  redirectForm.value = {
+    target: r.redirect_target || "",
+    code: r.redirect_code || 301,
+    keep_path: r.redirect_target ? !!r.redirect_keep_path : true,
+  };
+  redirectOpen.value = true;
+}
+
+async function saveRedirect() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const target = redirectForm.value.target.trim();
+    const code = target ? redirectForm.value.code : 0;
+    const keepPath = target ? redirectForm.value.keep_path : false;
+    const site = await api("/api/v1/sites/" + encodeURIComponent(redirectTarget.value.name) + "/redirect",
+      { method: "PUT", body: JSON.stringify({ target, code, keep_path: keepPath }) });
+    if (site.redirect_target) {
+      msg.value = site.name + " 已整站跳转到 " + site.redirect_target +
+        "（" + site.redirect_code + (site.redirect_keep_path ? "，保留路径" : "") + "）" +
+        "；nginx 已通过 nginx -t 并重载。";
+    } else {
+      msg.value = site.name + " 已清除整站跳转，location / 回到默认静态查找；nginx 已通过 nginx -t 并重载。";
+    }
+    redirectOpen.value = false;
+    await load();
+  } catch (e) {
+    // 400 invalid_site（URL / 状态码不合法或与伪静态、代理冲突）与 422 nginx_rejected
+    // 都带后端原文；后端返回前没有写入任何文件，页面原样显示。
+    error.value = e.message;
+    await load();
+  } finally { busy.value = false; }
+}
+
 onMounted(load);
 </script>
 
@@ -430,6 +478,10 @@ onMounted(load);
                 代理 · <code class="mp-code">{{ r.proxy_target }}</code>
                 <span v-if="r.proxy_websocket"> · WebSocket</span>
               </div>
+              <div v-if="r.redirect_target" class="mp-muted mp-tiny">
+                跳转 {{ r.redirect_code || 301 }} · <code class="mp-code">{{ r.redirect_target }}</code>
+                <span v-if="r.redirect_keep_path"> · 保留路径</span>
+              </div>
             </td>
             <td>
               <span class="mp-tag on" v-if="r.enabled">已启用</span>
@@ -455,11 +507,14 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:340px;white-space:nowrap">
+            <td style="width:385px;white-space:nowrap">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
                 {{ r.proxy_target ? "代理" : "反代" }}
+              </el-button>
+              <el-button size="small" text type="primary" @click="openRedirect(r)">
+                {{ r.redirect_target ? "跳转" : "整站跳转" }}
               </el-button>
               <el-button size="small" text type="primary" :disabled="!phpAvailable && !r.php_version" @click="openPHP(r)">
                 PHP
@@ -512,13 +567,15 @@ onMounted(load);
       <el-dialog v-model="rewriteOpen" :title="'伪静态 · ' + (rewriteTarget?.name || '')" width="min(560px, 94vw)">
         <el-alert v-if="rewriteTarget?.proxy_target" type="info" :closable="false" style="margin-bottom:10px"
           title="该站点已启用反向代理：两者都占用 location /。除“默认”以外的模板会被后端拒绝；请先在“代理”对话框里清空上游 URL。" />
+        <el-alert v-if="rewriteTarget?.redirect_target" type="info" :closable="false" style="margin-bottom:10px"
+          title="该站点正在整站跳转：两者都占用 location /。除“默认”以外的模板会被后端拒绝；请先在“整站跳转”对话框里清空跳转目标。" />
         <el-alert v-if="rewriteTarget && !rewriteTarget.php_version" type="info" :closable="false" style="margin-bottom:10px"
           title="当前是静态站点：需要 PHP 的模板（WordPress / Laravel / ThinkPHP）不可选，避免 nginx 把 index.php 当文本返回。先绑定 PHP 再回来选择。" />
         <el-form label-position="top" @submit.prevent="saveRewrite">
           <el-form-item label="规则模板">
             <el-select v-model="rewriteForm.preset" style="width:100%">
               <el-option v-for="p in rewritePresets" :key="p.id" :label="p.label" :value="p.id"
-                :disabled="(p.id !== 'none' && !!rewriteTarget?.proxy_target) || (p.requires_php && !rewriteTarget?.php_version)" />
+                :disabled="(p.id !== 'none' && (!!rewriteTarget?.proxy_target || !!rewriteTarget?.redirect_target)) || (p.requires_php && !rewriteTarget?.php_version)" />
             </el-select>
             <div class="mp-hint" style="margin-top:6px">
               {{ rewritePreset(rewriteForm.preset)?.description || "" }}
@@ -538,6 +595,8 @@ onMounted(load);
       <el-dialog v-model="proxyOpen" :title="'反向代理 · ' + (proxyTarget?.name || '')" width="min(600px, 94vw)">
         <el-alert v-if="rewriteLabel(proxyTarget)" type="info" :closable="false" style="margin-bottom:10px"
           :title="'该站点正在使用伪静态模板（' + rewriteLabel(proxyTarget) + '）：两者都占用 location /。后端会拒绝保存代理；请先把伪静态切回“默认”，再启用代理。'" />
+        <el-alert v-if="proxyTarget?.redirect_target" type="info" :closable="false" style="margin-bottom:10px"
+          title="该站点正在整站跳转：两者都占用 location /。后端会拒绝保存代理；请先在“整站跳转”对话框里清空跳转目标。" />
         <el-form label-position="top" @submit.prevent="saveProxy">
           <el-form-item label="上游 URL（http:// 或 https://，可带端口与路径前缀）">
             <el-input v-model="proxyForm.target" placeholder="http://127.0.0.1:8080" maxlength="255" />
@@ -562,8 +621,53 @@ onMounted(load);
         <template #footer>
           <el-button size="small" :disabled="busy" @click="proxyOpen = false">取消</el-button>
           <el-button size="small" type="primary" :loading="busy"
-            :disabled="!!proxyForm.target.trim() && !!rewriteLabel(proxyTarget)" @click="saveProxy">
+            :disabled="!!proxyForm.target.trim() && (!!rewriteLabel(proxyTarget) || !!proxyTarget?.redirect_target)" @click="saveProxy">
             {{ proxyForm.target.trim() ? "保存" : "清除代理" }}
+          </el-button>
+        </template>
+      </el-dialog>
+
+      <el-dialog v-model="redirectOpen" :title="'整站跳转 · ' + (redirectTarget?.name || '')" width="min(600px, 94vw)">
+        <el-alert v-if="rewriteLabel(redirectTarget)" type="info" :closable="false" style="margin-bottom:10px"
+          :title="'该站点正在使用伪静态模板（' + rewriteLabel(redirectTarget) + '）：两者都占用 location /。后端会拒绝保存跳转；请先把伪静态切回“默认”。'" />
+        <el-alert v-if="redirectTarget?.proxy_target" type="info" :closable="false" style="margin-bottom:10px"
+          :title="'该站点已启用反向代理：两者都占用 location /。后端会拒绝保存跳转；请先在“代理”对话框里清空上游 URL。'" />
+        <el-form label-position="top" @submit.prevent="saveRedirect">
+          <el-form-item label="跳转目标（http:// 或 https:// 绝对 URL）">
+            <el-input v-model="redirectForm.target" placeholder="https://new.example.com" maxlength="255" />
+            <div class="mp-hint" style="margin-top:6px">
+              只接受一个经过校验的绝对地址（主机名 / IP、1-65535 端口、可选的路径前缀）；
+              不接受 userinfo、查询串、片段或任何 nginx 配置文本。清空输入并保存表示关闭跳转，
+              站点回到默认的 <code class="mp-code">try_files $uri $uri/ =404</code>。
+            </div>
+          </el-form-item>
+          <el-form-item label="状态码">
+            <el-radio-group v-model="redirectForm.code" :disabled="!redirectForm.target.trim()">
+              <el-radio-button :value="301">301 永久</el-radio-button>
+              <el-radio-button :value="302">302 临时</el-radio-button>
+            </el-radio-group>
+            <div class="mp-hint">
+              面板固定写入一行 <code class="mp-code">return &lt;code&gt; &lt;target&gt;;</code>，
+              不接受任何自定义配置文本。
+            </div>
+          </el-form-item>
+          <el-form-item>
+            <el-checkbox v-model="redirectForm.keep_path" :disabled="!redirectForm.target.trim()">
+              保留原请求路径（拼接 $request_uri）
+            </el-checkbox>
+            <div class="mp-hint">
+              勾选后请求 <code class="mp-code">/a/b?x=1</code> 会跳到目标地址的同一路径与查询串，
+              适合"换域名但保留路径"；目标尾部斜杠会被去掉，避免出现双斜杠。
+              保存仍走 <code class="mp-code">nginx -t</code> → reload，失败会恢复原来的 location /。
+              整站跳转与伪静态模板、反向代理三者互斥，PHP 绑定不受影响。
+            </div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="redirectOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy"
+            :disabled="!!redirectForm.target.trim() && (!!rewriteLabel(redirectTarget) || !!redirectTarget?.proxy_target)" @click="saveRedirect">
+            {{ redirectForm.target.trim() ? "保存" : "清除跳转" }}
           </el-button>
         </template>
       </el-dialog>

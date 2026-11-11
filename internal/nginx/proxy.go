@@ -15,73 +15,84 @@ import (
 // nginx snippet" feature: proxy_pass is the only operator value that reaches
 // the config, and it is parsed into scheme/host/port/path before it is written.
 
-const maxProxyTarget = 255
+const maxUpstreamTarget = 255
 
 var (
 	// A hostname label, not an IP literal. IPs (including IPv6) are checked with
 	// net.ParseIP instead, because a colon inside brackets is not a label.
-	proxyHostRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	// Proxy paths are restricted to characters that are inert in an nginx token.
-	// In particular `$`, `;`, braces, quotes and whitespace are not accepted, so
-	// the value cannot open a new directive or reference an nginx variable.
-	proxyPathRe = regexp.MustCompile(`^/[A-Za-z0-9._~%+:@/-]*$`)
+	upstreamHostRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	// Upstream paths are restricted to characters that are inert in an nginx
+	// token. In particular `$`, `;`, braces, quotes and whitespace are not
+	// accepted, so the value cannot open a new directive or reference an nginx
+	// variable.
+	upstreamPathRe = regexp.MustCompile(`^/[A-Za-z0-9._~%+:@/-]*$`)
 )
 
-// normalizeProxy trims and validates one upstream URL. It returns the canonical
-// form that is written to the marker (lower-case scheme and host, no trailing
-// slash rewriting) and the effective WebSocket flag.
-//
-// The empty target means "no proxy"; WebSocket without a target is refused
-// because it has no meaning and would hide a form mistake.
-func normalizeProxy(target string, websocket bool) (string, bool, error) {
-	target = strings.TrimSpace(target)
-	if target == "" {
-		if websocket {
-			return "", false, fmt.Errorf("%w：启用 WebSocket 支持前必须先填写代理目标", ErrInvalid)
-		}
-		return "", false, nil
+// upstreamURL is the validated, canonical form of a URL that may reach an nginx
+// directive: scheme and host are lower-cased, the port is normalised, and the
+// path is percent-encoded exactly as it will be written. Nothing outside these
+// three fields can be supplied by a request.
+type upstreamURL struct {
+	scheme   string
+	hostPort string
+	path     string
+}
+
+func (u upstreamURL) String() string {
+	return u.scheme + "://" + u.hostPort + u.path
+}
+
+func (u upstreamURL) withPath(path string) string {
+	return u.scheme + "://" + u.hostPort + path
+}
+
+// parseUpstreamURL validates one operator-supplied URL. `what` names the field
+// in error messages ("代理目标" or "跳转目标"). Only http/https, a DNS hostname
+// or IP literal, a 1-65535 port and a restricted path are accepted; userinfo,
+// query strings, fragments, control characters and nginx metacharacters are
+// refused.
+func parseUpstreamURL(raw, what string) (upstreamURL, error) {
+	if len(raw) > maxUpstreamTarget {
+		return upstreamURL{}, fmt.Errorf("%w：%s最多 %d 个字符", ErrInvalid, what, maxUpstreamTarget)
 	}
-	if len(target) > maxProxyTarget {
-		return "", false, fmt.Errorf("%w：代理目标最多 %d 个字符", ErrInvalid, maxProxyTarget)
-	}
-	for _, r := range target {
+	for _, r := range raw {
 		if r < 0x21 || r > 0x7e {
-			return "", false, fmt.Errorf("%w：代理目标只能包含可打印 ASCII 字符（不能有空格、换行或中文）", ErrInvalid)
+			return upstreamURL{}, fmt.Errorf("%w：%s只能包含可打印 ASCII 字符（不能有空格、换行或中文）", ErrInvalid, what)
 		}
 	}
-	if strings.ContainsAny(target, ";{}\"'\\$`") {
-		return "", false, fmt.Errorf("%w：代理目标不能包含 ; { } 引号 反斜杠 $ 或反引号", ErrInvalid)
+	if strings.ContainsAny(raw, ";{}\"'\\$`") {
+		return upstreamURL{}, fmt.Errorf("%w：%s不能包含 ; { } 引号 反斜杠 $ 或反引号", ErrInvalid, what)
 	}
 
-	u, err := url.Parse(target)
+	u, err := url.Parse(raw)
 	if err != nil {
-		return "", false, fmt.Errorf("%w：代理目标不是合法 URL：%v", ErrInvalid, err)
+		return upstreamURL{}, fmt.Errorf("%w：%s不是合法 URL：%v", ErrInvalid, what, err)
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
-		return "", false, fmt.Errorf("%w：代理目标必须以 http:// 或 https:// 开头", ErrInvalid)
+		return upstreamURL{}, fmt.Errorf("%w：%s必须以 http:// 或 https:// 开头", ErrInvalid, what)
 	}
 	if u.Opaque != "" || u.Host == "" {
-		return "", false, fmt.Errorf("%w：代理目标需要形如 http://127.0.0.1:3000", ErrInvalid)
+		return upstreamURL{}, fmt.Errorf("%w：%s需要形如 http://127.0.0.1:3000", ErrInvalid, what)
 	}
 	if u.User != nil {
-		return "", false, fmt.Errorf("%w：代理目标不能内嵌用户名或口令；凭据不应出现在站点配置里", ErrInvalid)
+		return upstreamURL{}, fmt.Errorf("%w：%s不能内嵌用户名或口令；凭据不应出现在站点配置里", ErrInvalid, what)
 	}
 	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return "", false, fmt.Errorf("%w：代理目标不能带查询串或片段，只填写协议、主机与可选路径", ErrInvalid)
+		return upstreamURL{}, fmt.Errorf("%w：%s不能带查询串或片段，只填写协议、主机与可选路径", ErrInvalid, what)
 	}
 
 	host := strings.ToLower(u.Hostname())
 	if host == "" {
-		return "", false, fmt.Errorf("%w：代理目标缺少主机名", ErrInvalid)
+		return upstreamURL{}, fmt.Errorf("%w：%s缺少主机名", ErrInvalid, what)
 	}
 	if ip := net.ParseIP(host); ip == nil {
 		if len(host) > 253 {
-			return "", false, fmt.Errorf("%w：代理目标主机名过长", ErrInvalid)
+			return upstreamURL{}, fmt.Errorf("%w：%s主机名过长", ErrInvalid, what)
 		}
 		for _, label := range strings.Split(host, ".") {
-			if !proxyHostRe.MatchString(label) {
-				return "", false, fmt.Errorf("%w：代理目标主机名 %q 不合法", ErrInvalid, host)
+			if !upstreamHostRe.MatchString(label) {
+				return upstreamURL{}, fmt.Errorf("%w：%s主机名 %q 不合法", ErrInvalid, what, host)
 			}
 		}
 	}
@@ -90,7 +101,7 @@ func normalizeProxy(target string, websocket bool) (string, bool, error) {
 	if port != "" {
 		n, err := strconv.Atoi(port)
 		if err != nil || n < 1 || n > 65535 {
-			return "", false, fmt.Errorf("%w：代理目标端口必须在 1-65535 之间", ErrInvalid)
+			return upstreamURL{}, fmt.Errorf("%w：%s端口必须在 1-65535 之间", ErrInvalid, what)
 		}
 		port = strconv.Itoa(n)
 	}
@@ -106,16 +117,37 @@ func normalizeProxy(target string, websocket bool) (string, bool, error) {
 	if path != "" {
 		// EscapedPath is what gets written; u.Path is decoded and catches
 		// percent-encoded traversal (/%2e%2e/) that the literal check would miss.
-		if !proxyPathRe.MatchString(path) || strings.Contains(path, "..") || strings.Contains(u.Path, "..") {
-			return "", false, fmt.Errorf("%w：代理路径只能包含字母、数字与 . _ ~ %% + : @ / -，且不能有 ..", ErrInvalid)
+		if !upstreamPathRe.MatchString(path) || strings.Contains(path, "..") || strings.Contains(u.Path, "..") {
+			return upstreamURL{}, fmt.Errorf("%w：%s路径只能包含字母、数字与 . _ ~ %% + : @ / -，且不能有 ..", ErrInvalid, what)
 		}
 		for _, r := range u.Path {
 			if r < 0x20 || r > 0x7e {
-				return "", false, fmt.Errorf("%w：代理路径只能包含可打印 ASCII 字符", ErrInvalid)
+				return upstreamURL{}, fmt.Errorf("%w：%s路径只能包含可打印 ASCII 字符", ErrInvalid, what)
 			}
 		}
 	}
-	return scheme + "://" + hostPort + path, websocket, nil
+	return upstreamURL{scheme: scheme, hostPort: hostPort, path: path}, nil
+}
+
+// normalizeProxy trims and validates one upstream URL. It returns the canonical
+// form that is written to the marker (lower-case scheme and host, no trailing
+// slash rewriting) and the effective WebSocket flag.
+//
+// The empty target means "no proxy"; WebSocket without a target is refused
+// because it has no meaning and would hide a form mistake.
+func normalizeProxy(target string, websocket bool) (string, bool, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		if websocket {
+			return "", false, fmt.Errorf("%w：启用 WebSocket 支持前必须先填写代理目标", ErrInvalid)
+		}
+		return "", false, nil
+	}
+	u, err := parseUpstreamURL(target, "代理目标")
+	if err != nil {
+		return "", false, err
+	}
+	return u.String(), websocket, nil
 }
 
 // proxyLocationBody renders the fixed directives for a proxied `location /`.
@@ -140,8 +172,8 @@ func proxyLocationBody(s Site) string {
 // SetProxy enables, replaces or clears a site's upstream. Clearing is allowed
 // even when the site is otherwise healthy: it is the rescue path back to a
 // local static/PHP vhost. A non-empty target requires the rewrite template to
-// be `none`, because both own `location /` and two owners would make the
-// rendered config depend on line order.
+// be `none` and no site-wide redirect, because all three own `location /` and
+// two owners would make the rendered config depend on line order.
 func (m *Manager) SetProxy(name, target string, websocket bool) (Site, error) {
 	if err := ValidateName(name); err != nil {
 		return Site{}, err
@@ -154,8 +186,13 @@ func (m *Manager) SetProxy(name, target string, websocket bool) (Site, error) {
 	if err != nil {
 		return Site{}, err
 	}
-	if target != "" && normalizeRewrite(site.Rewrite) != "none" {
-		return Site{}, fmt.Errorf("%w：站点正在使用伪静态模板 %q，它和反向代理都写 location /；先把伪静态切回 none", ErrInvalid, site.Rewrite)
+	if target != "" {
+		if normalizeRewrite(site.Rewrite) != "none" {
+			return Site{}, fmt.Errorf("%w：站点正在使用伪静态模板 %q，它和反向代理都写 location /；先把伪静态切回 none", ErrInvalid, site.Rewrite)
+		}
+		if site.RedirectTarget != "" {
+			return Site{}, fmt.Errorf("%w：站点正在整站跳转，location / 已由跳转规则接管；先清除跳转再启用反向代理", ErrInvalid)
+		}
 	}
 	site.ProxyTarget, site.ProxyWebSocket = target, websocket
 	if err := m.applyConfig(site.ConfigPath, render(site)); err != nil {

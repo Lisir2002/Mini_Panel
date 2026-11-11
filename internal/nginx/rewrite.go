@@ -125,8 +125,13 @@ func (m *Manager) SetRewrite(name, preset string) (Site, error) {
 	if err := validateRewrite(preset, site.PHPVersion != ""); err != nil {
 		return Site{}, err
 	}
-	if preset != "none" && site.ProxyTarget != "" {
-		return Site{}, fmt.Errorf("%w：站点正在使用反向代理，location / 已由代理接管；先清除代理再启用伪静态", ErrInvalid)
+	if preset != "none" {
+		if site.ProxyTarget != "" {
+			return Site{}, fmt.Errorf("%w：站点正在使用反向代理，location / 已由代理接管；先清除代理再启用伪静态", ErrInvalid)
+		}
+		if site.RedirectTarget != "" {
+			return Site{}, fmt.Errorf("%w：站点正在整站跳转，location / 已由跳转规则接管；先清除跳转再启用伪静态", ErrInvalid)
+		}
 	}
 	site.Rewrite = preset
 	if err := m.applyConfig(site.ConfigPath, render(site)); err != nil {

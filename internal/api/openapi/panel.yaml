@@ -201,6 +201,9 @@ paths:
         try_files $uri $uri/ =404。proxy_target 非空表示站点把 location / 反向代理到该
         上游 URL，proxy_websocket 表示同时转发 Upgrade 头；两者只在启用代理后出现，
         且与 rewrite 模板互斥（同一个 location / 不能既代理又做伪静态）。
+        redirect_target 非空表示站点把整站跳转到该 URL，redirect_code 是 301 或 302，
+        redirect_keep_path 表示拼接 $request_uri 保留原路径；三者只在启用跳转后出现，
+        且与 rewrite、proxy 三者互斥（都占用 location /）。
       responses:
         "200": { description: 返回 total 与 items }
         "403": { $ref: "#/components/responses/CSRF" }
@@ -441,6 +444,50 @@ paths:
       responses:
         "200": { description: 已生效，返回更新后的站点行 }
         "400": { description: 上游 URL 不合法或与伪静态冲突（invalid_site） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx 拒绝，已回滚（nginx_rejected） }
+  /api/v1/sites/{name}/redirect:
+    put:
+      tags: [site]
+      summary: 设置或清除站点的整站跳转（固定 URL，301/302，可选保留路径）
+      description: |
+        M2 第十片：请求体 {target, code, keep_path}。target 是一个 http:// 或 https://
+        绝对 URL，校验规则与反向代理完全一致（url.Parse 后按 scheme/host/port/path
+        规范化，拒绝 userinfo、查询串、片段、控制字符与 nginx 元字符）。生成的配置
+        只有一行固定模板 return <code> <target>[ $request_uri];，调用方不能提交任何
+        nginx 配置文本。
+        code 在 target 非空时必填，只接受 301 或 302；0、307、308 等其它值返回 400
+        invalid_site；keep_path=true 表示把请求的
+        $request_uri 拼到 target 之后，用于"换域名但保留路径"的场景，此时 target
+        尾部斜杠会被去掉，避免出现双斜杠。
+        target 为空字符串表示清除跳转，站点回到默认的 try_files $uri $uri/ =404；
+        这是始终允许的救援路径，此时 code 与 keep_path 一并忽略。
+        整站跳转与伪静态模板、反向代理三者互斥：它们都占用 location /。站点正在
+        使用非 none 模板或已启用代理时设置跳转返回 400 invalid_site；反过来启用
+        伪静态或代理时也会被跳转拒绝。先把一边切回 none / 清空，再启用另一边。
+        写入仍走"写配置 → nginx -t → 通过才 reload"；失败恢复上一份配置，响应 422
+        nginx_rejected。成功响应是更新后的站点行，含 redirect_target / redirect_code /
+        redirect_keep_path。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target]
+              properties:
+                target: { type: string, description: 绝对 URL；空字符串表示清除跳转 }
+                code: { type: integer, description: "非空 target 时必填：301 或 302；清除时忽略" }
+                keep_path: { type: boolean, description: 是否拼接 $request_uri 保留原路径 }
+      responses:
+        "200": { description: 已生效，返回更新后的站点行 }
+        "400": { description: 跳转目标或状态码不合法、与伪静态/代理冲突（invalid_site） }
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { description: 面板没有管理这个站点 }
         "422": { description: nginx 拒绝，已回滚（nginx_rejected） }

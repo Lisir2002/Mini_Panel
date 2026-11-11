@@ -42,8 +42,14 @@ type SiteInfo struct {
 	// directive block forwards Upgrade/Connection headers.
 	ProxyTarget    string `json:"proxy_target,omitempty"`
 	ProxyWebSocket bool   `json:"proxy_websocket,omitempty"`
-	PHPVersion     string `json:"php_version,omitempty"`
-	PHPSocket      string `json:"php_socket,omitempty"`
+	// RedirectTarget is the validated absolute URL when the site redirects
+	// every request; empty means no redirect. RedirectCode is 301 or 302 and
+	// RedirectKeepPath says whether the original request path is appended.
+	RedirectTarget   string `json:"redirect_target,omitempty"`
+	RedirectCode     int    `json:"redirect_code,omitempty"`
+	RedirectKeepPath bool   `json:"redirect_keep_path,omitempty"`
+	PHPVersion       string `json:"php_version,omitempty"`
+	PHPSocket        string `json:"php_socket,omitempty"`
 	// PHPSocketState is the live state of PHPSocket (listening / idle / absent /
 	// not_socket / unknown), computed on every read. It is not persisted: "the
 	// site points at 8.3" and "php8.3-fpm is answering" are two separate facts,
@@ -124,6 +130,14 @@ type SiteRewriteManager interface {
 // disappeared, even if the rest of the site writer is degraded.
 type SiteProxyManager interface {
 	SetProxy(name, target string, websocket bool) (SiteInfo, error)
+}
+
+// SiteRedirectManager is the optional site-wide redirect half of a site writer.
+// The operator supplies one absolute URL, a 301/302 status and whether the
+// original path is preserved; the provider validates the URL and renders a
+// fixed `return` line. Clearing (empty target) is always allowed.
+type SiteRedirectManager interface {
+	SetRedirect(name, target string, code int, keepPath bool) (SiteInfo, error)
 }
 
 // SiteTLSManager is the optional certificate side of a site writer. Manual
