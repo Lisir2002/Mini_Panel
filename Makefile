@@ -3,7 +3,10 @@
 # 三条硬约束（详见 README.md 与 docs/技术选型与MVP规格.md）：
 #   * CGO_ENABLED=0：SQLite 用纯 Go 驱动 modernc.org/sqlite，所以任意目标平台
 #     都能交叉编译，目标机不需要工具链，本机也不需要 C 编译器。
-#   * 没有前端构建步骤：webui/dist/index.html 是手写的静态文件，直接 embed 进二进制。
+#   * 前端产物入库，构建步骤可选：源码在 web/（Vue 3 + Vite + Element Plus），
+#     `make web` 编译成单个 webui/dist/index.html 并入库，因此 `make build` 与
+#     `make build-all` 仍然不需要 npm/node，也不引入 cgo。
+#     产物必须是单文件：安全入口之外的静态资源会被闸门伪装掉（见 web/vite.config.mjs）。
 #   * 版本三元组由 internal/build 持有，链接时用 -ldflags 注入。
 
 MODULE     := github.com/Lisir2002/Mini_Panel
@@ -40,7 +43,7 @@ EXE      := $(if $(filter windows,$(GOOS_CUR)),.exe,)
 MINI_PANEL_ROOT ?= $(CURDIR)/data
 
 .PHONY: all build build-windows build-all test vet fmt tidy run doctor web \
-  check-contract check-honesty clean version
+  check-contract check-honesty check-ui check-docs clean version
 
 all: build
 
@@ -93,12 +96,19 @@ doctor: build
 version: build
 	./$(BUILD_DIR)/$(BINARY)$(EXE) version
 
-## web  前端说明：M0 没有构建步骤，此目标只做存在性检查
+## web  编译前端：web/（Vue 3 + Vite + Element Plus）→ 单个 webui/dist/index.html
+##      只有改前端时才需要跑；产物入库，所以 make build / build-all 不依赖 node。
 web:
-	@echo "前端是手写的静态文件 webui/dist/index.html：无 npm、无 Vite、无构建步骤。"
-	@echo "它由 webui/embed.go 的 //go:embed all:dist 打进二进制，因此 index.html 必须入库。"
-	@test -f webui/dist/index.html || { echo "ERROR: webui/dist/index.html 缺失"; exit 1; }
-	@echo "OK: webui/dist/index.html 存在（`wc -c < webui/dist/index.html` 字节）"
+	cd web && npm install --no-audit --no-fund
+	cd web && npm run build
+	@test $$(ls webui/dist | wc -l) -eq 1 || { \
+	  echo "ERROR: webui/dist 必须只有一个 index.html；多出来的文件住在安全入口之外，未登录时会被闸门伪装掉"; \
+	  ls -l webui/dist; exit 1; }
+	@echo "OK: webui/dist/index.html 单文件产物（`wc -c < webui/dist/index.html` 字节）"
+
+## check-ui  前端与后端的三条一致性：产物自包含、能力 key 全覆盖、规格端点都有出口
+check-ui:
+	$(GO) test -count=1 -run 'TestUI' ./internal/api/
 
 ## check-contract  路由表与 openapi/panel.yaml 必须一一对应
 check-contract:
@@ -108,6 +118,12 @@ check-contract:
 check-honesty:
 	$(GO) test -count=1 -run 'TestDetectedCapabilitiesAreExplained|TestCapabilityStatesAreSymmetric|TestPathsAreAbsoluteAndConsistent' ./internal/platform/
 	$(GO) test -count=1 -run 'TestCapabilitiesAreSelfConsistent' ./internal/api/
+
+## check-docs  README 与 docs/ 里的 path:line 指针必须落在真实文件的有效行上，
+##             文档点名的 TestXxx 与 minipanel 子命令必须真的存在。
+##             行号会随并行改动漂移，这条把它变成编译期就能发现的失败（internal/docsync）。
+check-docs:
+	$(GO) test -count=1 ./internal/docsync/
 
 ## clean  只删构建产物；$(MINI_PANEL_ROOT) 里的 panel.json / minipanel.db 是运维数据，故意不删
 clean:
