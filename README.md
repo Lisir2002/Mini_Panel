@@ -52,8 +52,9 @@ M1 的账号与会话页、前端工程化（Vue 3 + Vite + Element Plus）、�
 | 面板自签证书，SAN 跟随本机地址自动重签 | `internal/sec/tls.go:26 EnsureSelfSignedTLS()`、`cmd/minipanel/main.go:304 certHosts()` | **无自动化测试**（M0 测试缺口，见 `docs/技术选型与MVP规格.md` §8.4）；可复核 `make doctor` 的证书行与 `minipanel init` 的实际输出 |
 | 两步验证 TOTP（RFC 6238，手写实现，无第三方 2FA 依赖） | `internal/sec/totp.go:35 TOTPCode()`、`internal/api/system.go:193 handleTOTPSetup()` | `TestTOTPVector`、`TestTOTPSetupEnableAndRequiredAtLogin` |
 | 审计日志：只追加、敏感参数入库前掩码、另存 `params_hash` | `internal/audit/audit.go:34 Write()`、`:80 List()`、`:113 Mask()` | `TestWriteListAndMasking`、`TestMaskCoversTheShapesCredentialsArriveIn`、`TestAuditRecordsMutationsWithMaskedSecrets` |
-| 能力位图与"禁用必须带理由"的契约 | `internal/platform/detect.go:18 newBase()`、`internal/platform/capabilities.go:202 Deny()` / `:220 Allow()` | `TestDetectedCapabilitiesAreExplained`、`TestCapabilitiesAreSelfConsistent` |
+| 能力位图与"禁用必须带理由"的契约 | `internal/platform/detect.go:18 newBase()`、`internal/platform/capabilities.go:202 Deny()` / `:208 Degrade()` / `:220 Allow()` | `TestDetectedCapabilitiesAreExplained`、`TestCapabilitiesAreSelfConsistent` |
 | 平台抽象（Linux / Windows / 其他，构建标签分文件） | `internal/platform/paths.go:10 Platform` | `TestPathsAreAbsoluteAndConsistent`、`make build-all` |
+| PHP 现场探测（M2 第一片）：版本、SAPI、pool/socket 路径，`php` 一项的状态由它改写 | `internal/php/php.go:119 DiscoverIn()`、`internal/platform/platform_linux.go:137`（探测→位图）、`:164` / `:167` 两处 `Degrade()`、`cmd/minipanel/php.go:25 phpProbe()` | `internal/php/php_test.go` 11 个用例、`TestDetectPHPFieldsMatchDiscovery`、`TestDetectPHPExtInstallFromEvidence`、`TestDetectPHPFromRootedHosts`（4 个子用例）、`TestDoctorPHPCtlLineIsTheInterface`、`TestDoctorPHPRootedHostNamesTheVersion`；后三条已并入 `make check-honesty` |
 | 设置项白名单校验（IP 白名单 / 口令有效期 / basic_auth / trust_proxy） | `internal/api/system.go:78 editableSettings`、`:273 validateIPAllowlist()` | `TestSettingsAllowListAndValidation`、`TestIPAllowlistBlocksAuthenticatedSession` |
 | OpenAPI 规格与路由表一一对应 | `internal/api/server.go:92 routes()`、`internal/api/openapi/panel.yaml` | `TestOpenAPIContractMatchesRoutes`、`TestSpecDeclaresTheSecurityContract` |
 | 会话列表与撤销（单个 / 除本条以外全部） | `internal/api/sessions.go:40 handleSessionsList()`、`:81 handleSessionRevoke()`、`:120 handleSessionsRevokeOthers()` | `internal/api/m1_test.go` 的会话用例；行上的 id 是 `sessions.ref`，令牌不出响应 |
@@ -64,11 +65,16 @@ M1 的账号与会话页、前端工程化（Vue 3 + Vite + Element Plus）、�
 **还没有做的（M0 明确不交付）**：站点、Nginx/Apache 配置、PHP 多版本与扩展、站点证书签发、
 数据库、备份、计划任务、防火墙规则写入、服务启停、Web 终端、监控图表、文件权限管理、
 SSH/RDP 管理页。这些在 UI 上不是"点击后无反应"，而是**灰掉并显示理由**，理由来自
-`GET /api/v1/capabilities` 的 `unavailable` 字段（例如"数据库 Provider 在 M3 交付"）。
-清单与理由的唯一来源是 `internal/platform/detect.go:50-66` 的拒绝表，一共 **16 项全部为 `false`
-并各自带一句理由**；测试会拦下任何"关掉了却没理由"的项；反方向也拦：`capabilities_test.go:174`
-的白名单声明**这个版本的 `features` 里只允许 `audit` 为 `true`**，所以"探测到本机有 ufw /
-有 PHP 二进制"绝不会被报成一项功能（见下文能力位图一节与 `docs/技术选型与MVP规格.md` §8）。
+`GET /api/v1/capabilities` 的 `features[key].reason`（例如"数据库 Provider 在 M3 交付"）。
+清单与理由的起点是 `internal/platform/detect.go:50-66` 的拒绝表，一共 **16 项，每一项都自带
+一句理由**；平台实现可以按现场证据改写其中的状态，但不能改出"没理由"这一档——
+`capabilities.go` 的 `set()` 与测试会拦下任何"关掉了却没理由"的项。反方向也拦：
+`capabilities_test.go:174` 的白名单声明**这个版本的 `features` 里只允许 `audit` 为 `available`**，
+所以"探测到本机有 ufw / 有 PHP 二进制"绝不会被报成一项已交付功能
+（见下文能力位图一节与 `docs/技术选型与MVP规格.md` §8）。
+M2 的第一处改动在这里：`php` 一项不再照抄拒绝表，而是由 `internal/php` 的现场探测改写——
+装了 PHP 但没有 fpm/cgi 后端的机器读到的是 `degraded` 加一句点名缺失后端的理由，
+什么都没装才回到 `unavailable`。状态改了，白名单没改，`Has("php")` 仍然是 `false`。
 
 ---
 
@@ -103,7 +109,7 @@ init 结束会打印这样一段（`cmd/minipanel/main.go` 的 `bannerLines()`�
 账号（走 `POST /api/v1/setup`，只在账号表为空时可用）。
 
 本机调试不必 root、也不必系统路径：`MINI_PANEL_ROOT` 会把 `/etc`、`/var` 前缀整体挪到一个
-目录下（`internal/platform/platform_linux.go:25-30`）；`MINI_PANEL_DEBUG=1` 把日志级别降到
+目录下（`internal/platform/platform_linux.go:34-39`）；`MINI_PANEL_DEBUG=1` 把日志级别降到
 Debug（`cmd/minipanel/main.go:165 newLogger()`）——**注意目前非测试代码里没有任何 `.Debug()`
 调用点**（`grep -rn "\.Debug(" --include='*.go' internal cmd | grep -v _test` 为空），所以今天
 打开它不会多出任何输出，它是给后续埋点留的口子，不是"更多信息"开关：
@@ -146,10 +152,10 @@ HTTP 测试永远看不见的缺陷——`minipanel init --port 29095 --bind 127
 | `minipanel serve` | `--bind <地址>`、`--port <端口>`、`--insecure-no-tls` | 前台运行。首次运行（没有 panel.json）会**就地执行 init**（`main.go:199-205`）。TLS 关闭且监听地址不是回环时打一条警告并照常启动，但登录接口会拒绝凭据（`main.go:209-212`）。收到 SIGINT/SIGTERM 后 10 秒优雅关闭（`main.go:275-286`）。（`serve -h` 由 `TestSubcommandHelpIsNotAFailure` 压） |
 | `minipanel init` | `--bind`、`--port`、`--insecure-no-tls`、`--entrance </路径>` | 唯一被允许写引导值的命令（`main.go:346 cmdInit()`），写入 panel.json 并生成入口与自签证书。**每个 flag 都必须真的落到 panel.json**（`TestInitHonoursItsFlags`，`main_test.go:45`：端口/绑定/TLS 三项读回断言，另外 `main_test.go:72` 断言 `panel.json` 落盘 0600）。**不接受位置参数**（多给就报错，`main.go:355`；`--bogus` 与未知子命令一起由 `TestInitRejectsUnknownAndExtraArgs`（`main_test.go:77`）拒绝）。`--entrance -` 表示**关闭**入口，此时不会自动生成随机值（`main.go:376-378`；`TestInitEntranceFlag`（`main_test.go:90`）逐条压：`/myadmin` 原样、`myadmin` 自动补前导斜杠、`-` 关闭、`/api` 保留字拒绝、`/ab` 太短拒绝、`/../../etc` 穿越拒绝，并特意断言"空入口不得被重新解释成替我生成一个"） |
 | `minipanel doctor` | `--json` | 打印/输出探测到的路径、能力位图、schema 版本、用户/会话/审计计数、数据库大小、证书 SAN 与到期、监听地址、入口（`main.go:471 cmdDoctor()`），以及**当前武装的锁死开关**（`main.go:504` 取 `lockout.OnlyArmed`，逐条给出解锁命令；`--json` 落在 `lockout_risks`）。**不要求面板正在运行**，所以它是失联时的第一手诊断。入口未启用或没有账号时会给出下一步提示。（`doctor` 与 `doctor --json` 由 `TestResetEntranceKeepsConfigAndMirrorInStep` 顺带跑通 `main_test.go:152-155`；这张表与接口的一致性由 `TestDoctorAndThePageReadTheSameRows` 压） |
-| `minipanel passwd <user>` | `--password '<口令>'` | 设置/重置管理员口令；账号不存在则创建。**用户名可以前置也可以后置**：`passwd admin --password 'X'` 与 `passwd --password 'X' admin` 都成立，因为 Go 的 flag 包遇到第一个位置参数就停止解析，代码为此把前置的用户名先摘出来（`main.go:581`）；给两个用户名则报错（`TestPasswdSetsMustChangeAndValidatesInput`，`main_test.go:176`）。口令省略时分两条路（`main.go:611` 用 `term.IsTerminal(os.Stdin)` 判断）：**tty 下走 `term.ReadPassword`（`main.go:617`），屏幕与终端缓冲区别人都读不到**，提示语是 `输入新口令: `，读完立刻换行；**管道下**（`echo 'X' | minipanel passwd admin`）不提示、直接 `readLine(os.Stdin)`（`main.go:626`），因为没有终端可隐藏。tty 这条是真关掉了回显——此前文案写"不回显"但没调 `term`，属于文案与行为不一致，已修（该分支需要真 pty，CI 里跑不到，缺口记在 §8.4）。口令强度按 `sec.ValidatePassword` 校验，**CLI 不豁免**（`--password short` 被拒；空 stdin 也被拒，同一测试 `main_test.go:206-216`）；非法用户名同样被拒。已有账号被改口令后，该用户**全部会话作废**，且下次登录要求修改口令（`MustChangePW`——测试 `main_test.go:194` 的理由就是"从 shell 传进去的口令不是操作者自己选的"）。 |
+| `minipanel passwd <user>` | `--password '<口令>'` | 设置/重置管理员口令；账号不存在则创建。**用户名可以前置也可以后置**：`passwd admin --password 'X'` 与 `passwd --password 'X' admin` 都成立，因为 Go 的 flag 包遇到第一个位置参数就停止解析，代码为此把前置的用户名先摘出来（`main.go:601`）；给两个用户名则报错（`TestPasswdSetsMustChangeAndValidatesInput`，`main_test.go:176`）。口令省略时分两条路（`main.go:631` 用 `term.IsTerminal(os.Stdin)` 判断）：**tty 下走 `term.ReadPassword`（`main.go:637`），屏幕与终端缓冲区别人都读不到**，提示语是 `输入新口令: `，读完立刻换行；**管道下**（`echo 'X' | minipanel passwd admin`）不提示、直接 `readLine(os.Stdin)`（`main.go:646`），因为没有终端可隐藏。tty 这条是真关掉了回显——此前文案写"不回显"但没调 `term`，属于文案与行为不一致，已修（该分支需要真 pty，CI 里跑不到，缺口记在 §8.4）。口令强度按 `sec.ValidatePassword` 校验，**CLI 不豁免**（`--password short` 被拒；空 stdin 也被拒，同一测试 `main_test.go:206-216`）；非法用户名同样被拒。已有账号被改口令后，该用户**全部会话作废**，且下次登录要求修改口令（`MustChangePW`——测试 `main_test.go:194` 的理由就是"从 shell 传进去的口令不是操作者自己选的"）。 |
 | `minipanel reset-entrance` | `--set </路径>`、`--disable` | 重新生成（或指定、或关闭）安全入口，写回 panel.json **并同步 settings 表的 `panel.entrance`**，两边必须一致（`TestResetEntranceKeepsConfigAndMirrorInStep`，`main_test.go:124`；`main_test.go:137` 与 `:145` 分别断言镜像值）。`--set` 与 `--disable` 同时给是**矛盾而不是优先级**，直接拒绝（`main_test.go:147-148`）。打印"需重启面板生效"。 |
-| `minipanel reset-ips` | `--set <列表>`、`--clear` | 重写 / 清空 IP 白名单，用来把自己从门外救回来（`main.go:721 cmdResetIPs()`）。**只动 SQLite 的 `panel.ip_allowlist`**，与 panel.json 无关；校验走 API 用的同一个 `sec.NormalizeIPAllowlist`，所以这条命令收下的名单中间件读法一致。**两个 flag 都不给时直接报错而不是什么都不做**——一条命令的笔误不该顺手关掉访问控制；`--set` 与 `--clear` 同时给同样拒绝。白名单是每次请求重读的，所以打印的是"下一条请求就生效"，不骗人去重启。（`TestResetIPsWritesOnlyWhatItIsTold`、`TestRecoveryCommandsTellTheTruthAboutRestarting`） |
-| `minipanel reset-2fa` | `--clear`（必填）、`--user <账号>` | 关掉两步验证并作废已保存的密钥（`main.go:780 cmdReset2FA()`），同时**作废该账号全部会话**：刚被关掉第二因子的那些连接本来只有拿着手机的人能建，留着它就等于让只剩口令的账号继续带着旧登录态。**`--clear` 是必填而不是默认**，因为这条命令降低账号强度，不做任何默认动作。`--user` 在只有一个管理员时可省略（`targetUser()`，多个账号时报错并列出候选，不做交互式追问——追问会让恢复脚本没法跑）。两处生效都是立即的，所以文案明写"立即生效，无需重启"。（`TestReset2FAClosesTheSecondFactorAndItsSessions`、`TestRecoveryCommandsTellTheTruthAboutRestarting`） |
+| `minipanel reset-ips` | `--set <列表>`、`--clear` | 重写 / 清空 IP 白名单，用来把自己从门外救回来（`main.go:741 cmdResetIPs()`）。**只动 SQLite 的 `panel.ip_allowlist`**，与 panel.json 无关；校验走 API 用的同一个 `sec.NormalizeIPAllowlist`，所以这条命令收下的名单中间件读法一致。**两个 flag 都不给时直接报错而不是什么都不做**——一条命令的笔误不该顺手关掉访问控制；`--set` 与 `--clear` 同时给同样拒绝。白名单是每次请求重读的，所以打印的是"下一条请求就生效"，不骗人去重启。（`TestResetIPsWritesOnlyWhatItIsTold`、`TestRecoveryCommandsTellTheTruthAboutRestarting`） |
+| `minipanel reset-2fa` | `--clear`（必填）、`--user <账号>` | 关掉两步验证并作废已保存的密钥（`main.go:800 cmdReset2FA()`），同时**作废该账号全部会话**：刚被关掉第二因子的那些连接本来只有拿着手机的人能建，留着它就等于让只剩口令的账号继续带着旧登录态。**`--clear` 是必填而不是默认**，因为这条命令降低账号强度，不做任何默认动作。`--user` 在只有一个管理员时可省略（`targetUser()`，多个账号时报错并列出候选，不做交互式追问——追问会让恢复脚本没法跑）。两处生效都是立即的，所以文案明写"立即生效，无需重启"。（`TestReset2FAClosesTheSecondFactorAndItsSessions`、`TestRecoveryCommandsTellTheTruthAboutRestarting`） |
 | `minipanel version` | — | `Mini Panel <Version> (commit <Commit>, built <BuildDate>)`，三元组由 `-ldflags` 注入 `internal/build/build.go:4-8`。（`dispatch(["version"])` 返回 nil 由 `TestSubcommandHelpIsNotAFailure` 压；`TestUsageCoversEveryCommand`（`main_test.go:237`）还要求 8 个子命令与 8 个 flag 全部出现在 `usage` 文本里——帮助文档不许腐烂，`lockout_test.go` 再从"表里引用的命令与 flag"这一侧同向压一遍） |
 | banner（`init`/`serve` 打的） | — | banner 里的端口、绑定地址、URL 必须等于**实际生效**的值；入口关闭时明写"未设置"而不是留空（`TestBannerReportsLiveConfigValues`，`main_test.go:257`，绑定回环时还禁止出现 `0.0.0.0`） |
 
@@ -254,20 +260,21 @@ panel.json（0600）且被 `.gitignore` 排除，`GET /api/v1/settings` 也刻�
 `GET /api/v1/capabilities` 返回 `internal/platform.Capabilities`
 （`internal/platform/capabilities.go:89`），它是**前端渲染的唯一依据**：
 
-* `features` 里为 `true` 的项 → 渲染成可用控件；
-* `features` 里为 `false` 的项 → 必须能在 `unavailable` 里找到一句人能读懂的理由，UI 渲染成
-  "灰掉 + 理由"（`webui/dist/index.html` 里读 `caps.features` / `caps.unavailable` 的那段渲染，
-  兜底文案是常量 `NO_REASON`；用 `grep -n 'NO_REASON\|unavailable' webui/dist/index.html` 复核，
-  这个文件正在被并行改动，行号不作准）；
+* `features[key].state == "available"` → 徽章"可用"，渲染成正常控件；
+* 其余三态（`degraded` / `unavailable` / `foreign`）→ `reason` 必须非空，UI 渲染成
+  "灰掉/弱化 + 理由"，徽章文案取自 `STATE` 映射（部分可用 / 未开放 / 非面板管理）
+  （`web/src/views/CapabilitiesView.vue:38 featRow()`，兜底文案是常量 `NO_REASON`；产物在
+  `webui/dist/index.html`，用 `grep -n 'NO_REASON\|degraded' webui/dist/index.html` 复核，
+  这个文件每次构建都会变，行号不作准）；
 * **绝不渲染"看着能点、点了没反应"的按钮**，也绝不像某些实现那样把没实现的功能整块藏起来。
   前者让人以为坏了反复报障，后者让人以为产品没有这个能力。
 
 保障是测试而不是口头约定：
 
 * `TestDetectedCapabilitiesAreExplained`（`internal/platform/capabilities_test.go:110`）——
-  对当前主机真实探测，任何 `false` 却没理由即失败；并且用**白名单**断言反向收紧
+  对当前主机真实探测，任何非 `available` 却没理由即失败；并且用**白名单**断言反向收紧
   （`capabilities_test.go:174 implemented := map[string]bool{FeatAudit: true}`）：`features` 里
-  出现白名单之外的任何 `true` 即失败，白名单里的项报成 `false` 同样失败。也就是说本版本
+  出现白名单之外的任何 `available` 即失败，白名单里的项没报成 `available` 同样失败。也就是说本版本
   **只有 `audit` 算"已交付功能"**；哪天平台探测（`Detect`）因为"看到了某个机制"就 `Allow` 一项
   还没有实现的特性，测试会直接红，这条纪律写在 `docs/技术选型与MVP规格.md` §8。
 * `TestCapabilitiesAreSelfConsistent`（`internal/api/m0_test.go`，从 HTTP 外面再打一遍同一条规则）；
@@ -275,18 +282,28 @@ panel.json（0600）且被 `.gitignore` 排除，`GET /api/v1/settings` 也刻�
   `Allow` 必须清掉旧的 reason/fix/verify，`Degrade` 不得读成可用，`Deny` 未知项不得 panic，空理由在数据结构层就被拒绝。
 
 `make check-honesty` 跑的就是这三条，外加 `TestPathsAreAbsoluteAndConsistent`（路径必须绝对、
-两侧口径一致，对应上面「平台抽象」那一行）。
+两侧口径一致，对应上面「平台抽象」那一行）与 M2 起的 `TestDetectPHP*` 三条（下一段讲的那次
+状态改写必须有测试钉住，所以它归在诚实性门禁里，而不是普通单测）。
 
-探测的规则是"只报本机当场验证过的"：`newBase()` 先把所有功能置为 `false` 并填好理由
+探测的规则是"只报本机当场验证过的"：`newBase()` 先把所有功能置为 `unavailable` 并填好理由
 （`internal/platform/detect.go:18`，拒绝表在 `:50`），平台实现只能对自己确实检查到的部分调
-`Allow()`——**而 M0 里没有任何平台调用过 `Allow()`**（复核：
-`grep -rn "\.Allow(" --include='*.go' internal/platform | grep -v _test` 为空），
-`features` 中唯一为 `true` 的是 `detect.go:74` 的 `audit`。探测到的事实（装了 ufw、跑着 sshd、
+`Allow()`——**而四个平台实现里没有一处调用过 `Allow()`**（复核：
+`grep -rn "\.Allow(" --include='*.go' internal/platform | grep -v _test` 只输出 `detect.go:74` 一条，
+它属于 `newBase()` 而不属于任何平台实现），
+`features` 中唯一为 `available` 的是 `detect.go:74` 的 `audit`。探测到的事实（装了 ufw、跑着 sshd、
 有 nginx）只写进 `Capabilities` 的描述字段，绝不成了一项能力。
+唯一一处由证据改写的**状态**是 `php`：`internal/platform/platform_linux.go:137` 里的
+`php.Discover()` 是本机现场探测，装了运行时却没有 fpm/cgi 后端时落到
+`:164` 的 `Degrade(FeatPHP, …)`——这是本项目第一处生产代码里的 `Degrade()` 调用；
+什么都没装时走 `:158` 的 `Deny(FeatPHP, …)`。理由里的后端名来自
+`internal/php/php.go:36` 起的 SAPI 常量表，测试在 `internal/php/php_test.go`：
+11 个用例跑假 root 树（`TestCLITreeWithoutFPM`、`TestStrayConfigDirIsNotARuntime`、
+`TestDefaultBinaryOnlyClaimsItsOwnVersion` 是其中三条），`TestLiveHostIsSelfConsistent`
+再对真机跑一遍"报了的东西必须存在"。这是 `make test` 里新增的第十个有测试的包。
 Linux 上 `ufw`/`firewall-cmd`/`nft` 都没装与装了但没有写入 Provider，是**两句不同的理由**
 ——原文分别是 `"未检测到 ufw / firewall-cmd / nft 任一后端，本机没有可管理的防火墙"`
-（`internal/platform/platform_linux.go:81`）与 `"当前版本只读展示后端状态；规则写入 Provider 在 M4 交付"`
-（`:83`），`:77-79` 的注释写的就是这条区分："no firewall software on this host" 与
+（`internal/platform/platform_linux.go:101`）与 `"当前版本只读展示后端状态；规则写入 Provider 在 M4 交付"`
+（`:103`），`:97-99` 的注释写的就是这条区分："no firewall software on this host" 与
 "firewall present, write provider not shipped yet" 必须由 UI 区分开。Windows 的差异同样体现在位图里：PHP 只有 `php-cgi.exe`
 的 FastCGI 进程池（没有 php-fpm）、扩展只能装与 PHP 版本 × TS/NTS × VC 运行库 × 位数完全匹配的
 预编译 DLL、reload 只有 `restart_only`、防火墙是 WFP、计划任务走 `schtasks`
@@ -382,29 +399,31 @@ darwin/arm64、windows/amd64、freebsd/amd64 是**重点目标**（四个 OS 都
 | 命令 | 实测结果 |
 | --- | --- |
 | `make vet` | `go vet ./...` 无输出 |
-| `make test` | **全绿（9 个包有测试，本轮 `-count=1` 逐包计时）**：`internal/api` 20.7s、`cmd/minipanel` 3.2s、`internal/sec` 1.1s、`internal/store` 0.7s、`internal/docsync` 0.7s、`internal/lockout` 0.6s、`internal/audit` 0.2s、`internal/platform` 0.002s、`internal/config` 0.004s；`webui` 与 `internal/build` 无测试文件（零依赖单文件前端，它的契约由后端返回的字段名约束）。`cmd/minipanel` 的 13 个用例分布在 `main_test.go`（11）与 `lockout_test.go`（2），见上文"CLI 子命令"。曾经约 1/5 概率飘红的入口字母表矛盾**已由源码侧修掉**：`go test -count=60`/`-count=200 -run TestEntranceShape ./internal/sec/` 本轮都 ok；历史、原因与防回归口径见 `docs/技术选型与MVP规格.md` §8.3 |
+| `make test` | **全绿（10 个包有测试，本轮 `-count=1` 逐包计时）**：`internal/api` 21.1s、`cmd/minipanel` 3.2s、`internal/sec` 1.1s、`internal/store` 0.54s、`internal/docsync` 0.72s、`internal/lockout` 0.77s、`internal/php` 0.03s、`internal/audit` 0.34s、`internal/platform` 0.08s、`internal/config` 0.003s；`webui` 与 `internal/build` 无测试文件（零依赖单文件前端，它的契约由后端返回的字段名约束）。`cmd/minipanel` 的 15 个用例分布在 `main_test.go`（11）、`lockout_test.go`（2）与 `php_test.go`（2），见上文"CLI 子命令"。曾经约 1/5 概率飘红的入口字母表矛盾**已由源码侧修掉**：`go test -count=60`/`-count=200 -run TestEntranceShape ./internal/sec/` 本轮都 ok；历史、原因与防回归口径见 `docs/技术选型与MVP规格.md` §8.3 |
 | `make fmt` | `gofmt -s -l .` 执行前后都为空，且没有任何 `.go` 的 mtime 变化——**fmt 不产生 diff 是预期状态** |
 | `make check-contract` | `ok … internal/api 0.004s`（`TestOpenAPIContractMatchesRoutes` + `TestSpecDeclaresTheSecurityContract`） |
-| `make check-honesty` | `ok … internal/platform 0.002s`（`TestDetectedCapabilitiesAreExplained`、`TestCapabilityStatesAreSymmetric`、`TestPathsAreAbsoluteAndConsistent`）、`ok … internal/api 0.58s`（`TestCapabilitiesAreSelfConsistent`，同一规则从 HTTP 面再述一遍） |
-| `make check-ui` | `ok … internal/api 0.066s`（`TestUIBundleIsASingleSelfContainedFile`：产物只有一个文件、没有入口外的资源引用；`TestUIDeclaresEveryCapabilityKey`：17 个能力 key 全在前端字典里；`TestUIReachesEveryDocumentedEndpoint`：规格里每个端点都有页面调用它） |
-| `make check-docs` | `ok … internal/docsync 0.56s`——三个用例：`TestCitationsPointInsideRealFiles` 核对每一个 `文件:行` 指针所指的文件存在、行号在文件内、区间没写反，并且**不接受指针落在空行或只剩 `}` 的行上**；`TestAnchoredCitationsSayWhatTheyClaim` 对写了符号名的指针确认那个符号确实就在所指行上（找不到就打印它真正在第几行）；`TestNamedTestsAndCommandsExist` 要求文档点名的 `TestXxx` 与 README 点名的 `minipanel <子命令>` 真的存在。本轮实测：**375 个行号指针 0 个越界、112 个带符号锚点的指针全部落在所指行上、51 个标识符与 8 个子命令全部存在**；它自愿放弃的部分（前一行已收尾、无法判定归属的裸 `:行`）连在哪一行都打印出来，本轮 0 处。覆盖面不会悄悄缩水：任何一个用例核对数为 0 就直接 `t.Fatal`。它第一轮跑就抓到 4 处真实文档说谎——3 个起点大于终点的反向区间，和 1 个仓库里从来没有过的测试名（三份文档都把它当作 check-honesty 的一条引用；真实用例是 `TestCapabilityStatesAreSymmetric`）；补上"空行/收尾括号不算落点""裸指针可继承上一行的文件（附录里的条目是折着写的）"之后又抓到 15 处行号漂移，逐条改掉，并把 `docs/技术选型与MVP规格.md` 里"main_test.go 277 行、8 个用例"这种同样过期的计数改成实测的 489 行、11 个用例。防误报规则写在 `notALineRef`：`0.0.0.0:29080`、`https://IP:29080` 里的冒号是端口，不是行号 |
-| 真实浏览器跑七个页面（puppeteer + chrome，脚本不入仓库） | **25/25 断言通过**：导航 7 项、KPI 8 格、能力表 17 行且 16 个灰项全部带理由、设置表 10 行带来源列、CLI 对照 9 行且"概要说几项就标几项"（本轮 2 项）、入口路径 `/let-me-in` 没有出现在 DOM 里、会话页两条在用→撤销其它全部后剩 1 条且当前会话仍活着、令牌未泄漏到页面、审计留痕、退出后回到登录页、入口外路径不渲染面板、除故意的 `/api/v1/session 404` 外没有任何 4xx |
-| `make build && ./bin/minipanel version` | `Mini Panel 0.1.0-m0 (commit 2c15097, built 2026-11-11T02:01:27Z)`；产物 13,516,962 字节。commit / built 由 Makefile 从 `git rev-parse --short HEAD`（取不到就写 `none`，`Makefile:21`）与 UTC 当前时间（`Makefile:22`）注入，`Makefile:24-27` 的 `-ldflags -X $(MODULE)/internal/build.{Version,Commit,BuildDate}` 落到 `internal/build`，**每次构建都会变**，不是可以对表的常量 |
-| `make build-all` | 8 个产物全部产出，12.45–13.62 MB（`-s -w` + ldflags），末行打印 `build-all OK`；`CGO_ENABLED=0` 见 `go version -m bin/minipanel` |
-| `make doctor` | 打印平台、路径（`MINI_PANEL_ROOT=./data`，不动系统路径）、**schema v3**、用户/会话/审计计数、数据库大小、证书、监听与未认证响应、**锁死风险**（只列 armed 行）与**未开放能力及理由**（`backup(备份任务与归档管理在 M6 交付)`、`cron(计划任务调度器在 M6 交付)` 与 `internal/platform/detect.go:57-58` 原文一致，共 16 条）。本轮在一个"入口已启用 + 一个管理员账号 + TLS 关闭"的实例上实测：armed 恰好两行（安全入口、管理员口令），与「CLI 对照」页标 `当前能` 的两行逐字相同 |
-| 8 个组合逐条 `CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build`（linux/darwin/windows/freebsd × amd64/arm64） | **8/8 退出码 0**（本轮逐个跑，产物 17.8–19.6 MB，未加 `-s -w`；带 ldflags 的 `make build-all` 产物是 12.45–13.62 MB） |
+| `make check-honesty` | `ok … internal/platform 0.071s`（`TestDetectedCapabilitiesAreExplained`、`TestCapabilityStatesAreSymmetric`、`TestPathsAreAbsoluteAndConsistent`，M2 起再加 `TestDetectPHPFieldsMatchDiscovery`、`TestDetectPHPExtInstallFromEvidence`、`TestDetectPHPFromRootedHosts` 及其四个子用例）、`ok … internal/api 0.60s`（`TestCapabilitiesAreSelfConsistent`，同一规则从 HTTP 面再述一遍）。PHP 那三条归进这道门禁而不是普通单测，是因为它们断言的正是"位图不许抄表、必须由现场证据得出" |
+| `make check-ui` | `ok … internal/api 0.083s`（`TestUIBundleIsASingleSelfContainedFile`：产物只有一个文件、没有入口外的资源引用；`TestUIDeclaresEveryCapabilityKey`：17 个能力 key 全在前端字典里；`TestUIReachesEveryDocumentedEndpoint`：规格里每个端点都有页面调用它） |
+| `make check-docs` | `ok … internal/docsync 0.53s`——三个用例：`TestCitationsPointInsideRealFiles` 核对每一个 `文件:行` 指针所指的文件存在、行号在文件内、区间没写反，并且**不接受指针落在空行或只剩 `}` 的行上**；`TestAnchoredCitationsSayWhatTheyClaim` 对写了符号名的指针确认那个符号确实就在所指行上（找不到就打印它真正在第几行）；`TestNamedTestsAndCommandsExist` 要求文档点名的 `TestXxx` 与 README 点名的 `minipanel <子命令>` 真的存在。本轮实测：**426 个行号指针 0 个越界、128 个带符号锚点的指针全部落在所指行上、61 个标识符与 8 个子命令全部存在**；它自愿放弃的部分（前一行已收尾、无法判定归属的裸 `:行`）连在哪一行都打印出来，本轮 0 处。覆盖面不会悄悄缩水：任何一个用例核对数为 0 就直接 `t.Fatal`。它第一轮跑就抓到 4 处真实文档说谎——3 个起点大于终点的反向区间，和 1 个仓库里从来没有过的测试名（三份文档都把它当作 check-honesty 的一条引用；真实用例是 `TestCapabilityStatesAreSymmetric`）；补上"空行/收尾括号不算落点""裸指针可继承上一行的文件（附录里的条目是折着写的）"之后又抓到 15 处行号漂移，逐条改掉，并把 `docs/技术选型与MVP规格.md` 里"main_test.go 277 行、8 个用例"这种同样过期的计数改成实测的 489 行、11 个用例。防误报规则写在 `notALineRef`：`0.0.0.0:29080`、`https://IP:29080` 里的冒号是端口，不是行号 |
+| 真实浏览器跑七个页面（puppeteer + chrome，脚本不入仓库） | **25/25 断言通过**（本轮重建 `webui/dist` 之后重跑）：导航 7 项、KPI 8 格、能力表 17 行且 16 个非可用项全部带理由（其中 PHP 是 `部分可用`，reason 与"复查"一行都画出来了；机制表里那行 PHP 写的是"未检测到 fpm / cgi · 已检测到 8.3，但没有能执行站点的 fpm/cgi 后端"）、设置表 10 行带来源列、CLI 对照 9 行且"概要说几项就标几项"（本轮 2 项）、入口路径 `/let-me-in` 没有出现在 DOM 里、会话页两条在用→撤销其它全部后剩 1 条且当前会话仍活着、令牌未泄漏到页面、审计留痕、退出后回到登录页、入口外路径不渲染面板、除故意的 `/api/v1/session 404` 外没有任何 4xx |
+| `make build && ./bin/minipanel version` | `Mini Panel 0.1.0-m0 (commit bf2ffa7, built 2026-11-11T03:34:09Z)`；产物 13,549,730 字节。commit / built 由 Makefile 从 `git rev-parse --short HEAD`（取不到就写 `none`，`Makefile:21`）与 UTC 当前时间（`Makefile:22`）注入，`Makefile:24-27` 的 `-ldflags -X $(MODULE)/internal/build.{Version,Commit,BuildDate}` 落到 `internal/build`，**每次构建都会变**，不是可以对表的常量 |
+| `make build-all` | 8 个产物全部产出，12.45–13.63 MB（`-s -w` + ldflags），末行打印 `build-all OK`；`CGO_ENABLED=0` 见 `go version -m bin/minipanel` |
+| `make doctor` | 打印平台、路径（`MINI_PANEL_ROOT=./data`，不动系统路径）、**schema v3**、用户/会话/审计计数、数据库大小、证书、监听与未认证响应、**锁死风险**（只列 armed 行）与**未开放能力及理由**（`backup(备份任务与归档管理在 M6 交付)`、`cron(计划任务调度器在 M6 交付)` 与 `internal/platform/detect.go:57-58` 原文一致）。这一行列出的是**全部非 available 的 16 条**：15 条 `unavailable` 来自拒绝表，1 条 `degraded` 是 `php`，理由由 `internal/php` 现场探测拼出来而不是表里抄的。本轮在一个"入口已启用 + 一个管理员账号 + TLS 关闭"的实例上实测：armed 恰好两行（安全入口、管理员口令），与「CLI 对照」页标 `当前能` 的两行逐字相同 |
+| 8 个组合逐条 `CGO_ENABLED=0 GOOS=<os> GOARCH=<arch> go build`（linux/darwin/windows/freebsd × amd64/arm64） | **8/8 退出码 0**（本轮逐个跑，产物 17.7–19.5 MB，未加 `-s -w`；带 ldflags 的 `make build-all` 产物是 12.45–13.63 MB） |
 | `GOOS=linux\|windows\|darwin\|freebsd go vet ./internal/...` | 四个平台全部退出码 0、无输出 |
-| `go test ./cmd/minipanel/` | `ok … 2.4s`（`make test` 里同一包是 3.2s——这类计时每台机器每次都会飘，能对表的是包数与用例数，不是小数）——`init` 的 flag 真的落到 panel.json、未知 flag/位置参数/未知子命令报错、`--entrance -` 关闭入口、`reset-entrance` 同步 settings 镜像、`passwd` 校验与 `must_change_pw`、`-h` 不算失败、usage 与命令表一致、banner 显示在用值、`reset-ips` / `reset-2fa` 只写它们声称写的东西并且不谎报"需要重启"；`lockout_test.go` 再从对照表这一侧压两条：**表里引用的每个 `minipanel <命令>` 都必须真能被 dispatch、每个 `--flag` 都必须出现在 usage 里**，以及 `doctor --json` 的 `lockout_risks` 必须逐行等于 `lockout.OnlyArmed(lockout.Risks(...))` |
+| `go test ./cmd/minipanel/` | `ok … 2.5s`（`make test` 里同一包是 3.2s——这类计时每台机器每次都会飘，能对表的是包数与用例数，不是小数）——`init` 的 flag 真的落到 panel.json、未知 flag/位置参数/未知子命令报错、`--entrance -` 关闭入口、`reset-entrance` 同步 settings 镜像、`passwd` 校验与 `must_change_pw`、`-h` 不算失败、usage 与命令表一致、banner 显示在用值、`reset-ips` / `reset-2fa` 只写它们声称写的东西并且不谎报"需要重启"；`lockout_test.go` 再从对照表这一侧压两条：**表里引用的每个 `minipanel <命令>` 都必须真能被 dispatch、每个 `--flag` 都必须出现在 usage 里**，以及 `doctor --json` 的 `lockout_risks` 必须逐行等于 `lockout.OnlyArmed(lockout.Risks(...))`；`php_test.go` 再从 PHP 这一侧压两条：`php_ctl_versions` 必须逐字等于 `capabilities.php_versions`，且两条 run 都不许出现"注意："那行 |
+| `go test -count=1 ./internal/php/`；`go test -count=1 -run PHP ./internal/platform/`（本机实测） | `ok … internal/php 0.023s`（11 个用例）+ `ok … internal/platform 0.063s`（3 个用例）。**后 3 条是为了"旧写法必须失败"而写的**：把 `internal/platform/platform_linux.go` 退回 M1 版（`php_modes` 无条件 append `fpm`、`php_ext_install` 无条件 append `package, source`）后重跑，三条全部 FAIL——`php_modes = [fpm], discovery says []`、`php_ext_install = [package source], host offers [package]`、四个 rooted 子用例全红；换回现在的实现后全部通过。假 root 树的四个子用例覆盖"没有 PHP / 只有 cli / 装了 fpm / 只有 cgi"四种机器形状，`MINI_PANEL_ROOT` 让它们在没装 nginx 的机器上也能跑 |
 | `go test -count=60 -run TestEntranceShape ./internal/sec/`；`-count=200` | 两者都 `ok`——曾经约 1/5 概率飘红的入口字母表矛盾已修（`internal/sec/sec.go:108-115` 注释写明原因与熵算法），这两条是它的回归口径，见 `docs/技术选型与MVP规格.md` §8.3 |
 | `go mod tidy -diff` | 无输出（`go.mod`/`go.sum` 已 tidy；因此不必执行 `make tidy`） |
 | `sed -n '5,12p' go.mod`；`grep -c '// indirect' go.mod` | 直接依赖 6 个（含 `golang.org/x/term v0.48.0`）、间接 15 个 |
 | `grep -rn "golang.org/x/term" --include='*.go' .` | 只有一处：`cmd/minipanel/main.go:41`——这个依赖只为隐藏口令输入而存在 |
-| `echo 'X' \| minipanel passwd admin`（管道） | 退出码 0，输出"已更新 admin 的口令，作废 0 个会话…"，**不打提示语**（没有终端可隐藏，`main.go:626`（`readLine` 调用点）） |
-| `minipanel passwd admin`（真 tty） | 只显示 `输入新口令: ` 与随后的换行；用 `pty.fork()` 造终端、只检查主端回流的字节，输入口令后在主端流里搜不到明文——回显确实被关掉了（`main.go:611 term.IsTerminal` → `:617 term.ReadPassword`）。这条现在是代码事实，不再只是文案 |
+| `echo 'X' \| minipanel passwd admin`（管道） | 退出码 0，输出"已更新 admin 的口令，作废 0 个会话…"，**不打提示语**（没有终端可隐藏，`main.go:646`（`readLine` 调用点）） |
+| `minipanel passwd admin`（真 tty） | 只显示 `输入新口令: ` 与随后的换行；用 `pty.fork()` 造终端、只检查主端回流的字节，输入口令后在主端流里搜不到明文——回显确实被关掉了（`main.go:631 term.IsTerminal` → `:637 term.ReadPassword`）。这条现在是代码事实，不再只是文案 |
 | `grep -rnE "http\.(Get\|Post\|Client\|DefaultClient)\|net\.Dial\(" --include='*.go' . \| grep -v _test.go` | 空——**没有遥测** |
 | `grep -rn "runtime.GOOS" --include='*.go' . \| grep -v internal/platform` | 空——平台差异只靠构建标签 |
-| `grep -rn "\.Allow(" --include='*.go' internal/platform \| grep -v _test` | 空——**M0 没有把任何探测结果报成功能**，`features` 里唯一为真的是 `audit` |
-| `minipanel doctor --json`（本机实测） | `features` 中为 `true` 的只有 `audit` 一项；16 项为 `false`，且 `unavailable` 恰好 16 条理由——一条"关掉了没理由"的都没有 |
+| `grep -rn "\.Allow(" --include='*.go' internal/platform \| grep -v _test` | 只输出一行 `internal/platform/detect.go:74`——它在 `newBase()` 里点亮 `audit`，**四个平台实现里一处都没有**。也就是说**没有任何探测结果被报成 available**；现场证据可以改写状态（`php` 从 unavailable 到 degraded），但不能改写白名单 |
+| `./bin/minipanel doctor` 的 PHP 行（本机实测） | `PHP           8.3，最新 8.3：pool /etc/php/8.3/fpm/pool.d，socket /run/php/php8.3-fpm.sock（路径由 PHPCtl 给出，未校验 socket 是否存活）`。这一行不是读位图，而是 `cmd/minipanel/php.go:25 phpProbe()` 走 `platform.PHPCtl` 现探出来的，`cmd/minipanel/php.go:67 phpBitmapMismatch()` 再拿它和位图对一遍；两者不一致时 doctor 打印一行"注意："，所以 `TestDoctorPHPCtlLineIsTheInterface` 与 `TestDoctorPHPRootedHostNamesTheVersion` 里都断言"没有注意行" |
+| `minipanel doctor --json`（本机实测） | `capabilities.features` 共 17 个 key：`available` 只有 `audit`，`degraded` 只有 `php`（理由点名"没有检测到 fpm 或 cgi 后端"，`fix_action` 为空——§4.2 不许这个字段带包名，面板也不装任何东西），其余 15 个 `unavailable` 各带一句理由；顶层 `php_ctl_versions` 逐字等于 `capabilities.php_versions`（`["8.3"]`），`php_modes` 为 `[]`、`php_ext_install` 为 `["package"]`——这台机器没有 phpize，所以 `source` 不在名单里 |
 
 > 如果你把仓库放进自己的 git 远端，记得先确认 `webui/dist/index.html` 被跟踪：
 > `git ls-files webui/dist` 应该有输出，`git check-ignore -v webui/dist/index.html` 应该**没有**命中。
