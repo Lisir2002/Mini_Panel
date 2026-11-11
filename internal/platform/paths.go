@@ -63,7 +63,10 @@ type FirewallRule struct {
 	Note      string `json:"note"`
 }
 
-// PHPCtl arrives in M2, with the fpm/cgi split expressed through Capabilities.
+// PHPCtl is the read side of M2's PHP work: Linux implements it over live
+// discovery (internal/php), Windows still answers from build-tag constants. The
+// fpm/cgi split is expressed through Capabilities, not through a method here —
+// a caller that needs "can this host run a site" reads the bitmap.
 type PHPCtl interface {
 	Versions() ([]string, error)
 	PoolDir(version string) string

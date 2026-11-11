@@ -503,21 +503,36 @@ func cmdDoctor(args []string) error {
 	// its old shape — only the switches that are actually armed right now.
 	lockRisks := lockout.OnlyArmed(lockout.Risks(e.st, e.cfg))
 
+	// The PHP line deliberately does not read the bitmap. It goes through
+	// platform.PHPCtl, the interface M2's write side will use, so that `doctor`
+	// executes the same code path a later handler will — and prints it next to
+	// the capability fields the bitmap claims. TestDoctorPHPCtlLineIsTheInterface
+	// pins the two against each other, which is what makes a drift a failing test
+	// rather than an inconsistency an operator reads on their own box.
+	phpInfo := phpProbe(e.plat)
+
 	if *asJSON {
 		out := map[string]any{
-			"lockout_risks":   lockRisks,
-			"config_file":     config.Path(e.dir),
-			"config_exists":   e.exists,
-			"config":          e.cfg,
-			"capabilities":    e.caps,
-			"site_root":       e.plat.SiteRoot(),
-			"backup_root":     e.plat.BackupRoot(),
-			"schema_version":  schemaVer,
-			"users":           users,
-			"active_sessions": sessions,
-			"audit_rows":      auditRows,
-			"db_bytes":        dbBytes,
-			"certificate":     certSummary,
+			"lockout_risks": lockRisks,
+			"config_file":   config.Path(e.dir),
+			"config_exists": e.exists,
+			"config":        e.cfg,
+			"capabilities":  e.caps,
+			"site_root":     e.plat.SiteRoot(),
+			"backup_root":   e.plat.BackupRoot(),
+			// php_ctl_* are the PHPCtl answers, kept separate from
+			// capabilities.php_versions on purpose: the test compares them, and a
+			// single merged key would hide the disagreement it exists to catch.
+			"php_ctl_versions": phpInfo.versions,
+			"php_pool_dir":     phpInfo.poolDir,
+			"php_socket":       phpInfo.socket,
+			"php_note":         phpInfo.note,
+			"schema_version":   schemaVer,
+			"users":            users,
+			"active_sessions":  sessions,
+			"audit_rows":       auditRows,
+			"db_bytes":         dbBytes,
+			"certificate":      certSummary,
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -530,6 +545,11 @@ func cmdDoctor(args []string) error {
 	fmt.Println("  配置文件    ", config.Path(e.dir), "存在:", e.exists)
 	fmt.Println("  数据目录    ", e.cfg.DataDir, " 日志:", e.cfg.LogDir)
 	fmt.Println("  站点/备份   ", e.plat.SiteRoot(), "|", e.plat.BackupRoot())
+	fmt.Println("  PHP         ", phpSummary(phpInfo))
+	phpMismatch := phpBitmapMismatch(e.caps, phpInfo)
+	if phpMismatch != "" {
+		fmt.Println("    注意：", phpMismatch)
+	}
 	fmt.Println("  数据库      schema v"+schemaVer, " 大小", dbBytes, "B")
 	fmt.Println("  账号        用户", users, " 有效会话", sessions, " 审计", auditRows, "条")
 	fmt.Println("  证书        ", certSummary)

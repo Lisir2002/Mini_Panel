@@ -114,9 +114,9 @@ check-ui:
 check-contract:
 	$(GO) test -count=1 -run 'TestOpenAPIContractMatchesRoutes|TestSpecDeclaresTheSecurityContract' ./internal/api/
 
-## check-honesty  能力位图自洽：features=false 的每一项都必须带可读理由
+## check-honesty  能力位图自洽：非 available 的每一项都必须带可读理由，状态由现场证据得出
 check-honesty:
-	$(GO) test -count=1 -run 'TestDetectedCapabilitiesAreExplained|TestCapabilityStatesAreSymmetric|TestPathsAreAbsoluteAndConsistent' ./internal/platform/
+	$(GO) test -count=1 -run 'TestDetectedCapabilitiesAreExplained|TestCapabilityStatesAreSymmetric|TestPathsAreAbsoluteAndConsistent|TestDetectPHP' ./internal/platform/
 	$(GO) test -count=1 -run 'TestCapabilitiesAreSelfConsistent' ./internal/api/
 
 ## check-docs  README 与 docs/ 里的 path:line 指针必须落在真实文件的有效行上，

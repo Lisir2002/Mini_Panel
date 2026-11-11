@@ -5,12 +5,21 @@ package platform
 import (
 	"bufio"
 	"os"
+	"strconv"
 	"strings"
+
+	"github.com/Lisir2002/Mini_Panel/internal/php"
 )
 
 type linuxPlatform struct{}
 
 func newPlatform() Platform { return linuxPlatform{} }
+
+// PHPCtl is implemented by the Linux platform from M2 onward: internal/php does
+// the discovery, so the three methods below answer from the host rather than
+// from a build tag. Asserting it here means a signature change breaks the build
+// instead of leaving a handler to type-assert at runtime.
+var _ PHPCtl = linuxPlatform{}
 
 func (linuxPlatform) ID() string { return "linux" }
 
@@ -36,6 +45,20 @@ func envOr(k, def string) string {
 	return def
 }
 
+// Versions, PoolDir and SocketPath are PHPCtl: the read side of what the php
+// package observed, plus the two paths M2's write side needs. They re-probe the
+// host on every call instead of reading a cached bitmap, because a panel that
+// answers "which PHP versions exist" from startup-time data lies the moment the
+// operator installs one, and discovery is cheap enough to run live.
+func (linuxPlatform) Versions() ([]string, error) {
+	installs, _ := php.Discover()
+	return php.Versions(installs), nil
+}
+
+func (linuxPlatform) PoolDir(version string) string { return php.PoolDir(version) }
+
+func (linuxPlatform) SocketPath(version string) string { return php.SocketPath(version) }
+
 func (linuxPlatform) Detect() (*Capabilities, error) {
 	c := newBase()
 	c.OSFamily = osFamily()
@@ -52,9 +75,6 @@ func (linuxPlatform) Detect() (*Capabilities, error) {
 	c.Permissions = "posix"
 
 	c.ReloadMode = ReloadSIGHup
-	c.PHPModes = append(c.PHPModes, PHPModeFPM)
-	c.PHPExtInstall = append(c.PHPExtInstall, ExtFromPackage, ExtFromSource)
-	c.Deny(FeatPHP, "PHP 版本探测与 pool 管理在 M2 交付")
 
 	if have("nginx") != "" || have("openresty") != "" {
 		c.WebServers = append(c.WebServers, WebNginx)
@@ -101,6 +121,53 @@ func (linuxPlatform) Detect() (*Capabilities, error) {
 	}
 	c.SupportsSubSecondCron = true
 
+	// PHP is the first capability in this bitmap whose answer comes from the host
+	// rather than from the build tag. Up to this slice the three lines that
+	// replaced the ones below were unconditional: `php_modes = [fpm]` and
+	// `php_ext_install = [package, source]` on every Linux box, including the
+	// cli-only one that has neither php-fpm nor phpize. That is the exact shape of
+	// lie that later becomes a clickable nothing, and it is why the M2 rule in
+	// docs/里程碑.md requires site/php/ssl to be set from Detect() evidence only.
+	//
+	// The feature stays short of `available` regardless: discovering a runtime is
+	// not the same as serving a site through it, and the pool/vhost write path
+	// ships later in M2. What changed is that "short of" now says *what* is
+	// missing, from evidence — which is what docs/功能设计.md §4.1's `degraded`
+	// row is for.
+	installs, unreadable := php.Discover()
+	c.PHPVersions = php.Versions(installs)
+	fpm, cgi := php.Modes(installs)
+	if fpm {
+		c.PHPModes = append(c.PHPModes, PHPModeFPM)
+	}
+	if cgi {
+		c.PHPModes = append(c.PHPModes, PHPModeCGI)
+	}
+	if c.PackageManager != "none" {
+		c.PHPExtInstall = append(c.PHPExtInstall, ExtFromPackage)
+	}
+	if have("phpize") != "" {
+		c.PHPExtInstall = append(c.PHPExtInstall, ExtFromSource)
+	}
+	phpVerify := "重跑 minipanel doctor 的 php 行，或读 GET /api/v1/capabilities 的 php_modes / php_versions"
+	phpSeen := "检测到 PHP " + strings.Join(c.PHPVersions, "、")
+	switch {
+	case len(installs) == 0:
+		// No runtime at all: this stays a plain denial, because there is no
+		// "main path works" claim to make and a static-site box is a valid answer.
+		c.Deny(FeatPHP, phpGap("本机未检测到可运行的 PHP", unreadable)+
+			"。站点创建与 fpm 配置生成在 M2 交付，纯静态站点不受影响")
+	case !fpm && !cgi:
+		// The sentence names only what discovery proved. It does not say "只有
+		// cli", because a version can be detected from its binary with no SAPI
+		// tree at all, and an over-specific reason is a new kind of lie.
+		c.Degrade(FeatPHP, phpGap(phpSeen+"，但没有检测到 fpm 或 cgi 后端，站点没有可执行 PHP 的处理器", unreadable),
+			"", phpVerify)
+	default:
+		c.Degrade(FeatPHP, phpGap(phpSeen+" 的 "+phpModeWords(fpm, cgi)+"，版本与 pool 目录已可读；把站点绑定到某个版本的写入路径在 M2 交付", unreadable),
+			"", phpVerify)
+	}
+
 	// Detection is a fact; the page that would manage it is M4 work. Allowing the
 	// feature here because sshd happens to exist is precisely how a panel ends up
 	// shipping a button with no code behind it.
@@ -114,6 +181,30 @@ func (linuxPlatform) Detect() (*Capabilities, error) {
 func dirExists(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && st.IsDir()
+}
+
+// phpGap appends the binaries discovery found but could not version, so a reason
+// never claims "there is no PHP here" next to a /usr/bin/php that merely would
+// not answer. Empty list, empty suffix.
+func phpGap(head string, unreadable []string) string {
+	if len(unreadable) == 0 {
+		return head
+	}
+	return head + "；另有 " + strconv.Itoa(len(unreadable)) +
+		" 个 PHP 二进制存在但无法确定版本：" + strings.Join(unreadable, " ")
+}
+
+// phpModeWords names the detected handler backends in one phrase, using only
+// what Modes() proved.
+func phpModeWords(fpm, cgi bool) string {
+	switch {
+	case fpm && cgi:
+		return "fpm 与 cgi"
+	case fpm:
+		return "fpm"
+	default:
+		return "cgi"
+	}
 }
 
 // osFamily maps /etc/os-release ID and ID_LIKE onto our small family set. The
