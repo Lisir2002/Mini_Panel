@@ -80,7 +80,7 @@ func nginxRoot() string { return envOr("MINI_PANEL_NGINX_ROOT", "/etc/nginx") }
 // start, so a fresh install still needs a restart before the site page is
 // exposed; detection is cheap, and the provider itself never caches a lie.
 func (linuxPlatform) WebServer() (WebServerCtl, bool) {
-	m, err := nginx.New(nginxRoot(), linuxPlatform{}.SiteRoot())
+	m, err := nginx.NewWithCertDir(nginxRoot(), linuxPlatform{}.SiteRoot(), rooted("/etc/minipanel/certs"))
 	if err != nil {
 		return nil, false
 	}
@@ -88,7 +88,7 @@ func (linuxPlatform) WebServer() (WebServerCtl, bool) {
 }
 
 func (linuxPlatform) Sites() (SiteManager, bool) {
-	m, err := nginx.New(nginxRoot(), linuxPlatform{}.SiteRoot())
+	m, err := nginx.NewWithCertDir(nginxRoot(), linuxPlatform{}.SiteRoot(), rooted("/etc/minipanel/certs"))
 	if err != nil {
 		return nil, false
 	}
@@ -153,11 +153,42 @@ func (l linuxSites) Delete(name string) (SiteInfo, error) {
 	return toSiteInfo(s), nil
 }
 
+func (l linuxSites) SetSelfSigned(name string, redirect bool) (SiteInfo, error) {
+	s, err := l.m.SetSelfSigned(name, redirect)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
+func (l linuxSites) SetCertificate(name, certPEM, keyPEM string, redirect bool) (SiteInfo, error) {
+	s, err := l.m.SetCertificate(name, certPEM, keyPEM, redirect)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
+func (l linuxSites) ClearCertificate(name string) (SiteInfo, error) {
+	s, err := l.m.ClearCertificate(name)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
 func toSiteInfo(s nginx.Site) SiteInfo {
-	return SiteInfo{
+	out := SiteInfo{
 		Name: s.Name, Domains: s.Domains, Root: s.Root,
 		ConfigPath: s.ConfigPath, Enabled: s.Enabled, CreatedAt: s.CreatedAt,
 	}
+	if s.TLS != nil {
+		out.TLS = &SiteTLSInfo{
+			Enabled: s.TLS.Enabled, Redirect: s.TLS.Redirect, SelfSigned: s.TLS.SelfSigned,
+			CertPath: s.TLS.CertPath, KeyPath: s.TLS.KeyPath, NotAfter: s.TLS.NotAfter, Error: s.TLS.Error,
+		}
+	}
+	return out
 }
 
 func mapNginxErr(err error) error {
@@ -168,6 +199,15 @@ func mapNginxErr(err error) error {
 		return fmt.Errorf("%w", ErrSiteExists)
 	case errors.Is(err, nginx.ErrNotFound):
 		return fmt.Errorf("%w", ErrSiteMissing)
+	case errors.Is(err, nginx.ErrTLSInvalid):
+		// The nginx layer already prefixes its errors with ErrTLSInvalid. Wrap
+		// only the detail, or the operator sees the same sentence twice.
+		detail := strings.TrimPrefix(err.Error(), nginx.ErrTLSInvalid.Error())
+		detail = strings.TrimPrefix(detail, "：")
+		if detail == "" {
+			return fmt.Errorf("%w", ErrSiteTLSInvalid)
+		}
+		return fmt.Errorf("%w：%s", ErrSiteTLSInvalid, detail)
 	case errors.Is(err, nginx.ErrInvalid):
 		return fmt.Errorf("%w：%v", ErrSiteInvalid, err)
 	case errors.Is(err, nginx.ErrConfigRejected):
@@ -235,6 +275,14 @@ func (p linuxPlatform) Detect() (*Capabilities, error) {
 	default:
 		c.Allow(FeatWebSite)
 		c.Allow(featSiteWrite)
+		// The certificate slice ships manual upload and self-signed certs, not
+		// ACME. Calling that "available" would be the same half-truth this
+		// project exists to avoid, so ssl stays degraded with the missing half
+		// named. The site page gates its HTTPS controls on this state and says
+		// the same sentence.
+		c.Degrade(FeatSSL, "站点 HTTPS 已支持上传证书与自签证书；ACME 自动签发与续期尚未交付，证书不会自动续期",
+			"在「网站」页为站点生成自签证书或上传证书链与私钥；到期前手工更换",
+			"GET /api/v1/sites 的 tls.not_after，或 curl -kI https://<域名>/")
 	}
 
 	switch {

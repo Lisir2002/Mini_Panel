@@ -126,6 +126,8 @@ func (s *Server) routes() chi.Router {
 			r.Get("/sites", s.handleSitesList)
 			r.Post("/sites", s.handleSiteCreate)
 			r.Delete("/sites/{name}", s.handleSiteDelete)
+			r.Post("/sites/{name}/tls", s.handleSiteTLSSet)
+			r.Delete("/sites/{name}/tls", s.handleSiteTLSClear)
 
 			// M1: the last page of the milestone. Read-only by construction — the
 			// remedies it lists are commands, and this panel has no endpoint that
@@ -404,9 +406,11 @@ func (s *Server) auditWrites(next http.Handler) http.Handler {
 		var reqBody []byte
 		if r.Body != nil {
 			// Bound the buffered copy: the audit trail must never become a way to
-			// exhaust panel memory with a large request body.
-			reqBody, _ = io.ReadAll(io.LimitReader(r.Body, 8<<10))
-			r.Body = io.NopCloser(bytes.NewReader(reqBody))
+			// exhaust panel memory with a large request body. The handler still
+			// receives the whole body: replaying only the captured prefix would
+			// silently truncate certificate uploads at the audit boundary.
+			reqBody, _ = io.ReadAll(io.LimitReader(r.Body, 64<<10))
+			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(reqBody), r.Body))
 		}
 
 		rw := middleware.NewWrapResponseWriter(w, r.ProtoMajor)

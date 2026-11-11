@@ -95,7 +95,7 @@
   默认拒绝，而不是默认允许。
   **实际状态**：`Allow()` 全仓库只被调用一次（`internal/platform/detect.go:74`），
   生产代码里的 `Degrade()` 只有 M2 的 PHP 探测那两处
-  （`internal/platform/platform_linux.go:315`、`:318`），
+  （`internal/platform/platform_linux.go:356`、`:318`），
   `features` 里唯一的 `available` 仍然是 `audit`。探测到的**事实**（有 ufw、有 sshd、
   有 nginx、有 PHP 8.3）只写进 `Capabilities` 的描述字段，不写成"功能可用"。
 * `Deny()` / `Degrade()` / `Allow()` 三个入口都走同一个 `set()`：`Allow` 会清掉旧理由与
@@ -254,7 +254,7 @@
    `/healthz` 永远可达。**持有合法 `mp_session` 后任何路径都可访问**——这是有意的：SPA 的导航、
    刷新与深链必须落在原路径上，把它们全部改写到一个魔法路径会拿可用的界面换一个勾。
    因此**入口不能缓解 XSS，也不能缓解 Cookie 泄露**，任何"安全入口保护登录后的面板"的表述都是
-   错的；`entranceGate` 的注释（`internal/api/server.go:182-200`）已经把这段结论写死，
+   错的；`entranceGate` 的注释（`internal/api/server.go:184-202`）已经把这段结论写死，
    文档与 README 必须原样表达这条边界。**"登录后逐路径校验入口"是 M1 待办**（见
    `docs/里程碑.md`），在它实现之前不得写成现状。真正的访问控制 = 监听地址 + 会话令牌与有效期
    + `panel.ip_allowlist` + CSRF + 登录锁定。
@@ -358,7 +358,7 @@ bcrypt 口令哈希、有效会话 ID 和整份审计记录：会话 ID 泄露�
 反应的按钮，或者一整块被藏起来的已交付功能。
 
 因此这条纪律是**测试强制**的，不是文档口径（M2 第一片是它的正面样本：`internal/php` 当场探到
-PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:315`
+PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:356`
 报的是"检测到了什么、缺哪个后端"，而 `php_version_switch`、`php_ext_source`、`site` 仍然停在
 `newBase()` 里那句 `unavailable` 理由上，探测到多版本不等于能切版本）：
 

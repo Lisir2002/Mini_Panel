@@ -132,13 +132,26 @@ func ExecRunner(name string, args ...string) ([]byte, error) {
 type Manager struct {
 	Layout   Layout
 	SiteRoot string
-	Run      Runner
-	Now      func() time.Time
+	// CertDir holds the panel-managed certificate/key pairs. It is a separate
+	// directory from the vhost files so deleting a site's config cannot be
+	// confused with deleting somebody's certificate, and so the private key can
+	// stay 0600 instead of inheriting the vhost's 0644.
+	CertDir string
+	Run     Runner
+	Now     func() time.Time
 }
 
 // New detects the layout and returns a usable Manager. siteRoot is the parent
-// directory new document roots are created under.
+// directory new document roots are created under. Certificates default to a
+// subdirectory of the nginx config tree so tests and `make run` stay inside one
+// scratch directory; the platform layer overrides it with the panel's own
+// config directory on a real host.
 func New(base, siteRoot string) (*Manager, error) {
+	return NewWithCertDir(base, siteRoot, filepath.Join(base, "minipanel-certs"))
+}
+
+// NewWithCertDir is New with an explicit certificate directory.
+func NewWithCertDir(base, siteRoot, certDir string) (*Manager, error) {
 	l, err := Detect(base)
 	if err != nil {
 		return nil, err
@@ -146,7 +159,10 @@ func New(base, siteRoot string) (*Manager, error) {
 	if siteRoot == "" {
 		siteRoot = "/www/wwwroot"
 	}
-	return &Manager{Layout: l, SiteRoot: siteRoot, Run: ExecRunner, Now: time.Now}, nil
+	if certDir == "" {
+		certDir = filepath.Join(base, "minipanel-certs")
+	}
+	return &Manager{Layout: l, SiteRoot: siteRoot, CertDir: certDir, Run: ExecRunner, Now: time.Now}, nil
 }
 
 // Site is one row of the site list: the facts the panel generated, not a
@@ -158,6 +174,7 @@ type Site struct {
 	ConfigPath string   `json:"config_path"`
 	Enabled    bool     `json:"enabled"`
 	CreatedAt  string   `json:"created_at"`
+	TLS        *TLSInfo `json:"tls,omitempty"`
 }
 
 // Spec is the create request after decoding.
@@ -168,10 +185,11 @@ type Spec struct {
 }
 
 type markerPayload struct {
-	Name      string   `json:"name"`
-	Domains   []string `json:"domains"`
-	Root      string   `json:"root"`
-	CreatedAt string   `json:"created_at"`
+	Name      string     `json:"name"`
+	Domains   []string   `json:"domains"`
+	Root      string     `json:"root"`
+	CreatedAt string     `json:"created_at"`
+	TLS       *markerTLS `json:"tls,omitempty"`
 }
 
 var (
@@ -263,6 +281,7 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 		Name: payload.Name, Domains: payload.Domains, Root: payload.Root,
 		ConfigPath: p, CreatedAt: payload.CreatedAt,
 	}
+	s.TLS = m.tlsFromMarker(payload)
 	if lp := m.Layout.LinkPath(payload.Name); lp != "" {
 		if fi, err := os.Lstat(lp); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 			s.Enabled = true
@@ -466,28 +485,32 @@ func (m *Manager) Delete(name string) (Site, error) {
 		restore()
 		return Site{}, fmt.Errorf("%w：reload 失败：%v", ErrConfigRejected, strings.TrimSpace(string(out)))
 	}
+	// The certificate is panel data tied to this site, so it goes with the
+	// config. The document root stays; that is operator data.
+	if site.TLS != nil {
+		m.removeCerts(name)
+	}
 	return site, nil
 }
 
-// render produces the server block. Only static sites for now: the PHP
-// fastcgi block arrives with the version-binding slice, and inventing one here
-// would claim a capability the bitmap still reports as degraded.
+// render produces the server block(s). A site without TLS keeps the exact
+// shape the previous slice shipped. A TLS site gets either one block listening
+// on 80 and 443 (no redirect) or a redirect block plus a 443-only block, so
+// "force HTTPS" is a config fact rather than a checkbox the front end believes.
 func render(s Site) string {
 	payload, _ := json.Marshal(markerPayload{
 		Name: s.Name, Domains: s.Domains, Root: s.Root, CreatedAt: s.CreatedAt,
+		TLS: markerFromTLS(s.Name, s.TLS),
 	})
 	var b strings.Builder
 	b.WriteString(headerLine + "\n")
 	b.WriteString(markerLine + string(payload) + "\n")
-	b.WriteString("server {\n")
-	b.WriteString("    listen 80;\n")
-	b.WriteString("    server_name " + strings.Join(s.Domains, " ") + ";\n\n")
-	b.WriteString("    root " + s.Root + ";\n")
-	b.WriteString("    index index.html index.htm;\n\n")
-	b.WriteString("    location / {\n")
-	b.WriteString("        try_files $uri $uri/ =404;\n")
-	b.WriteString("    }\n")
-	b.WriteString("}\n")
+	tlsOn := s.TLS != nil && s.TLS.Enabled
+	if tlsOn && s.TLS.Redirect {
+		b.WriteString(renderRedirect(s))
+		b.WriteString("\n")
+	}
+	b.WriteString(renderServer(s, tlsOn))
 	return b.String()
 }
 

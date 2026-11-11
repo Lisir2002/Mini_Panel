@@ -186,8 +186,10 @@ paths:
         可选能力：site 不可用时本端点返回 403 capability，message 直接取
         /api/v1/capabilities 里 site 那一项的 reason（本机没有 nginx / 面板不是
         root / 检测到 Apache 而写 Provider 目前只有 nginx），不在这里另写一套说法。
-        每行是 {name, domains, root, config_path, enabled, created_at}；enabled 在
-        sites-enabled 布局里等价于软链接存在，conf.d 布局里恒为 true。
+        每行是 {name, domains, root, config_path, enabled, created_at, tls?}；enabled 在
+        sites-enabled 布局里等价于软链接存在，conf.d 布局里恒为 true。tls 只在启用
+        HTTPS 后出现，字段为 {enabled, redirect, self_signed, cert_path?, key_path?,
+        not_after?, error?}；ssl 能力位仍是 degraded，ACME 续期尚未交付。
       responses:
         "200": { description: 返回 total 与 items }
         "403": { $ref: "#/components/responses/CSRF" }
@@ -246,6 +248,62 @@ paths:
         "404": { description: 面板没有管理这个站点 }
         "422": { description: nginx 拒绝，已恢复 }
         "403": { $ref: "#/components/responses/CSRF" }
+  /api/v1/sites/{name}/tls:
+    post:
+      tags: [site]
+      summary: 为站点启用 HTTPS（自签或上传证书）
+      description: |
+        M2 第四片：站点证书。请求体 {mode, cert_pem?, key_pem?, redirect?}：
+        mode=selfsigned 由面板生成 ECDSA P-256 自签证书，SAN 覆盖该站点的全部
+        domains，有效期一年；mode=upload 要求同时给出 cert_pem 与 key_pem（证书链
+        与私钥），面板校验两者配对、当前时间在有效期内、证书覆盖站点域名（通配符
+        只按精确 SAN 匹配）。
+        证书写入 /etc/minipanel/certs/<name>.crt（0644）与 .key（0600），随后按
+        "先测试后生效"写 vhost：nginx -t 通过才 reload；任一步失败都会恢复改动前的
+        配置、证书与私钥，响应 422 nginx_rejected 时 nginx 仍在服务上一份配置。
+        redirect=true 时同时写 80→443 的 301 跳转，否则保留 80 明文监听。
+        能力位 ssl 目前是 degraded：手工证书与自签可用，ACME 自动签发与续期尚未
+        交付，证书到期需要人工更换。ssl 为 unavailable 时本端点返回 403
+        capability，message 直接取位图里的 reason。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode: { type: string, enum: [selfsigned, upload] }
+                cert_pem: { type: string, description: upload 模式必填 }
+                key_pem: { type: string, description: upload 模式必填，与 cert_pem 配对 }
+                redirect: { type: boolean, description: 是否把 HTTP 301 到 HTTPS }
+      responses:
+        "200": { description: 已生效，返回含 tls 字段的站点行 }
+        "400": { description: 证书不合法或请求缺项（invalid_tls / invalid_site） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx -t 或 reload 拒绝，已回滚（nginx_rejected） }
+    delete:
+      tags: [site]
+      summary: 关闭站点 HTTPS
+      description: |
+        回到纯 HTTP：先写回不含 ssl 的 vhost，nginx -t 通过且 reload 成功后才删除
+        面板管理的证书与私钥。失败时 vhost、证书、私钥一并恢复，响应 422。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      responses:
+        "200": { description: 已关闭，返回不含 tls 的站点行 }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx 拒绝，已回滚 }
   /api/v1/lockout-risks:
     get:
       tags: [panel]
