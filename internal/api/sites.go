@@ -108,6 +108,21 @@ func (s *Server) siteProxyManager() (platform.SiteProxyManager, string) {
 	return pm, ""
 }
 
+// siteProxyLBManager is the optional load-balanced proxy table. A provider
+// without it (or without an http-level wildcard include on the host) returns
+// 403 capability with the provider's reason instead of a dead editor.
+func (s *Server) siteProxyLBManager() (platform.SiteProxyLBManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	pm, ok := m.(platform.SiteProxyLBManager)
+	if !ok || pm == nil {
+		return nil, "该平台的站点 Provider 没有实现反向代理负载均衡"
+	}
+	return pm, ""
+}
+
 // siteRedirectManager is the optional site-wide redirect interface. A provider
 // without it returns 403 capability with the reason below.
 func (s *Server) siteRedirectManager() (platform.SiteRedirectManager, string) {
@@ -489,6 +504,44 @@ func (s *Server) handleSiteProxy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_proxy", "更新反向代理失败："+err.Error())
+	}
+}
+
+// handleSiteProxyUpstreams is PUT /api/v1/sites/{name}/proxy-upstreams. The
+// body is {"upstreams":[{"target":"http://127.0.0.1:3000","weight":3}],
+// "method":"least_conn","websocket":true}; an empty upstreams list clears the
+// table and returns the site to its local vhost. The provider validates the
+// backends (http only, host:port, no path), the weight bounds and the closed
+// method vocabulary, owns the http-level upstream block, and swaps ownership
+// of location / with the single-target form in one test-before-reload
+// transaction.
+func (s *Server) handleSiteProxyUpstreams(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteProxyLBManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Upstreams []platform.SiteProxyUpstream `json:"upstreams"`
+		Method    string                       `json:"method"`
+		WebSocket bool                         `json:"websocket"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetProxyUpstreams(chiParam(r, "name"), body.Upstreams, body.Method, body.WebSocket)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_proxy_upstreams", "更新负载均衡失败："+err.Error())
 	}
 }
 

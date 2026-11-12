@@ -495,7 +495,7 @@ func renderServer(s Site, tlsOn bool) string {
 	switch {
 	case s.RedirectTarget != "":
 		b.WriteString(redirectLocationBody(s))
-	case s.ProxyTarget != "":
+	case s.proxyActive():
 		b.WriteString(proxyLocationBody(s))
 	default:
 		b.WriteString("        " + rewriteLocation(s) + "\n")

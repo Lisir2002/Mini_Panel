@@ -69,7 +69,7 @@ func (m *Manager) SetRedirect(name, target string, code int, keepPath bool) (Sit
 		if normalizeRewrite(site.Rewrite) != "none" {
 			return Site{}, fmt.Errorf("%w：站点正在使用伪静态模板 %q，它和整站跳转都写 location /；先把伪静态切回 none", ErrInvalid, site.Rewrite)
 		}
-		if site.ProxyTarget != "" {
+		if site.proxyActive() {
 			return Site{}, fmt.Errorf("%w：站点正在使用反向代理，location / 已由代理接管；先清除代理再启用整站跳转", ErrInvalid)
 		}
 		if site.Hotlink {

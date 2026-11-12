@@ -219,6 +219,13 @@ type Site struct {
 	// exclusive because both own `location /`.
 	ProxyTarget    string `json:"proxy_target,omitempty"`
 	ProxyWebSocket bool   `json:"proxy_websocket,omitempty"`
+	// ProxyUpstreams is the multi-upstream balancing table (slice 20). It is
+	// mutually exclusive with ProxyTarget — both own location / — and its
+	// http-level upstream blocks live in a panel-owned table file written in
+	// the same transaction as this vhost. ProxyLBMethod is the closed
+	// balancing vocabulary ("" = weighted round-robin, ip_hash, least_conn).
+	ProxyUpstreams []ProxyUpstream `json:"proxy_upstreams,omitempty"`
+	ProxyLBMethod  string          `json:"proxy_lb_method,omitempty"`
 	// RedirectTarget is the validated absolute URL when the site redirects
 	// every request. Redirect, proxy and rewrite all own `location /`, so at
 	// most one of them may be set. RedirectPaths adds exact path exceptions;
@@ -289,6 +296,8 @@ type markerPayload struct {
 	Rewrite           string          `json:"rewrite,omitempty"`
 	ProxyTarget       string          `json:"proxy_target,omitempty"`
 	ProxyWebSocket    bool            `json:"proxy_websocket,omitempty"`
+	ProxyUpstreams    []ProxyUpstream `json:"proxy_upstreams,omitempty"`
+	ProxyLBMethod     string          `json:"proxy_lb_method,omitempty"`
 	RedirectTarget    string          `json:"redirect_target,omitempty"`
 	RedirectCode      int             `json:"redirect_code,omitempty"`
 	RedirectKeepPath  bool            `json:"redirect_keep_path,omitempty"`
@@ -482,6 +491,7 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 		Name: payload.Name, Domains: payload.Domains, Root: payload.Root,
 		ConfigPath: p, CreatedAt: payload.CreatedAt, Index: payload.Index,
 		Rewrite: payload.Rewrite, ProxyTarget: payload.ProxyTarget, ProxyWebSocket: payload.ProxyWebSocket,
+		ProxyUpstreams: payload.ProxyUpstreams, ProxyLBMethod: payload.ProxyLBMethod,
 		RedirectTarget: payload.RedirectTarget, RedirectCode: payload.RedirectCode,
 		RedirectKeepPath: payload.RedirectKeepPath, RedirectPaths: payload.RedirectPaths,
 		ErrorPages: payload.ErrorPages,
@@ -522,11 +532,31 @@ func parseMarker(body string) (markerPayload, bool) {
 		if validateRewrite(p.Rewrite, p.PHPVersion != "") != nil {
 			return markerPayload{}, false
 		}
-		target, ws, err := normalizeProxy(p.ProxyTarget, p.ProxyWebSocket)
+		ups, err := normalizeProxyUpstreams(p.ProxyUpstreams)
 		if err != nil {
 			return markerPayload{}, false
 		}
+		lbMethod, err := normalizeProxyLBMethod(p.ProxyLBMethod)
+		if err != nil {
+			return markerPayload{}, false
+		}
+		if len(ups) == 0 {
+			lbMethod = ""
+		}
+		// WebSocket needs a proxy owner; with upstreams the owner is the
+		// upstream block, so normalizeProxy must not demand a single target.
+		target, ws, err := normalizeProxy(p.ProxyTarget, p.ProxyWebSocket && len(ups) == 0)
+		if err != nil {
+			return markerPayload{}, false
+		}
+		if len(ups) > 0 {
+			if target != "" {
+				return markerPayload{}, false
+			}
+			ws = p.ProxyWebSocket
+		}
 		p.ProxyTarget, p.ProxyWebSocket = target, ws
+		p.ProxyUpstreams, p.ProxyLBMethod = ups, lbMethod
 		redirect, code, keepPath, err := normalizeRedirect(p.RedirectTarget, p.RedirectCode, p.RedirectKeepPath)
 		if err != nil {
 			return markerPayload{}, false
@@ -571,11 +601,11 @@ func parseMarker(body string) (markerPayload, bool) {
 			return markerPayload{}, false
 		}
 		p.RealIPFrom, p.RealIPHeader = from, header
-		if p.Hotlink && (target != "" || redirect != "") {
+		if p.Hotlink && (target != "" || len(ups) > 0 || redirect != "") {
 			return markerPayload{}, false
 		}
 		owners := 0
-		if target != "" {
+		if target != "" || len(ups) > 0 {
 			owners++
 		}
 		if redirect != "" {
@@ -894,6 +924,21 @@ func (m *Manager) Delete(name string) (Site, error) {
 		}
 		files = append(files, configFile{Path: tablePath, Body: &table, OwnedCheck: parseLimitsMarker})
 	}
+	// The upstream table is rebuilt the same way: deleting the last
+	// multi-upstream site must not leave a vhost-less upstream file behind,
+	// and deleting any site must not leave its block in the table.
+	upRows, err := m.upstreamRows("", nil, "", name)
+	if err != nil {
+		return Site{}, err
+	}
+	if len(upRows) > 0 || m.upstreamsFileExists() {
+		tablePath, err := m.upstreamsPath()
+		if err != nil {
+			return Site{}, err
+		}
+		upTable := renderUpstreams(upRows)
+		files = append(files, configFile{Path: tablePath, Body: &upTable, OwnedCheck: parseUpstreamsMarker})
+	}
 	if err := m.applyFiles(files); err != nil {
 		return Site{}, err
 	}
@@ -927,6 +972,8 @@ func render(s Site) string {
 		Rewrite:           s.Rewrite,
 		ProxyTarget:       s.ProxyTarget,
 		ProxyWebSocket:    s.ProxyWebSocket,
+		ProxyUpstreams:    s.ProxyUpstreams,
+		ProxyLBMethod:     s.ProxyLBMethod,
 		RedirectTarget:    s.RedirectTarget,
 		RedirectCode:      s.RedirectCode,
 		RedirectKeepPath:  s.RedirectKeepPath,

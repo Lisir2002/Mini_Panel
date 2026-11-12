@@ -42,6 +42,13 @@ type SiteInfo struct {
 	// directive block forwards Upgrade/Connection headers.
 	ProxyTarget    string `json:"proxy_target,omitempty"`
 	ProxyWebSocket bool   `json:"proxy_websocket,omitempty"`
+	// ProxyUpstreams is the load-balanced form of the same proxy: a table of
+	// http backends with weights, mutually exclusive with ProxyTarget (both
+	// own `location /`). ProxyLBMethod is the balancing method; empty means
+	// nginx's default round robin. The provider owns the http-level upstream
+	// block, so callers only ever name backends, never nginx text.
+	ProxyUpstreams []SiteProxyUpstream `json:"proxy_upstreams,omitempty"`
+	ProxyLBMethod  string              `json:"proxy_lb_method,omitempty"`
 	// RedirectTarget is the validated absolute URL when the site redirects
 	// every request; empty means no redirect. RedirectCode is 301 or 302 and
 	// RedirectKeepPath says whether the original request path is appended.
@@ -119,6 +126,14 @@ type SiteRedirectRule struct {
 type SiteErrorPageRule struct {
 	Code int    `json:"code"`
 	Path string `json:"path"`
+}
+
+// SiteProxyUpstream is one backend in a site's load-balanced proxy table. The
+// provider validates the URL (http only, host:port, no path), the weight
+// bounds and the table size, and renders the http-level upstream block itself.
+type SiteProxyUpstream struct {
+	Target string `json:"target"`
+	Weight int    `json:"weight,omitempty"`
 }
 
 // SiteTrafficLimit is one site's traffic ceiling in platform-neutral form. The
@@ -200,6 +215,18 @@ type SiteRewriteManager interface {
 // disappeared, even if the rest of the site writer is degraded.
 type SiteProxyManager interface {
 	SetProxy(name, target string, websocket bool) (SiteInfo, error)
+}
+
+// SiteProxyLBManager is the optional load-balanced proxy half of a site
+// writer. It is separate from SiteProxyManager for the same reason
+// SiteTrafficLimitManager is separate: nginx defines upstream blocks outside
+// any server block, so a host whose config has no wildcard http-level include
+// cannot offer this feature at all, and that reason has to reach the UI. The
+// operator supplies complete backend tables plus a method from the provider's
+// closed vocabulary; an empty table is always an allowed clear operation.
+// Setting a single target via SetProxy clears the table, and vice versa.
+type SiteProxyLBManager interface {
+	SetProxyUpstreams(name string, upstreams []SiteProxyUpstream, method string, websocket bool) (SiteInfo, error)
 }
 
 // SiteRedirectManager is the optional site-wide redirect half of a site writer.

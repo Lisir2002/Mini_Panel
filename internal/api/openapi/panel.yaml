@@ -203,6 +203,11 @@ paths:
         try_files $uri $uri/ =404。proxy_target 非空表示站点把 location / 反向代理到该
         上游 URL，proxy_websocket 表示同时转发 Upgrade 头；两者只在启用代理后出现，
         且与 rewrite 模板互斥（同一个 location / 不能既代理又做伪静态）。
+        proxy_upstreams 非空表示站点使用多上游负载均衡：每项 {target,weight}，
+        target 是 http://host:port 后端（不带路径），weight 为 1-100（1 时省略）；
+        proxy_lb_method 是均衡算法（ip_hash / least_conn，省略表示默认轮询）。
+        它与 proxy_target 互斥（同一个 location / 只能有一种代理形式），
+        proxy_websocket 对两种形式含义相同。
         redirect_target 非空表示站点把整站跳转到该 URL，redirect_code 是 301 或 302，
         redirect_keep_path 表示拼接 $request_uri 保留原路径；三者只在启用跳转后出现，
         且与 rewrite、proxy 三者互斥（都占用 location /）。redirect_paths 是精确路径
@@ -445,6 +450,8 @@ paths:
         正则匹配，优先于代理的 location /，可以同时存在。
         写入仍走"写配置 → nginx -t → 通过才 reload"；失败恢复上一份配置，响应 422
         nginx_rejected。成功响应是更新后的站点行，含 proxy_target / proxy_websocket。
+        设置或清除单目标代理时会同时清掉该站点的多上游表（proxy_upstreams），
+        两种形式在同一次事务里交接 location /；反向亦然，见 /proxy-upstreams。
       parameters:
         - name: name
           in: path
@@ -466,6 +473,74 @@ paths:
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { description: 面板没有管理这个站点 }
         "422": { description: nginx 拒绝，已回滚（nginx_rejected） }
+  /api/v1/sites/{name}/proxy-upstreams:
+    put:
+      tags: [site]
+      summary: 替换或清除站点的多上游反向代理表（负载均衡）
+      description: |
+        M2 第二十片：请求体 {upstreams:[{target,weight}], method, websocket}。
+        upstreams 是整个后端表的替代值，最多 10 个；空数组表示清除负载均衡，
+        站点回到默认的 try_files $uri $uri/ =404，这是始终允许的救援路径
+        （websocket=true 搭配空表返回 400 invalid_site）。
+        target 只接受 http://host:port 形状：主机名或 IP 字面量加合法端口，
+        不带路径、查询串、userinfo 或 nginx 元字符；不支持 https 上游
+        （nginx 的 upstream server 只接受 host:port，本片不做上游 TLS）。
+        同一 host:port 重复出现会被拒绝。weight 为 1-100，省略或 0 按 1 处理。
+        method 只接受封闭列表：省略 / round_robin（默认轮询）、ip_hash（按客户端
+        IP 固定后端）、least_conn（最少连接）；round_robin 归一化为省略。
+        websocket=true 时代理块追加 Upgrade / Connection 两行，与单目标形式相同。
+        面板渲染的指令是固定的，调用方不能提交任何 nginx 配置文本：vhost 的
+        location / 写 proxy_pass http://<站点派生名>_upstream，upstream 块
+        （method 指令加每后端一行 server host:port [weight=N]）必须落在 http
+        上下文，因此面板另写一个自己拥有的表文件到本机 nginx.conf 里已存在
+        通配 include（sites-enabled/* 或 conf.d/*.conf）的目录；每次改动都按
+        当前站点列表整表重建，最后一个 upstream 消失时删除该文件。找不到这样的
+        include 时返回 400 invalid_site 并说明原因，单目标代理不受此限制。
+        多上游与单目标 proxy_target 互斥（都占用 location /）：设置本表会清掉
+        单目标，PUT /proxy 设置单目标也会清掉本表，交接在同一次事务里完成。
+        与伪静态模板、整站跳转、防盗链的互斥规则和单目标代理完全一致；
+        PHP 绑定、按路径跳转、错误页、限流等 server 级功能不受影响。
+        vhost 与表文件在同一次"写文件 → nginx -t → 通过才 reload"事务里落盘，
+        任一步失败两个文件都恢复原字节（表原本不存在则删除），响应 422
+        nginx_rejected。成功响应是更新后的站点行，含 proxy_upstreams /
+        proxy_lb_method / proxy_websocket。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [upstreams]
+              properties:
+                upstreams:
+                  type: array
+                  maxItems: 10
+                  items:
+                    type: object
+                    required: [target]
+                    properties:
+                      target: { type: string, description: "http://host:port 后端地址，不带路径" }
+                      weight:
+                        type: integer
+                        minimum: 0
+                        maximum: 100
+                        description: 权重 1-100；省略或 0 按 1 处理
+                method:
+                  type: string
+                  enum: ["", round_robin, ip_hash, least_conn]
+                  description: 均衡算法；省略或 round_robin 表示 nginx 默认轮询
+                websocket: { type: boolean, description: 是否转发 WebSocket 升级头 }
+      responses:
+        "200": { description: 已生效，返回更新后的站点行（含 proxy_upstreams / proxy_lb_method） }
+        "400": { description: 后端、权重或算法不合法，与伪静态/跳转/防盗链冲突，或本机 nginx.conf 没有 http 级通配 include（invalid_site） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx 拒绝，vhost 与 upstream 表都已回滚（nginx_rejected） }
   /api/v1/sites/{name}/redirect:
     put:
       tags: [site]

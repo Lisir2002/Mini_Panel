@@ -126,7 +126,7 @@ func (m *Manager) SetRewrite(name, preset string) (Site, error) {
 		return Site{}, err
 	}
 	if preset != "none" {
-		if site.ProxyTarget != "" {
+		if site.proxyActive() {
 			return Site{}, fmt.Errorf("%w：站点正在使用反向代理，location / 已由代理接管；先清除代理再启用伪静态", ErrInvalid)
 		}
 		if site.RedirectTarget != "" {

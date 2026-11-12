@@ -156,7 +156,14 @@ func normalizeProxy(target string, websocket bool) (string, bool, error) {
 // is a constant.
 func proxyLocationBody(s Site) string {
 	var b strings.Builder
-	b.WriteString("        proxy_pass " + s.ProxyTarget + ";\n")
+	if len(s.ProxyUpstreams) > 0 {
+		// The balancing table owns location / through a panel-defined
+		// upstream name; the servers themselves live in the http-level table
+		// file written in the same transaction.
+		b.WriteString("        proxy_pass http://" + upstreamName(s.Name) + ";\n")
+	} else {
+		b.WriteString("        proxy_pass " + s.ProxyTarget + ";\n")
+	}
 	b.WriteString("        proxy_http_version 1.1;\n")
 	b.WriteString("        proxy_set_header Host $host;\n")
 	b.WriteString("        proxy_set_header X-Real-IP $remote_addr;\n")
@@ -197,8 +204,26 @@ func (m *Manager) SetProxy(name, target string, websocket bool) (Site, error) {
 			return Site{}, fmt.Errorf("%w：站点已启用防盗链，静态资源由本机处理；先关闭防盗链再启用反向代理", ErrInvalid)
 		}
 	}
+	// Setting a single target replaces any balancing table: both forms own
+	// location /, so the upstream table has to be rebuilt in the same
+	// transaction, exactly like SetProxyUpstreams does in reverse.
+	rows, err := m.upstreamRows(name, nil, "")
+	if err != nil {
+		return Site{}, err
+	}
 	site.ProxyTarget, site.ProxyWebSocket = target, websocket
-	if err := m.applyConfig(site.ConfigPath, render(site)); err != nil {
+	site.ProxyUpstreams, site.ProxyLBMethod = nil, ""
+	body := render(site)
+	files := []configFile{{Path: site.ConfigPath, Body: &body}}
+	if len(rows) > 0 || m.upstreamsFileExists() {
+		tablePath, err := m.upstreamsPath()
+		if err != nil {
+			return Site{}, err
+		}
+		table := renderUpstreams(rows)
+		files = append(files, configFile{Path: tablePath, Body: &table, OwnedCheck: parseUpstreamsMarker})
+	}
+	if err := m.applyFiles(files); err != nil {
 		return Site{}, err
 	}
 	return site, nil

@@ -38,6 +38,7 @@ var (
 	_ SiteSettingsManager     = linuxSites{}
 	_ SiteRewriteManager      = linuxSites{}
 	_ SiteProxyManager        = linuxSites{}
+	_ SiteProxyLBManager      = linuxSites{}
 	_ SiteRedirectManager     = linuxSites{}
 	_ SiteRedirectPathManager = linuxSites{}
 	_ SiteErrorPageManager    = linuxSites{}
@@ -237,6 +238,22 @@ func (l linuxSites) RewritePresets() []RewritePreset {
 // templates; this adapter only translates errors and the returned row.
 func (l linuxSites) SetProxy(name, target string, websocket bool) (SiteInfo, error) {
 	s, err := l.m.SetProxy(name, target, websocket)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
+// SetProxyUpstreams replaces or clears the load-balanced proxy table. The
+// nginx writer owns backend/weight/method validation, the http-level upstream
+// block and the handover with the single-target form; this adapter translates
+// the neutral backend list and errors.
+func (l linuxSites) SetProxyUpstreams(name string, upstreams []SiteProxyUpstream, method string, websocket bool) (SiteInfo, error) {
+	native := make([]nginx.ProxyUpstream, len(upstreams))
+	for i, u := range upstreams {
+		native[i] = nginx.ProxyUpstream{Target: u.Target, Weight: u.Weight}
+	}
+	s, err := l.m.SetProxyUpstreams(name, native, method, websocket)
 	if err != nil {
 		return SiteInfo{}, mapNginxErr(err)
 	}
@@ -542,6 +559,7 @@ func toSiteInfo(s nginx.Site) SiteInfo {
 		Name: s.Name, Domains: s.Domains, Root: s.Root, Index: s.Index,
 		Rewrite:     s.Rewrite,
 		ProxyTarget: s.ProxyTarget, ProxyWebSocket: s.ProxyWebSocket,
+		ProxyLBMethod:  s.ProxyLBMethod,
 		RedirectTarget: s.RedirectTarget, RedirectCode: s.RedirectCode,
 		RedirectKeepPath: s.RedirectKeepPath,
 		Hotlink:          s.Hotlink, HotlinkAllowEmpty: s.HotlinkAllowEmpty,
@@ -555,6 +573,12 @@ func toSiteInfo(s nginx.Site) SiteInfo {
 		out.RedirectPaths = make([]SiteRedirectRule, len(s.RedirectPaths))
 		for i, r := range s.RedirectPaths {
 			out.RedirectPaths[i] = SiteRedirectRule{Path: r.Path, Target: r.Target, Code: r.Code}
+		}
+	}
+	if len(s.ProxyUpstreams) > 0 {
+		out.ProxyUpstreams = make([]SiteProxyUpstream, len(s.ProxyUpstreams))
+		for i, u := range s.ProxyUpstreams {
+			out.ProxyUpstreams[i] = SiteProxyUpstream{Target: u.Target, Weight: u.Weight}
 		}
 	}
 	if len(s.ErrorPages) > 0 {

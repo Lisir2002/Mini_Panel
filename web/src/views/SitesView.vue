@@ -3,9 +3,9 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五、十六、十七、十八、十九：静态站点、站点证书、
+// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五、十六、十七、十八、十九、二十：静态站点、站点证书、
 // PHP 版本绑定、基础设置编辑、伪静态模板、反向代理、整站跳转、防盗链、访问密码、真实 IP 解析、
-// 按路径跳转表、流量限制、分组 / 备注 / 搜索、目录列表 / 强制 HTTPS 开关、站点日志查看与自定义错误页。
+// 按路径跳转表、流量限制、分组 / 备注 / 搜索、目录列表 / 强制 HTTPS 开关、站点日志查看、自定义错误页与反向代理多上游负载均衡。
 // 这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
@@ -15,9 +15,13 @@ import { store } from "../store";
 //     socket 当前不是 listening 时，页面直接说"站点会 502"，不把配置写入说成后端可用。
 //   * 伪静态列表来自 GET /sites/rewrite-presets，不是前端硬编码；模板内容固定在二进制里。
 //     wordpress / laravel / thinkphp 需要已绑定 PHP，静态站点会被后端拒绝。
-//   * 反向代理只接受一个上游 URL 与 WebSocket 开关；后端按 url.Parse 与字符白名单校验，
-//     页面不提供任何"自定义 nginx 片段"输入框。它与伪静态互斥：两者都占用 location /，
-//     页面在两边对话框里都提示先清空一边，后端也会拒绝并把文件保持原样。
+//   * 反向代理有两种形式，同一个对话框里切换：单目标（一个上游 URL）与多上游负载均衡
+//     （最多 10 个 http://host:port 后端 + 权重 1-100 + 轮询 / ip_hash / least_conn）。
+//     后端按 url.Parse 与字符白名单校验，页面不提供任何"自定义 nginx 片段"输入框。
+//     两种形式互斥（都占用 location /），保存一边会在同一次事务里清掉另一边；与伪静态
+//     的互斥不变，页面在两边对话框里都提示先清空一边，后端也会拒绝并把文件保持原样。
+//     upstream 块必须落在 http 上下文，后端在同一次事务里写 vhost 与面板自有的 http 级
+//     表文件；本机 nginx.conf 没有通配 include 时后端返回带理由的 400，页面原样显示。
 //   * 整站跳转只接受一个绝对 URL、301/302 与"保留路径"开关；配置是固定的一行 return。
 //     它同样占用 location /，与伪静态、反向代理三向互斥，页面和对话框都按同一句话提示。
 //   * 防盗链只接受"开 / 关"与"是否放行无 Referer 请求"；扩展名表、valid_referers 参数与
@@ -96,7 +100,21 @@ const rewriteForm = ref({ preset: "none" });
 
 const proxyOpen = ref(false);
 const proxyTarget = ref(null);
-const proxyForm = ref({ target: "", websocket: false });
+const proxyForm = ref({ mode: "single", target: "", websocket: false, method: "", upstreams: [] });
+const maxProxyUpstreams = 10;
+const proxyLBMethods = [
+  { id: "", label: "轮询（nginx 默认）" },
+  { id: "ip_hash", label: "ip_hash · 同一客户端 IP 固定同一后端" },
+  { id: "least_conn", label: "least_conn · 转发给当前连接最少的后端" },
+];
+function blankUpstream() { return { target: "", weight: 1 }; }
+// proxyOn is the one exclusion predicate: both proxy forms own location /.
+function proxyOn(r) { return !!(r && (r.proxy_target || r.proxy_upstreams?.length)); }
+function proxyFilled() {
+  return proxyForm.value.mode === "single"
+    ? !!proxyForm.value.target.trim()
+    : proxyForm.value.upstreams.some(u => u.target.trim());
+}
 
 const redirectOpen = ref(false);
 const redirectTarget = ref(null);
@@ -495,6 +513,11 @@ async function saveRewrite() {
 }
 
 function proxyLabel(r) {
+  if (r.proxy_upstreams?.length) {
+    return "负载均衡 · " + r.proxy_upstreams.length + " 个后端" +
+      (r.proxy_lb_method ? " · " + r.proxy_lb_method : "") +
+      (r.proxy_websocket ? " · WebSocket" : "");
+  }
   if (!r.proxy_target) return "";
   return "代理 · " + r.proxy_target + (r.proxy_websocket ? " · WebSocket" : "");
 }
@@ -502,28 +525,59 @@ function proxyLabel(r) {
 function openProxy(r) {
   error.value = ""; msg.value = "";
   proxyTarget.value = r;
-  proxyForm.value = { target: r.proxy_target || "", websocket: !!r.proxy_websocket };
+  proxyForm.value = {
+    mode: r.proxy_upstreams?.length ? "multi" : "single",
+    target: r.proxy_target || "",
+    websocket: !!r.proxy_websocket,
+    method: r.proxy_lb_method || "",
+    upstreams: r.proxy_upstreams?.length
+      ? r.proxy_upstreams.map(u => ({ target: u.target, weight: u.weight || 1 }))
+      : [blankUpstream()],
+  };
   proxyOpen.value = true;
 }
+
+function addUpstream() {
+  if (proxyForm.value.upstreams.length < maxProxyUpstreams) proxyForm.value.upstreams.push(blankUpstream());
+}
+function removeUpstream(i) { proxyForm.value.upstreams.splice(i, 1); }
 
 async function saveProxy() {
   error.value = ""; msg.value = ""; busy.value = true;
   try {
-    const target = proxyForm.value.target.trim();
-    const site = await api("/api/v1/sites/" + encodeURIComponent(proxyTarget.value.name) + "/proxy",
-      { method: "PUT", body: JSON.stringify({ target, websocket: proxyForm.value.websocket }) });
-    if (site.proxy_target) {
-      msg.value = site.name + " 已反向代理到 " + site.proxy_target +
-        (site.proxy_websocket ? "（含 WebSocket 升级）" : "") +
-        "；nginx 已通过 nginx -t 并重载。";
+    const name = encodeURIComponent(proxyTarget.value.name);
+    if (proxyForm.value.mode === "multi") {
+      // Empty rows are dropped; an entirely empty table is the clear path.
+      const upstreams = proxyForm.value.upstreams
+        .filter(u => u.target.trim())
+        .map(u => ({ target: u.target.trim(), weight: Number(u.weight) || 1 }));
+      const site = await api("/api/v1/sites/" + name + "/proxy-upstreams",
+        { method: "PUT", body: JSON.stringify({ upstreams, method: proxyForm.value.method, websocket: proxyForm.value.websocket }) });
+      if (site.proxy_upstreams?.length) {
+        msg.value = site.name + " 已启用负载均衡：" + site.proxy_upstreams.length + " 个后端" +
+          (site.proxy_lb_method ? "（" + site.proxy_lb_method + "）" : "（轮询）") +
+          (site.proxy_websocket ? "，含 WebSocket 升级" : "") +
+          "；vhost 与 upstream 表在同一次事务里通过 nginx -t 并重载。";
+      } else {
+        msg.value = site.name + " 已清除负载均衡，location / 回到默认静态查找；nginx 已通过 nginx -t 并重载。";
+      }
     } else {
-      msg.value = site.name + " 已清除反向代理，location / 回到默认静态查找；nginx 已通过 nginx -t 并重载。";
+      const target = proxyForm.value.target.trim();
+      const site = await api("/api/v1/sites/" + name + "/proxy",
+        { method: "PUT", body: JSON.stringify({ target, websocket: proxyForm.value.websocket }) });
+      if (site.proxy_target) {
+        msg.value = site.name + " 已反向代理到 " + site.proxy_target +
+          (site.proxy_websocket ? "（含 WebSocket 升级）" : "") +
+          "；nginx 已通过 nginx -t 并重载。";
+      } else {
+        msg.value = site.name + " 已清除反向代理，location / 回到默认静态查找；nginx 已通过 nginx -t 并重载。";
+      }
     }
     proxyOpen.value = false;
     await load();
   } catch (e) {
-    // 400 invalid_site（URL 不合法或与伪静态冲突）与 422 nginx_rejected 都带后端原文；
-    // 后端在返回前没有写入任何文件，页面只需要原样显示。
+    // 400 invalid_site（URL / 权重 / 算法不合法、与伪静态冲突、或本机没有 http 级通配
+    // include）与 422 nginx_rejected 都带后端原文；后端在返回前已回滚，页面原样显示。
     error.value = e.message;
     await load();
   } finally { busy.value = false; }
@@ -1026,6 +1080,11 @@ onMounted(load);
                 代理 · <code class="mp-code">{{ r.proxy_target }}</code>
                 <span v-if="r.proxy_websocket"> · WebSocket</span>
               </div>
+              <div v-if="r.proxy_upstreams?.length" class="mp-muted mp-tiny">
+                负载均衡 {{ r.proxy_upstreams.length }} 个后端 · {{ r.proxy_lb_method || "轮询" }}
+                <span v-if="r.proxy_websocket"> · WebSocket</span>
+                <div><code class="mp-code">{{ r.proxy_upstreams.map(u => u.target + (u.weight > 1 ? " ×" + u.weight : "")).join(" ") }}</code></div>
+              </div>
               <div v-if="r.redirect_target" class="mp-muted mp-tiny">
                 跳转 {{ r.redirect_code || 301 }} · <code class="mp-code">{{ r.redirect_target }}</code>
                 <span v-if="r.redirect_keep_path"> · 保留路径</span>
@@ -1077,7 +1136,7 @@ onMounted(load);
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
-                {{ r.proxy_target ? "代理" : "反代" }}
+                {{ proxyOn(r) ? "代理" : "反代" }}
               </el-button>
               <el-button size="small" text type="primary" @click="openRedirect(r)">
                 {{ r.redirect_target ? "跳转" : "整站跳转" }}
@@ -1161,7 +1220,7 @@ onMounted(load);
       </el-dialog>
 
       <el-dialog v-model="rewriteOpen" :title="'伪静态 · ' + (rewriteTarget?.name || '')" width="min(560px, 94vw)">
-        <el-alert v-if="rewriteTarget?.proxy_target" type="info" :closable="false" style="margin-bottom:10px"
+        <el-alert v-if="proxyOn(rewriteTarget)" type="info" :closable="false" style="margin-bottom:10px"
           title="该站点已启用反向代理：两者都占用 location /。除“默认”以外的模板会被后端拒绝；请先在“代理”对话框里清空上游 URL。" />
         <el-alert v-if="rewriteTarget?.redirect_target" type="info" :closable="false" style="margin-bottom:10px"
           title="该站点正在整站跳转：两者都占用 location /。除“默认”以外的模板会被后端拒绝；请先在“整站跳转”对话框里清空跳转目标。" />
@@ -1171,7 +1230,7 @@ onMounted(load);
           <el-form-item label="规则模板">
             <el-select v-model="rewriteForm.preset" style="width:100%">
               <el-option v-for="p in rewritePresets" :key="p.id" :label="p.label" :value="p.id"
-                :disabled="(p.id !== 'none' && (!!rewriteTarget?.proxy_target || !!rewriteTarget?.redirect_target)) || (p.requires_php && !rewriteTarget?.php_version)" />
+                :disabled="(p.id !== 'none' && (proxyOn(rewriteTarget) || !!rewriteTarget?.redirect_target)) || (p.requires_php && !rewriteTarget?.php_version)" />
             </el-select>
             <div class="mp-hint" style="margin-top:6px">
               {{ rewritePreset(rewriteForm.preset)?.description || "" }}
@@ -1196,7 +1255,13 @@ onMounted(load);
         <el-alert v-if="proxyTarget?.hotlink" type="info" :closable="false" style="margin-bottom:10px"
           title="该站点已启用防盗链：静态资源由本机处理。后端会拒绝保存代理；请先在“防盗链”对话框里关闭。" />
         <el-form label-position="top" @submit.prevent="saveProxy">
-          <el-form-item label="上游 URL（http:// 或 https://，可带端口与路径前缀）">
+          <el-form-item label="代理形式（两种都占用 location /，保存一种会清掉另一种）">
+            <el-radio-group v-model="proxyForm.mode">
+              <el-radio-button value="single">单目标</el-radio-button>
+              <el-radio-button value="multi">多上游负载均衡</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item v-if="proxyForm.mode === 'single'" label="上游 URL（http:// 或 https://，可带端口与路径前缀）">
             <el-input v-model="proxyForm.target" placeholder="http://127.0.0.1:8080" maxlength="255" />
             <div class="mp-hint" style="margin-top:6px">
               只接受一个经过校验的上游地址（主机名 / IP、1-65535 端口、可选的路径前缀）；不接受
@@ -1204,14 +1269,35 @@ onMounted(load);
               默认的 <code class="mp-code">try_files $uri $uri/ =404</code>。
             </div>
           </el-form-item>
+          <template v-else>
+            <el-form-item :label="'后端列表（最多 ' + maxProxyUpstreams + ' 个，只接受 http://主机:端口，不带路径）'">
+              <div v-for="(u, i) in proxyForm.upstreams" :key="i" style="display:flex;gap:8px;margin-bottom:6px;width:100%">
+                <el-input v-model="u.target" placeholder="http://127.0.0.1:3000" maxlength="255" style="flex:1" />
+                <el-input-number v-model="u.weight" :min="1" :max="100" :step="1" controls-position="right" style="width:110px" />
+                <el-button size="small" text type="danger" :disabled="proxyForm.upstreams.length <= 1" @click="removeUpstream(i)">删除</el-button>
+              </div>
+              <el-button size="small" :disabled="proxyForm.upstreams.length >= maxProxyUpstreams" @click="addUpstream">添加后端</el-button>
+              <div class="mp-hint" style="margin-top:6px">
+                权重 1-100，越大分到的请求越多；同一 host:port 不能重复。不支持 https 上游
+                （nginx 的 upstream server 只接受 host:port）。删空所有后端并保存表示关闭代理。
+                upstream 块由面板写在 http 级的自有表文件里，与 vhost 同一次事务落盘、一起回滚；
+                本机 nginx.conf 没有通配 include 时后端会带着理由拒绝，不会写出半份配置。
+              </div>
+            </el-form-item>
+            <el-form-item label="均衡算法">
+              <el-select v-model="proxyForm.method" style="width:100%">
+                <el-option v-for="m in proxyLBMethods" :key="m.id" :value="m.id" :label="m.label" />
+              </el-select>
+            </el-form-item>
+          </template>
           <el-form-item>
-            <el-checkbox v-model="proxyForm.websocket" :disabled="!proxyForm.target.trim()">
+            <el-checkbox v-model="proxyForm.websocket" :disabled="!proxyFilled()">
               转发 WebSocket 升级头（Upgrade / Connection）
             </el-checkbox>
             <div class="mp-hint">
               面板固定写入 <code class="mp-code">proxy_pass</code> 与 Host / X-Real-IP /
               X-Forwarded-For / X-Forwarded-Proto 请求头；勾选后再追加两行升级头。保存仍走
-              <code class="mp-code">nginx -t</code> → reload，失败会恢复原来的 location /。
+              <code class="mp-code">nginx -t</code> → reload，失败会恢复原来的配置。
               反向代理与伪静态模板互斥；PHP 绑定不受影响（.php 正则 location 优先于 location /）。
             </div>
           </el-form-item>
@@ -1219,8 +1305,8 @@ onMounted(load);
         <template #footer>
           <el-button size="small" :disabled="busy" @click="proxyOpen = false">取消</el-button>
           <el-button size="small" type="primary" :loading="busy"
-            :disabled="!!proxyForm.target.trim() && (!!rewriteLabel(proxyTarget) || !!proxyTarget?.redirect_target || !!proxyTarget?.hotlink)" @click="saveProxy">
-            {{ proxyForm.target.trim() ? "保存" : "清除代理" }}
+            :disabled="proxyFilled() && (!!rewriteLabel(proxyTarget) || !!proxyTarget?.redirect_target || !!proxyTarget?.hotlink)" @click="saveProxy">
+            {{ proxyFilled() ? "保存" : "清除代理" }}
           </el-button>
         </template>
       </el-dialog>
@@ -1228,7 +1314,7 @@ onMounted(load);
       <el-dialog v-model="redirectOpen" :title="'整站跳转 · ' + (redirectTarget?.name || '')" width="min(600px, 94vw)">
         <el-alert v-if="rewriteLabel(redirectTarget)" type="info" :closable="false" style="margin-bottom:10px"
           :title="'该站点正在使用伪静态模板（' + rewriteLabel(redirectTarget) + '）：两者都占用 location /。后端会拒绝保存跳转；请先把伪静态切回“默认”。'" />
-        <el-alert v-if="redirectTarget?.proxy_target" type="info" :closable="false" style="margin-bottom:10px"
+        <el-alert v-if="proxyOn(redirectTarget)" type="info" :closable="false" style="margin-bottom:10px"
           :title="'该站点已启用反向代理：两者都占用 location /。后端会拒绝保存跳转；请先在“代理”对话框里清空上游 URL。'" />
         <el-alert v-if="redirectTarget?.hotlink" type="info" :closable="false" style="margin-bottom:10px"
           title="该站点已启用防盗链：静态资源由本机处理。后端会拒绝保存跳转；请先在“防盗链”对话框里关闭。" />
@@ -1266,7 +1352,7 @@ onMounted(load);
         <template #footer>
           <el-button size="small" :disabled="busy" @click="redirectOpen = false">取消</el-button>
           <el-button size="small" type="primary" :loading="busy"
-            :disabled="!!redirectForm.target.trim() && (!!rewriteLabel(redirectTarget) || !!redirectTarget?.proxy_target || !!redirectTarget?.hotlink)" @click="saveRedirect">
+            :disabled="!!redirectForm.target.trim() && (!!rewriteLabel(redirectTarget) || proxyOn(redirectTarget) || !!redirectTarget?.hotlink)" @click="saveRedirect">
             {{ redirectForm.target.trim() ? "保存" : "清除跳转" }}
           </el-button>
         </template>
@@ -1461,7 +1547,7 @@ onMounted(load);
       </el-dialog>
 
       <el-dialog v-model="hotlinkOpen" :title="'防盗链 · ' + (hotlinkTarget?.name || '')" width="min(620px, 94vw)">
-        <el-alert v-if="hotlinkTarget?.proxy_target" type="info" :closable="false" style="margin-bottom:10px"
+        <el-alert v-if="proxyOn(hotlinkTarget)" type="info" :closable="false" style="margin-bottom:10px"
           title="该站点正在使用反向代理：静态资源不在本机，防盗链无从生效。后端会拒绝启用；请先在“代理”对话框里清空上游 URL。" />
         <el-alert v-if="hotlinkTarget?.redirect_target" type="info" :closable="false" style="margin-bottom:10px"
           title="该站点正在整站跳转：静态资源由目标站点提供。后端会拒绝启用；请先在“整站跳转”对话框里清空跳转目标。" />
@@ -1493,7 +1579,7 @@ onMounted(load);
         <template #footer>
           <el-button size="small" :disabled="busy" @click="hotlinkOpen = false">取消</el-button>
           <el-button size="small" type="primary" :loading="busy"
-            :disabled="hotlinkForm.enabled && (!!hotlinkTarget?.proxy_target || !!hotlinkTarget?.redirect_target)" @click="saveHotlink">
+            :disabled="hotlinkForm.enabled && (proxyOn(hotlinkTarget) || !!hotlinkTarget?.redirect_target)" @click="saveHotlink">
             {{ hotlinkForm.enabled ? "保存" : (hotlinkTarget?.hotlink ? "关闭防盗链" : "保存") }}
           </el-button>
         </template>

@@ -40,7 +40,7 @@ func (m *Manager) SetHotlink(name string, enabled, allowEmpty bool) (Site, error
 		return Site{}, ErrNotFound
 	}
 	if enabled {
-		if site.ProxyTarget != "" {
+		if site.proxyActive() {
 			return Site{}, fmt.Errorf("%w：站点正在使用反向代理，静态资源不在本机；先清除代理再启用防盗链", ErrInvalid)
 		}
 		if site.RedirectTarget != "" {

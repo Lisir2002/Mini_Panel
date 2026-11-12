@@ -30,6 +30,7 @@ type fakeSites struct {
 	settingsErr      error
 	rewriteErr       error
 	proxyErr         error
+	proxyLBErr       error
 	redirectErr      error
 	redirectPathErr  error
 	errorPageErr     error
@@ -51,6 +52,7 @@ type fakeSites struct {
 	settingsSets     int
 	rewriteSets      int
 	proxySets        int
+	proxyLBSets      int
 	redirectSets     int
 	redirectPathSets int
 	errorPageSets    int
@@ -177,6 +179,31 @@ func (f *fakeSites) SetProxy(name, target string, websocket bool) (platform.Site
 	s.ProxyWebSocket = websocket
 	f.sites[name] = s
 	f.proxySets++
+	return s, nil
+}
+
+// SetProxyUpstreams records a whole backend table. The fake mirrors the
+// production contract: an empty table clears it (and the method), and setting
+// it takes location / away from the single-target form; backend/weight/method
+// validation lives in the nginx writer.
+func (f *fakeSites) SetProxyUpstreams(name string, upstreams []platform.SiteProxyUpstream, method string, websocket bool) (platform.SiteInfo, error) {
+	if f.proxyLBErr != nil {
+		return platform.SiteInfo{}, f.proxyLBErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	if len(upstreams) == 0 {
+		s.ProxyUpstreams, s.ProxyLBMethod = nil, ""
+	} else {
+		s.ProxyUpstreams = append([]platform.SiteProxyUpstream(nil), upstreams...)
+		s.ProxyLBMethod = method
+		s.ProxyTarget = ""
+	}
+	s.ProxyWebSocket = websocket
+	f.sites[name] = s
+	f.proxyLBSets++
 	return s, nil
 }
 
