@@ -137,6 +137,21 @@ func (s *Server) siteRedirectPathManager() (platform.SiteRedirectPathManager, st
 	return rm, ""
 }
 
+// siteErrorPageManager is the optional custom error page table. A provider
+// without it returns 403 capability rather than showing an editor that writes
+// nothing.
+func (s *Server) siteErrorPageManager() (platform.SiteErrorPageManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	em, ok := m.(platform.SiteErrorPageManager)
+	if !ok || em == nil {
+		return nil, "该平台的站点 Provider 没有实现自定义错误页"
+	}
+	return em, ""
+}
+
 // siteHotlinkManager is the optional hotlink-protection interface. A provider
 // without it returns 403 capability with the reason below.
 func (s *Server) siteHotlinkManager() (platform.SiteHotlinkManager, string) {
@@ -541,6 +556,38 @@ func (s *Server) handleSiteRedirectPaths(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_redirect_paths", "更新按路径跳转失败："+err.Error())
+	}
+}
+
+// handleSiteErrorPages is PUT /api/v1/sites/{name}/error-pages. The body is
+// {"rules":[{"code":404,"path":"/404.html"}]}; an empty rules list clears the
+// table. The provider validates the closed status vocabulary and the in-site
+// path shape and renders only fixed server-level error_page directives.
+func (s *Server) handleSiteErrorPages(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteErrorPageManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Rules []platform.SiteErrorPageRule `json:"rules"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetErrorPages(chiParam(r, "name"), body.Rules)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_error_pages", "更新自定义错误页失败："+err.Error())
 	}
 }
 

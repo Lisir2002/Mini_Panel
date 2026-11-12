@@ -445,6 +445,13 @@ func renderServer(s Site, tlsOn bool) string {
 		// config is ever tested or reloaded.
 		b.WriteString("\n" + siteLogLines(s.LogDir, s.Name))
 	}
+	if len(s.ErrorPages) > 0 {
+		// Server-level error_page directives plus one exact static location
+		// per page path, so the internal redirect is served from the site
+		// root even when location / proxies or redirects. Proxied upstream
+		// error responses are not intercepted.
+		b.WriteString("\n" + errorPageLines(s.ErrorPages))
+	}
 	if tlsOn {
 		b.WriteString("\n    ssl_certificate " + s.TLS.CertPath + ";\n")
 		b.WriteString("    ssl_certificate_key " + s.TLS.KeyPath + ";\n")
@@ -471,6 +478,12 @@ func renderServer(s Site, tlsOn bool) string {
 		// and they do not own `location /`, so they coexist with every other
 		// site feature.
 		b.WriteString("\n" + trafficLimitLines(s.Name, *s.Limits))
+	}
+	if len(s.ErrorPages) > 0 {
+		// Exact static locations for the error page files, rendered before
+		// the catch-all so a dead upstream or a site-wide redirect can never
+		// swallow the error page itself.
+		b.WriteString("\n" + errorPageLocations(s.ErrorPages))
 	}
 	if len(s.RedirectPaths) > 0 {
 		// Exact path exceptions render before `location /`. They do not own the

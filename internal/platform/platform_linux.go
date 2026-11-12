@@ -40,6 +40,7 @@ var (
 	_ SiteProxyManager        = linuxSites{}
 	_ SiteRedirectManager     = linuxSites{}
 	_ SiteRedirectPathManager = linuxSites{}
+	_ SiteErrorPageManager    = linuxSites{}
 	_ SiteHotlinkManager      = linuxSites{}
 	_ SiteAuthManager         = linuxSites{}
 	_ SiteRealIPManager       = linuxSites{}
@@ -262,6 +263,21 @@ func (l linuxSites) SetRedirectPaths(name string, rules []SiteRedirectRule) (Sit
 		native[i] = nginx.RedirectRule{Path: r.Path, Target: r.Target, Code: r.Code}
 	}
 	s, err := l.m.SetRedirectPaths(name, native)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
+// SetErrorPages replaces or clears the custom error page table. The nginx
+// writer owns the status vocabulary and path validation and renders fixed
+// server-level error_page lines; this adapter translates rules and errors.
+func (l linuxSites) SetErrorPages(name string, rules []SiteErrorPageRule) (SiteInfo, error) {
+	native := make([]nginx.ErrorPageRule, len(rules))
+	for i, r := range rules {
+		native[i] = nginx.ErrorPageRule{Code: r.Code, Path: r.Path}
+	}
+	s, err := l.m.SetErrorPages(name, native)
 	if err != nil {
 		return SiteInfo{}, mapNginxErr(err)
 	}
@@ -539,6 +555,12 @@ func toSiteInfo(s nginx.Site) SiteInfo {
 		out.RedirectPaths = make([]SiteRedirectRule, len(s.RedirectPaths))
 		for i, r := range s.RedirectPaths {
 			out.RedirectPaths[i] = SiteRedirectRule{Path: r.Path, Target: r.Target, Code: r.Code}
+		}
+	}
+	if len(s.ErrorPages) > 0 {
+		out.ErrorPages = make([]SiteErrorPageRule, len(s.ErrorPages))
+		for i, r := range s.ErrorPages {
+			out.ErrorPages[i] = SiteErrorPageRule{Code: r.Code, Path: r.Path}
 		}
 	}
 	if s.Limits != nil {

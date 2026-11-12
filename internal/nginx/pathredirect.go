@@ -101,6 +101,9 @@ func (m *Manager) SetRedirectPaths(name string, rules []RedirectRule) (Site, err
 	if !ok {
 		return Site{}, ErrNotFound
 	}
+	if err := errorPagesCollide(site.ErrorPages, rules); err != nil {
+		return Site{}, err
+	}
 	site.RedirectPaths = rules
 	if err := m.applyConfig(site.ConfigPath, render(site)); err != nil {
 		return Site{}, err

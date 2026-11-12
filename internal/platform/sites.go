@@ -51,6 +51,10 @@ type SiteInfo struct {
 	RedirectCode     int                `json:"redirect_code,omitempty"`
 	RedirectKeepPath bool               `json:"redirect_keep_path,omitempty"`
 	RedirectPaths    []SiteRedirectRule `json:"redirect_paths,omitempty"`
+	// ErrorPages maps HTTP error statuses to URIs under the site root,
+	// rendered as fixed server-level error_page directives. An empty table
+	// means nginx's built-in error responses.
+	ErrorPages []SiteErrorPageRule `json:"error_pages,omitempty"`
 	// Hotlink is the fixed Referer check for static assets; HotlinkAllowEmpty
 	// says whether requests without a Referer are allowed through. Both are
 	// omitted until hotlink protection is enabled.
@@ -107,6 +111,14 @@ type SiteRedirectRule struct {
 	Path   string `json:"path"`
 	Target string `json:"target"`
 	Code   int    `json:"code"`
+}
+
+// SiteErrorPageRule maps one HTTP error status to a URI inside the site root.
+// The provider validates the closed status vocabulary and the path shape and
+// renders a fixed `error_page` line; callers cannot submit nginx text.
+type SiteErrorPageRule struct {
+	Code int    `json:"code"`
+	Path string `json:"path"`
 }
 
 // SiteTrafficLimit is one site's traffic ceiling in platform-neutral form. The
@@ -204,6 +216,14 @@ type SiteRedirectManager interface {
 // always an allowed clear operation.
 type SiteRedirectPathManager interface {
 	SetRedirectPaths(name string, rules []SiteRedirectRule) (SiteInfo, error)
+}
+
+// SiteErrorPageManager is the optional custom error page table. The operator
+// supplies complete rules (status + in-site URI); the provider normalizes and
+// renders fixed server-level error_page directives. An empty table is always
+// an allowed clear operation.
+type SiteErrorPageManager interface {
+	SetErrorPages(name string, rules []SiteErrorPageRule) (SiteInfo, error)
 }
 
 // SiteHotlinkManager is the optional hotlink-protection half of a site writer.

@@ -32,6 +32,7 @@ type fakeSites struct {
 	proxyErr         error
 	redirectErr      error
 	redirectPathErr  error
+	errorPageErr     error
 	limitErr         error
 	hotlinkErr       error
 	authErr          error
@@ -52,6 +53,7 @@ type fakeSites struct {
 	proxySets        int
 	redirectSets     int
 	redirectPathSets int
+	errorPageSets    int
 	limitSets        int
 	hotlinkSets      int
 	authSets         int
@@ -214,6 +216,27 @@ func (f *fakeSites) SetRedirectPaths(name string, rules []platform.SiteRedirectR
 	}
 	f.sites[name] = s
 	f.redirectPathSets++
+	return s, nil
+}
+
+// SetErrorPages records a whole error page table. The fake mirrors the
+// production contract by replacing the table, including clearing it when
+// rules is empty; status/path validation lives in the nginx writer.
+func (f *fakeSites) SetErrorPages(name string, rules []platform.SiteErrorPageRule) (platform.SiteInfo, error) {
+	if f.errorPageErr != nil {
+		return platform.SiteInfo{}, f.errorPageErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	if len(rules) == 0 {
+		s.ErrorPages = nil
+	} else {
+		s.ErrorPages = append([]platform.SiteErrorPageRule(nil), rules...)
+	}
+	f.sites[name] = s
+	f.errorPageSets++
 	return s, nil
 }
 

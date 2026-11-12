@@ -3,9 +3,9 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五、十六、十七、十八：静态站点、站点证书、
+// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五、十六、十七、十八、十九：静态站点、站点证书、
 // PHP 版本绑定、基础设置编辑、伪静态模板、反向代理、整站跳转、防盗链、访问密码、真实 IP 解析、
-// 按路径跳转表、流量限制、分组 / 备注 / 搜索、目录列表 / 强制 HTTPS 开关与站点日志查看。
+// 按路径跳转表、流量限制、分组 / 备注 / 搜索、目录列表 / 强制 HTTPS 开关、站点日志查看与自定义错误页。
 // 这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
@@ -46,6 +46,14 @@ import { store } from "../store";
 //   * 站点日志是只读查看器：每个面板自有 vhost 都带固定的按站点 access_log / error_log，
 //     页面只选"访问 / 错误"与行数，路径由后端派生，提交不了任何路径。文件还没产生时后端
 //     返回 exists=false，页面如实说"尚无日志"，不假装读到了空文件就是成功。
+//   * 自定义错误页只编辑"状态码 + 站内路径"两类字段；状态码是封闭列表
+//     （400/401/403/404/405/408/500/502/503/504），路径必须以 / 开头且不含 nginx 元字符。
+//     后端为每条规则渲染固定的 server 级 error_page 行，外加每个错误页路径一条精确
+//     静态 location——反代 / 整站跳转站点的错误页因此仍从站点根目录提供，不会被
+//     location / 吞掉；它不占用 location /，与所有站点功能共存，但路径不能与按路径
+//     跳转的同名例外冲突（后端两个方向都以理由拒绝）。整表替换、空表清除，最多 10 条。
+//     它只替换 nginx 本机产生的错误，反代站点的上游错误响应原样透传；错误页文件要放在
+//     站点根目录下，缺失时 nginx 回退到内置错误页，页面在对话框里把这两条边界说清楚。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
 //     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
 //     而不是等请求失败后才解释。
@@ -110,6 +118,12 @@ const redirectPathsOpen = ref(false);
 const redirectPathsTarget = ref(null);
 const redirectPathRules = ref([]);
 const maxRedirectPathRules = 10;
+
+const errorPagesOpen = ref(false);
+const errorPagesTarget = ref(null);
+const errorPageRules = ref([]);
+const maxErrorPageRules = 10;
+const errorPageCodes = [400, 401, 403, 404, 405, 408, 500, 502, 503, 504];
 
 const limitOpen = ref(false);
 const limitTarget = ref(null);
@@ -232,6 +246,10 @@ async function loadLog() {
 
 function blankRedirectPathRule() {
   return { path: "", target: "", code: 301 };
+}
+
+function blankErrorPageRule() {
+  return { code: 404, path: "" };
 }
 
 function parseDomains(text) {
@@ -761,6 +779,86 @@ async function saveRedirectPaths() {
   } finally { busy.value = false; }
 }
 
+function errorPagesWords(r) {
+  const rules = r.error_pages || [];
+  return rules.slice(0, 4).map((p) => p.code + "→" + p.path).join("、") +
+    (rules.length > 4 ? "…" : "");
+}
+
+function openErrorPages(r) {
+  error.value = ""; msg.value = "";
+  errorPagesTarget.value = r;
+  const rules = (r.error_pages || []).map((p) => ({
+    code: errorPageCodes.includes(p.code) ? p.code : 404,
+    path: p.path || "",
+  }));
+  errorPageRules.value = rules.length ? rules : [blankErrorPageRule()];
+  errorPagesOpen.value = true;
+}
+
+function addErrorPage() {
+  error.value = ""; msg.value = "";
+  if (errorPageRules.value.length >= maxErrorPageRules) {
+    error.value = "自定义错误页最多 " + maxErrorPageRules + " 条。";
+    return;
+  }
+  errorPageRules.value.push(blankErrorPageRule());
+}
+
+function removeErrorPage(index) {
+  errorPageRules.value.splice(index, 1);
+}
+
+async function saveErrorPages() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const rules = errorPageRules.value
+      .map((r) => ({ code: Number(r.code), path: String(r.path || "").trim() }))
+      .filter((r) => r.path);
+
+    if (rules.length > maxErrorPageRules) {
+      error.value = "自定义错误页最多 " + maxErrorPageRules + " 条。";
+      return;
+    }
+
+    const seen = new Set();
+    for (let i = 0; i < rules.length; i++) {
+      const rule = rules[i];
+      const row = i + 1;
+      if (!errorPageCodes.includes(rule.code)) {
+        error.value = "第 " + row + " 条状态码不在支持列表（400/401/403/404/405/408/500/502/503/504）。";
+        return;
+      }
+      if (seen.has(rule.code)) {
+        error.value = "第 " + row + " 条状态码 " + rule.code + " 与前面的重复。";
+        return;
+      }
+      seen.add(rule.code);
+      if (!/^\/[A-Za-z0-9._~/-]{1,127}$/.test(rule.path)) {
+        error.value = "第 " + row + " 条路径只能以 / 开头，只允许字母、数字与 . _ ~ / -，且最长 128 个字符。";
+        return;
+      }
+      if (rule.path.includes("..") || rule.path.startsWith("/.well-known/acme-challenge")) {
+        error.value = "第 " + row + " 条路径不能包含 ..，也不能遮蔽 ACME 校验路径。";
+        return;
+      }
+    }
+
+    const site = await api("/api/v1/sites/" + encodeURIComponent(errorPagesTarget.value.name) + "/error-pages",
+      { method: "PUT", body: JSON.stringify({ rules }) });
+    msg.value = site.name + " 的自定义错误页已" +
+      (site.error_pages?.length ? "更新（" + site.error_pages.length + " 条 error_page 指令）" : "清除") +
+      "；nginx 已通过 nginx -t 并重载。";
+    errorPagesOpen.value = false;
+    await load();
+  } catch (e) {
+    // 400 invalid_site（状态码或路径不合法）与 422 nginx_rejected 都带后端原文；
+    // 后端在返回前已恢复原字节，页面原样显示。
+    error.value = e.message;
+    await load();
+  } finally { busy.value = false; }
+}
+
 function limitLabel(r) {
   const l = r.limits;
   if (!l) return "";
@@ -945,6 +1043,10 @@ onMounted(load);
                 路径跳转 {{ r.redirect_paths.length }} 条 ·
                 <code class="mp-code">{{ redirectPathsWords(r) }}</code>
               </div>
+              <div v-if="r.error_pages?.length" class="mp-muted mp-tiny">
+                错误页 {{ r.error_pages.length }} 条 ·
+                <code class="mp-code">{{ errorPagesWords(r) }}</code>
+              </div>
               <div v-if="r.limits" class="mp-muted mp-tiny">流量限制 · {{ limitLabel(r) }}</div>
             </td>
             <td>
@@ -971,7 +1073,7 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:1120px;white-space:nowrap">
+            <td style="width:1200px;white-space:nowrap">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
@@ -981,6 +1083,9 @@ onMounted(load);
                 {{ r.redirect_target ? "跳转" : "整站跳转" }}
               </el-button>
               <el-button size="small" text type="primary" @click="openRedirectPaths(r)">路径跳转</el-button>
+              <el-button size="small" text type="primary" @click="openErrorPages(r)">
+                {{ r.error_pages?.length ? "错误页" : "自定义错误页" }}
+              </el-button>
               <el-button size="small" text type="primary" @click="openHotlink(r)">
                 {{ r.hotlink ? "防盗链" : "防盗" }}
               </el-button>
@@ -1204,6 +1309,47 @@ onMounted(load);
           <el-button size="small" :disabled="busy" @click="redirectPathsOpen = false">取消</el-button>
           <el-button size="small" type="primary" :loading="busy" @click="saveRedirectPaths">
             {{ redirectPathRules.some((r) => String(r.path || '').trim() || String(r.target || '').trim()) ? "保存" : "清除跳转表" }}
+          </el-button>
+        </template>
+      </el-dialog>
+
+      <el-dialog v-model="errorPagesOpen" :title="'自定义错误页 · ' + (errorPagesTarget?.name || '')" width="min(700px, 96vw)">
+        <el-alert v-if="errorPagesTarget?.error_pages?.length" type="info" :closable="false" style="margin-bottom:10px"
+          :title="'该站点已有 ' + errorPagesTarget.error_pages.length + ' 条自定义错误页。保存会用下面的列表整体替换；删除全部行后保存表示清除。'" />
+        <div class="mp-row" style="margin-bottom:8px;align-items:flex-end">
+          <div style="width:130px"><span class="mp-muted mp-tiny">状态码</span></div>
+          <div style="flex:1;min-width:220px"><span class="mp-muted mp-tiny">站内路径（相对站点根目录）</span></div>
+          <div style="width:52px"></div>
+        </div>
+        <div v-for="(rule, i) in errorPageRules" :key="i" class="mp-row" style="margin-bottom:8px">
+          <el-select v-model="rule.code" style="width:130px">
+            <el-option v-for="c in errorPageCodes" :key="c" :label="String(c)" :value="c" />
+          </el-select>
+          <el-input v-model="rule.path" maxlength="128" placeholder="/404.html" style="flex:1;min-width:220px" />
+          <el-button size="small" text type="danger" :disabled="busy" @click="removeErrorPage(i)">删除</el-button>
+        </div>
+        <div class="mp-hint" style="margin-top:4px">
+          每行渲染成一条固定的 server 级 <code class="mp-code">error_page &lt;code&gt; &lt;path&gt;;</code> 指令，
+          外加每个错误页路径一个精确静态 <code class="mp-code">location =</code> 块——反代或整站跳转站点
+          的错误页因此仍从站点根目录提供，不会被 <code class="mp-code">location /</code> 吞掉。
+          它与整站跳转、按路径跳转、反向代理、伪静态、访问密码、目录列表与 PHP 绑定共存，
+          但路径不能与按路径跳转表的同名例外重复（后端会说明理由并拒绝）。错误页文件需要你自己放在站点根目录下
+          （如 <code class="mp-code">{{ errorPagesTarget?.root || '' }}/404.html</code>）；
+          文件缺失时 nginx 回退到内置错误页，不会因此 500。它只替换 nginx 本机产生的错误：
+          反向代理站点的上游错误响应原样透传，面板不开启 <code class="mp-code">proxy_intercept_errors</code>。
+          路径不能包含 <code class="mp-code">..</code>，也不能遮蔽 <code class="mp-code">/.well-known/acme-challenge</code>，
+          不接受任何 nginx 配置文本。
+        </div>
+        <div class="mp-row" style="margin-top:8px">
+          <el-button size="small" :disabled="busy || errorPageRules.length >= maxErrorPageRules" @click="addErrorPage">
+            添加一行
+          </el-button>
+          <span class="mp-muted mp-tiny">最多 {{ maxErrorPageRules }} 条 · 当前 {{ errorPageRules.length }} 条</span>
+        </div>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="errorPagesOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy" @click="saveErrorPages">
+            {{ errorPageRules.some((r) => String(r.path || '').trim()) ? "保存" : "清除错误页" }}
           </el-button>
         </template>
       </el-dialog>

@@ -227,6 +227,10 @@ type Site struct {
 	RedirectCode     int            `json:"redirect_code,omitempty"`
 	RedirectKeepPath bool           `json:"redirect_keep_path,omitempty"`
 	RedirectPaths    []RedirectRule `json:"redirect_paths,omitempty"`
+	// ErrorPages maps HTTP error statuses to URIs under the site root. The
+	// server-level error_page directives own no location, so the table
+	// coexists with every other feature.
+	ErrorPages []ErrorPageRule `json:"error_pages,omitempty"`
 	// Hotlink guards static assets with a fixed Referer check. It owns a regex
 	// location for asset extensions rather than `location /`, so it can coexist
 	// with rewrite templates but not with a proxy or redirect that would make
@@ -277,28 +281,29 @@ type Spec struct {
 }
 
 type markerPayload struct {
-	Name              string         `json:"name"`
-	Domains           []string       `json:"domains"`
-	Root              string         `json:"root"`
-	CreatedAt         string         `json:"created_at"`
-	Index             []string       `json:"index,omitempty"`
-	Rewrite           string         `json:"rewrite,omitempty"`
-	ProxyTarget       string         `json:"proxy_target,omitempty"`
-	ProxyWebSocket    bool           `json:"proxy_websocket,omitempty"`
-	RedirectTarget    string         `json:"redirect_target,omitempty"`
-	RedirectCode      int            `json:"redirect_code,omitempty"`
-	RedirectKeepPath  bool           `json:"redirect_keep_path,omitempty"`
-	RedirectPaths     []RedirectRule `json:"redirect_paths,omitempty"`
-	Limits            *TrafficLimit  `json:"limits,omitempty"`
-	Hotlink           bool           `json:"hotlink,omitempty"`
-	HotlinkAllowEmpty bool           `json:"hotlink_allow_empty,omitempty"`
-	AutoIndex         bool           `json:"autoindex,omitempty"`
-	AuthUser          string         `json:"auth_user,omitempty"`
-	RealIPFrom        []string       `json:"real_ip_from,omitempty"`
-	RealIPHeader      string         `json:"real_ip_header,omitempty"`
-	TLS               *markerTLS     `json:"tls,omitempty"`
-	PHPVersion        string         `json:"php_version,omitempty"`
-	PHPSocket         string         `json:"php_socket,omitempty"`
+	Name              string          `json:"name"`
+	Domains           []string        `json:"domains"`
+	Root              string          `json:"root"`
+	CreatedAt         string          `json:"created_at"`
+	Index             []string        `json:"index,omitempty"`
+	Rewrite           string          `json:"rewrite,omitempty"`
+	ProxyTarget       string          `json:"proxy_target,omitempty"`
+	ProxyWebSocket    bool            `json:"proxy_websocket,omitempty"`
+	RedirectTarget    string          `json:"redirect_target,omitempty"`
+	RedirectCode      int             `json:"redirect_code,omitempty"`
+	RedirectKeepPath  bool            `json:"redirect_keep_path,omitempty"`
+	RedirectPaths     []RedirectRule  `json:"redirect_paths,omitempty"`
+	ErrorPages        []ErrorPageRule `json:"error_pages,omitempty"`
+	Limits            *TrafficLimit   `json:"limits,omitempty"`
+	Hotlink           bool            `json:"hotlink,omitempty"`
+	HotlinkAllowEmpty bool            `json:"hotlink_allow_empty,omitempty"`
+	AutoIndex         bool            `json:"autoindex,omitempty"`
+	AuthUser          string          `json:"auth_user,omitempty"`
+	RealIPFrom        []string        `json:"real_ip_from,omitempty"`
+	RealIPHeader      string          `json:"real_ip_header,omitempty"`
+	TLS               *markerTLS      `json:"tls,omitempty"`
+	PHPVersion        string          `json:"php_version,omitempty"`
+	PHPSocket         string          `json:"php_socket,omitempty"`
 }
 
 var (
@@ -479,7 +484,8 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 		Rewrite: payload.Rewrite, ProxyTarget: payload.ProxyTarget, ProxyWebSocket: payload.ProxyWebSocket,
 		RedirectTarget: payload.RedirectTarget, RedirectCode: payload.RedirectCode,
 		RedirectKeepPath: payload.RedirectKeepPath, RedirectPaths: payload.RedirectPaths,
-		Hotlink: payload.Hotlink, HotlinkAllowEmpty: payload.HotlinkAllowEmpty,
+		ErrorPages: payload.ErrorPages,
+		Hotlink:    payload.Hotlink, HotlinkAllowEmpty: payload.HotlinkAllowEmpty,
 		AutoIndex: payload.AutoIndex,
 		AuthUser:  payload.AuthUser, AuthFile: authPath(m.AuthDir, payload.Name),
 		LogDir:     m.LogDir,
@@ -531,6 +537,14 @@ func parseMarker(body string) (markerPayload, bool) {
 			return markerPayload{}, false
 		}
 		p.RedirectPaths = pathRules
+		errorPages, err := normalizeErrorPages(p.ErrorPages)
+		if err != nil {
+			return markerPayload{}, false
+		}
+		p.ErrorPages = errorPages
+		if err := errorPagesCollide(p.ErrorPages, p.RedirectPaths); err != nil {
+			return markerPayload{}, false
+		}
 		if p.Limits != nil {
 			limit, err := normalizeTrafficLimit(*p.Limits)
 			if err != nil {
@@ -917,6 +931,7 @@ func render(s Site) string {
 		RedirectCode:      s.RedirectCode,
 		RedirectKeepPath:  s.RedirectKeepPath,
 		RedirectPaths:     s.RedirectPaths,
+		ErrorPages:        s.ErrorPages,
 		Limits:            s.Limits,
 		Hotlink:           s.Hotlink,
 		HotlinkAllowEmpty: s.HotlinkAllowEmpty,
