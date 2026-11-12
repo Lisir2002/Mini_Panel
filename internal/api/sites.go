@@ -181,6 +181,21 @@ func (s *Server) siteConfigManager() (platform.SiteConfigManager, string) {
 	return cm, ""
 }
 
+// siteEnableManager is the optional manual stop/start switch. A provider
+// without it returns 403 capability with the reason below instead of a dead
+// toggle in the site list.
+func (s *Server) siteEnableManager() (platform.SiteEnableManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	em, ok := m.(platform.SiteEnableManager)
+	if !ok || em == nil {
+		return nil, "该平台的站点 Provider 没有实现停用/启用"
+	}
+	return em, ""
+}
+
 // siteCorsManager is the optional cross-origin interface. A provider without
 // it returns 403 capability with the reason below instead of a dead editor.
 func (s *Server) siteCorsManager() (platform.SiteCorsManager, string) {
@@ -888,6 +903,39 @@ func (s *Server) handleSiteForceHTTPS(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_force_https", "更新强制 HTTPS 失败："+err.Error())
+	}
+}
+
+// handleSiteEnabled is PUT /api/v1/sites/{name}/enabled. The body is
+// {"enabled":false} to stop the site or {"enabled":true} to start it again.
+// The provider takes the vhost out of nginx's serving set (or puts it back)
+// through test-before-reload with exact restore on failure; nothing is
+// deleted, and asking for the current state is a no-op success.
+func (s *Server) handleSiteEnabled(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteEnableManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetSiteEnabled(chiParam(r, "name"), body.Enabled)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_enabled", "切换站点停用/启用失败："+err.Error())
 	}
 }
 

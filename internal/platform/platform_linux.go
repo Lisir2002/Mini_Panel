@@ -49,6 +49,7 @@ var (
 	_ SiteCorsManager         = linuxSites{}
 	_ SiteConfigManager       = linuxSites{}
 	_ SiteBehaviorManager     = linuxSites{}
+	_ SiteEnableManager       = linuxSites{}
 	_ SiteLogManager          = linuxSites{}
 	_ SiteTLSManager          = linuxSites{}
 	_ SiteACMEManager         = linuxSites{}
@@ -321,6 +322,17 @@ func (l linuxSites) SetSiteConfig(name, content string) (SiteConfigInfo, error) 
 		return SiteConfigInfo{}, mapNginxErr(err)
 	}
 	return SiteConfigInfo{Name: c.Name, Path: c.Path, Content: c.Content}, nil
+}
+
+// SetSiteEnabled stops or starts one site. The nginx writer owns the layout
+// mechanism (symlink vs parking directory) and the test/reload rollback; this
+// adapter only translates the result and errors.
+func (l linuxSites) SetSiteEnabled(name string, enabled bool) (SiteInfo, error) {
+	s, err := l.m.SetEnabled(name, enabled)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
 }
 
 // SetCors replaces or clears the cross-origin policy. The nginx writer owns

@@ -188,7 +188,8 @@ paths:
         root / 检测到 Apache 而写 Provider 目前只有 nginx），不在这里另写一套说法。
         每行是 {name, domains, root, config_path, enabled, created_at, tls?,
         index?, php_version?, php_socket?, php_socket_state?, autoindex?, group?, note?}；enabled 在
-        sites-enabled 布局里等价于软链接存在，conf.d 布局里恒为 true。group 与 note 是
+        sites-enabled 布局里等价于软链接存在，conf.d 布局里等价于文件不在 minipanel-disabled/
+        停放目录，可用 /api/v1/sites/{name}/enabled 手动切换（第廿三片）。group 与 note 是
         面板侧的分组与备注，来自 SQLite 的 site_meta 表按站点名 join，不进 vhost 也不进
         marker，省略表示该站点没有被标注（详见 /api/v1/sites/{name}/meta）。index 只在
         操作者自定义了默认文档时出现，缺省表示面板内置列表（绑定 PHP 时为
@@ -1079,6 +1080,39 @@ paths:
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { description: 面板没有管理这个站点 }
         "422": { description: nginx 拒绝，配置已回滚（nginx_rejected） }
+  /api/v1/sites/{name}/enabled:
+    put:
+      tags: [site]
+      summary: 手动停用或启用站点
+      description: |
+        M2 第廿三片：请求体 {enabled}。enabled=false 把站点 vhost 从 nginx 的服务集合里
+        拿掉——sites-enabled 布局删符号链接（vhost 文件原地不动），conf.d 布局把文件移入
+        配置根下的 minipanel-disabled/ 停放目录（任何 include 都不再列出它）；enabled=true
+        反向还原。不删除任何配置、证书、密码文件或站点目录；停用中的站点仍出现在站点列表
+        （enabled=false），其余功能页照常可编辑，启用后生效。切换与当前状态相同是无操作
+        成功（不运行任何 nginx 命令）。每次真实切换都走 nginx -t → 通过才 reload，失败把
+        链接/文件精确还原并响应 422。到期自动停用是另一个功能，本面板明确不做。
+        站点 Provider 没有实现该接口时返回 403 capability 并说明原因。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                  description: false 停用站点，true 重新启用
+      responses:
+        "200": { description: 已生效（或本就是该状态），返回更新后的站点行（含 enabled 与当前 config_path） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx 拒绝，链接/文件已还原（nginx_rejected） }
   /api/v1/sites/{name}/force-https:
     put:
       tags: [site]

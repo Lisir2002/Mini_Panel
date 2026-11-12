@@ -42,6 +42,7 @@ type fakeSites struct {
 	authErr          error
 	realIPErr        error
 	behaviorErr      error
+	enableErr        error
 	logsErr          error
 	migrateErr       error
 	logMissing       bool
@@ -68,6 +69,7 @@ type fakeSites struct {
 	realIPSets       int
 	autoIndexSets    int
 	forceHTTPSSets   int
+	enableSets       int
 	logReads         int
 	migrateCalls     int
 	lastLogKind      string
@@ -439,6 +441,23 @@ func (f *fakeSites) SetForceHTTPS(name string, enabled bool) (platform.SiteInfo,
 	}
 	f.sites[name] = s
 	f.forceHTTPSSets++
+	return s, nil
+}
+
+// SetSiteEnabled mirrors the nginx writer's contract: panel-owned sites only,
+// the boolean lands on the row, and the injected error surfaces untouched so
+// the HTTP mapping can be pinned.
+func (f *fakeSites) SetSiteEnabled(name string, enabled bool) (platform.SiteInfo, error) {
+	if f.enableErr != nil {
+		return platform.SiteInfo{}, f.enableErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	s.Enabled = enabled
+	f.sites[name] = s
+	f.enableSets++
 	return s, nil
 }
 

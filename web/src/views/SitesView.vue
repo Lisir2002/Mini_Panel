@@ -259,6 +259,21 @@ async function toggleForceHTTPS(r) {
   finally { busy.value = false; }
 }
 
+// 停用/启用是站点级开关：停用把 vhost 从 nginx 的服务集合里拿掉（sites-enabled
+// 删软链接，conf.d 移入停放目录），不删除任何东西；启用原样还原。状态以刷新后的
+// 列表为准；nginx -t 或 reload 失败时后端已还原，这里只展示后端原文。
+async function toggleEnabled(r) {
+  error.value = ""; msg.value = ""; busy.value = true;
+  const want = !r.enabled;
+  try {
+    await api("/api/v1/sites/" + encodeURIComponent(r.name) + "/enabled",
+      { method: "PUT", body: JSON.stringify({ enabled: want }) });
+    msg.value = r.name + (want ? " 已启用，恢复对外服务" : " 已停用，nginx 不再加载该站点（配置与数据都保留）");
+    await load();
+  } catch (e) { error.value = e.message; await load(); }
+  finally { busy.value = false; }
+}
+
 // 日志查看：打开对话框即读一次，切换类型 / 行数或点刷新再读。后端负责路径派生、
 // 所有权核对与尾部截断；页面只展示后端返回的事实，包括"文件尚不存在"。
 function openLog(r) {
@@ -1214,7 +1229,8 @@ onMounted(load);
             </td>
             <td>
               <span class="mp-tag on" v-if="r.enabled">已启用</span>
-              <span class="mp-tag flat" v-else>未启用</span>
+              <span class="mp-tag flat" v-else>已停用</span>
+              <div v-if="!r.enabled" class="mp-muted mp-tiny">配置保留 · 点「启用」恢复</div>
             </td>
             <td>
               <span v-if="r.php_version" class="mp-tag" :class="phpSocketOk(r) ? 'on' : 'partial'">
@@ -1239,6 +1255,14 @@ onMounted(load);
             <td>
               <div class="mp-actions">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
+              <el-popconfirm v-if="r.enabled"
+                title="停用这个站点？nginx 将不再加载它的配置，域名请求会落到其它站点或默认页。配置、证书与网站目录都保留，随时可重新启用。"
+                confirm-button-text="确认停用" cancel-button-text="取消" confirm-button-type="warning" width="300" @confirm="toggleEnabled(r)">
+                <template #reference>
+                  <el-button size="small" text type="warning">停用</el-button>
+                </template>
+              </el-popconfirm>
+              <el-button v-else size="small" text type="success" @click="toggleEnabled(r)">启用</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
                 {{ proxyOn(r) ? "代理" : "反代" }}

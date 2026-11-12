@@ -460,6 +460,7 @@ func (m *Manager) List() ([]Site, error) {
 		return nil, err
 	}
 	out := []Site{}
+	seen := map[string]bool{}
 	for _, e := range ents {
 		if e.IsDir() || !strings.HasPrefix(e.Name(), filePrefix) || !strings.HasSuffix(e.Name(), fileSuffix) {
 			continue
@@ -468,7 +469,24 @@ func (m *Manager) List() ([]Site, error) {
 		if !ok {
 			continue // foreign file that happens to match the pattern
 		}
+		seen[e.Name()] = true
 		out = append(out, s)
+	}
+	// In conf.d mode a stopped site lives in the parking directory outside
+	// every include; it is still the panel's site and must stay listed.
+	if dd := m.Layout.DisabledDir(); dd != "" {
+		if parked, err := os.ReadDir(dd); err == nil {
+			for _, e := range parked {
+				if e.IsDir() || seen[e.Name()] || !strings.HasPrefix(e.Name(), filePrefix) || !strings.HasSuffix(e.Name(), fileSuffix) {
+					continue
+				}
+				s, ok := m.readSite(e.Name())
+				if !ok {
+					continue
+				}
+				out = append(out, s)
+			}
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
@@ -479,6 +497,14 @@ func (m *Manager) List() ([]Site, error) {
 func (m *Manager) readSite(filename string) (Site, bool) {
 	p := filepath.Join(m.Layout.Dir(), filename)
 	b, err := os.ReadFile(p)
+	parked := false
+	if err != nil && m.Layout.Mode == ModeConfD {
+		// A stopped conf.d site is parked outside the include; every feature
+		// write keeps addressing it there until it is enabled again.
+		p = m.disabledPath(filename)
+		b, err = os.ReadFile(p)
+		parked = err == nil
+	}
 	if err != nil {
 		return Site{}, false
 	}
@@ -515,7 +541,7 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 			s.Enabled = true
 		}
 	} else {
-		s.Enabled = true
+		s.Enabled = !parked
 	}
 	return s, true
 }
@@ -677,6 +703,13 @@ func (m *Manager) Create(spec Spec) (Site, error) {
 	}
 	if lp := m.Layout.LinkPath(spec.Name); lp != "" {
 		if _, err := os.Lstat(lp); err == nil {
+			return Site{}, ErrExists
+		}
+	}
+	// A stopped conf.d site still owns its name; creating over the parked
+	// file would silently destroy the stopped site's configuration.
+	if m.Layout.Mode == ModeConfD {
+		if _, err := os.Lstat(m.disabledPath(FileName(spec.Name))); err == nil {
 			return Site{}, ErrExists
 		}
 	}
@@ -915,7 +948,9 @@ func (m *Manager) Delete(name string) (Site, error) {
 	if !ok {
 		return Site{}, ErrNotFound
 	}
-	confPath := m.Layout.ConfigPath(name)
+	// site.ConfigPath, not Layout.ConfigPath: a stopped conf.d site lives in
+	// the parking directory, and deleting it must remove the parked file.
+	confPath := site.ConfigPath
 	linkPath := m.Layout.LinkPath(name)
 	linkTarget := ""
 	if linkPath != "" {

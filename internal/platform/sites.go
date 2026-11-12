@@ -343,6 +343,16 @@ type SiteBehaviorManager interface {
 	SetForceHTTPS(name string, enabled bool) (SiteInfo, error)
 }
 
+// SiteEnableManager is the optional manual stop/start switch. Stopping a site
+// takes its vhost out of nginx's serving set (symlink removal on a
+// sites-enabled layout, a move to a parking directory on conf.d) without
+// deleting anything; starting puts it back. The provider owns the mechanism
+// and the test-before-reload rollback; the scheduled expiry stop is a
+// different feature and stays refused.
+type SiteEnableManager interface {
+	SetSiteEnabled(name string, enabled bool) (SiteInfo, error)
+}
+
 // SiteLogInfo is one read of a site's log tail. Exists=false is a real answer
 // (the vhost has not served a request since per-site logs were enabled), not
 // an error; Lines is always a non-nil slice so the page can render it directly.
