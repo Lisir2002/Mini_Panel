@@ -125,7 +125,7 @@ onMounted(boot);
 
     <template v-else>
       <div v-if="store.gated" class="mp-gate-notice">{{ store.gateWhy }}</div>
-      <nav v-else class="mp-card" style="padding:6px 10px;margin-bottom:14px">
+      <nav v-else class="mp-card mp-nav" style="padding:6px 10px;margin-bottom:14px">
         <el-menu mode="horizontal" :default-active="store.view" :ellipsis="false" @select="(k) => (store.view = k)">
           <el-menu-item v-for="v in VIEWS" :key="v.key" :index="v.key">{{ v.label }}</el-menu-item>
         </el-menu>

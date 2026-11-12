@@ -152,6 +152,46 @@ func TestDeleteRestoresWhenConfigTestFails(t *testing.T) {
 	}
 }
 
+// TestDeleteRemovesEnabledLinkBeforeTest simulates the real nginx behaviour
+// on a sites-available/sites-enabled layout: the wildcard include lists the
+// enabled symlink, and nginx -t follows it. A delete that removed the vhost
+// but left the link for "after the transaction" made every delete fail with
+// open() ENOENT on Ubuntu/Debian hosts (found by the responsive-UI pass,
+// which exercised delete against a real nginx 1.18).
+func TestDeleteRemovesEnabledLinkBeforeTest(t *testing.T) {
+	m, rec := newTestManager(t)
+	if _, err := m.Create(Spec{Name: "blog", Domains: []string{"blog.example.com"}}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	m.Run = func(name string, args ...string) ([]byte, error) {
+		if name == "nginx" && len(args) > 0 && args[0] == "-t" {
+			ents, err := os.ReadDir(m.Layout.Enabled)
+			if err != nil {
+				return nil, err
+			}
+			for _, e := range ents {
+				lp := filepath.Join(m.Layout.Enabled, e.Name())
+				if fi, err := os.Lstat(lp); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+					if _, err := os.Stat(lp); err != nil {
+						return []byte("nginx: [emerg] open() \"" + lp + "\" failed (2: No such file or directory)"),
+							errors.New("exit status 1")
+					}
+				}
+			}
+		}
+		return rec.run(name, args...)
+	}
+	if _, err := m.Delete("blog"); err != nil {
+		t.Fatalf("Delete against dangling-link-aware nginx: %v", err)
+	}
+	if _, err := os.Lstat(m.Layout.LinkPath("blog")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("enabled symlink still present after delete: %v", err)
+	}
+	if list, _ := m.List(); len(list) != 0 {
+		t.Errorf("site still listed: %+v", list)
+	}
+}
+
 func TestDeleteRemovesConfigButKeepsDocumentRoot(t *testing.T) {
 	m, _ := newTestManager(t)
 	if _, err := m.Create(Spec{Name: "blog", Domains: []string{"blog.example.com"}}); err != nil {

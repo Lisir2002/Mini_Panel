@@ -94,6 +94,10 @@ onMounted(load);
       <span class="mp-muted mp-tiny">{{ liveText }}</span>
     </div>
 
+    <div class="mp-swipehint">表格可左右滑动查看全部列</div>
+
+    <div class="mp-tablewrap">
+
     <table>
       <thead>
         <tr>
@@ -135,6 +139,8 @@ onMounted(load);
         <tr v-if="!rows.length"><td colspan="6" class="mp-muted">没有会话记录。</td></tr>
       </tbody>
     </table>
+
+    </div>
 
     <div class="mp-hint">
       表里的会话标识是后端给的<b>公开句柄</b>（<code class="mp-code">sessions.ref</code>，16 位十六进制），

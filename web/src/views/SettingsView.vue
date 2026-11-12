@@ -72,6 +72,8 @@ onMounted(load);
     <h3>面板设置</h3>
     <el-alert v-if="error" :title="error" type="error" :closable="false" style="margin-bottom:8px" />
     <el-alert v-if="saved" :title="saved" type="success" :closable="false" style="margin-bottom:8px" />
+    <div class="mp-swipehint">表格可左右滑动查看全部列</div>
+    <div class="mp-tablewrap">
     <table>
       <thead>
         <tr><th>键</th><th>值</th><th>更新时间（{{ tzLabel() }}）</th><th>来源</th><th>可改性</th></tr>
@@ -89,6 +91,7 @@ onMounted(load);
         </tr>
       </tbody>
     </table>
+    </div>
     <div class="mp-row" style="margin-top:12px">
       <el-select v-model="key" style="max-width:280px" :disabled="!editable.length">
         <el-option v-for="it in editable" :key="it.key" :label="it.key" :value="it.key" />

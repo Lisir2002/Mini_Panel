@@ -33,6 +33,8 @@ onMounted(() => load(true));
     <h3>审计日志 <span class="mp-muted" style="font-weight:400;font-size:12px">共 {{ total }} 条</span></h3>
     <p class="mp-note">只追加，无清空接口。参数中的口令类字段在入库前已做掩码，另存 <code class="mp-code">params_hash</code> 供对账。</p>
     <el-alert v-if="error" :title="error" type="error" :closable="false" style="margin-bottom:8px" />
+    <div class="mp-swipehint">表格可左右滑动查看全部列</div>
+    <div class="mp-tablewrap">
     <table>
       <thead>
         <tr>
@@ -58,6 +60,7 @@ onMounted(() => load(true));
         <tr v-if="!rows.length"><td colspan="6" class="mp-muted">还没有写操作记录。</td></tr>
       </tbody>
     </table>
+    </div>
     <div class="mp-row" style="margin-top:10px">
       <el-button size="small" :disabled="rows.length >= total" :loading="busy" @click="load(false)">加载更多</el-button>
       <el-button size="small" text :loading="busy" @click="load(true)">重新读取</el-button>

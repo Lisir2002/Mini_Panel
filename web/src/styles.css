@@ -74,3 +74,88 @@ body {
 
 .el-table { background: transparent; }
 .el-table th.el-table__cell { background: #1a1f26; }
+
+/* ---- 自适应层（桌面 / 平板 / 手机）--------------------------------------
+   原则：页面本身永远不出现横向滚动；宽表格放进自己的横向滚动容器，
+   滚动条画成面板自己的配色；固定宽度的控件用 min(Npx,100%) 收进容器。 */
+
+:root {
+  --mp-scroll-track: #14181e;
+  --mp-scroll-thumb: #2d3644;
+  --mp-scroll-hover: #3b82f6;
+}
+
+/* 滚动条统一用面板配色（Firefox + WebKit 两条路都写）。 */
+html { scrollbar-color: var(--mp-scroll-thumb) var(--mp-scroll-track); scrollbar-width: thin; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--mp-scroll-track); }
+::-webkit-scrollbar-thumb { background: var(--mp-scroll-thumb); border-radius: 6px; border: 2px solid var(--mp-scroll-track); }
+::-webkit-scrollbar-thumb:hover { background: var(--mp-scroll-hover); }
+::-webkit-scrollbar-corner { background: var(--mp-scroll-track); }
+
+/* 宽表格的横向滚动容器：滚动只发生在表格内部，不波及整页。 */
+.mp-tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.mp-tablewrap > table { margin: 0; min-width: 640px; }
+.mp-swipehint { display: none; color: var(--mp-muted); font-size: 11px; margin: 0 0 4px; }
+
+/* 顶部导航：窄屏时横向滚动而不是把菜单项挤扁或截断。 */
+.mp-nav .el-menu { overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+.mp-nav .el-menu::-webkit-scrollbar { height: 5px; }
+.mp-nav .el-menu-item { flex-shrink: 0; white-space: nowrap; }
+
+/* 站点操作列：按钮换行排列，不再撑出一条 1260px 的整页横滚。 */
+.mp-actions { display: flex; flex-wrap: wrap; gap: 2px 2px; align-items: center; min-width: 260px; max-width: 430px; }
+.mp-actions .el-button { margin-left: 0 !important; padding: 5px 7px; }
+
+/* Element Plus 组件在窄容器里的兜底，防止长中文标签把行撑破。 */
+.el-dialog { max-width: calc(100vw - 12px); }
+.el-dialog__body { overflow-wrap: anywhere; }
+.el-popover.el-popper { max-width: 92vw; }
+.el-message-box { max-width: 92vw; }
+.el-radio { white-space: normal; height: auto; align-items: flex-start; max-width: 100%; }
+.el-radio__input { margin-top: 2px; }
+.el-radio__label { line-height: 1.5; }
+.el-radio-group { flex-wrap: wrap; row-gap: 6px; }
+.el-checkbox { white-space: normal; height: auto; align-items: flex-start; max-width: 100%; }
+.el-checkbox__input { margin-top: 2px; }
+.el-checkbox__label { line-height: 1.5; }
+.el-select { min-width: 0; }
+.el-input-number { max-width: 100%; }
+.el-form-item__label { line-height: 1.45; }
+.el-alert__title { word-break: break-word; }
+
+/* 宽屏：放宽内容区，让站点表尽量一屏放下。 */
+@media (min-width: 1600px) {
+  .mp-wrap { max-width: 1400px; }
+}
+
+/* 平板及以下。 */
+@media (max-width: 900px) {
+  .mp-wrap { padding: 14px 12px 40px; }
+  .mp-card { padding: 12px; }
+  .mp-swipehint { display: block; }
+  .mp-clip { max-width: 60vw; }
+}
+
+/* 手机。 */
+@media (max-width: 600px) {
+  body { font-size: 13px; }
+  .mp-wrap { padding: 10px 8px 32px; }
+  .mp-card { padding: 10px; border-radius: 8px; }
+  .mp-top { gap: 6px; margin-bottom: 10px; }
+  .mp-brand small { display: block; margin-left: 0; margin-top: 2px; }
+  .mp-kpis { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+  .mp-nav .el-menu { --el-menu-horizontal-height: 44px; }
+  .mp-nav .el-menu-item { padding: 0 11px; font-size: 13px; }
+  .el-dialog { --el-dialog-margin-top: 5vh; --el-dialog-padding-primary: 14px; }
+  .el-dialog__title { font-size: 15px; }
+  /* 多列表格行的列头在窄屏对不齐换行后的字段，直接隐藏，字段自带 placeholder。 */
+  .mp-rulehead { display: none !important; }
+  .mp-actions { min-width: 220px; }
+}
+
+/* 极窄（折叠屏外屏 / 320px 级）。 */
+@media (max-width: 360px) {
+  .mp-kpis { grid-template-columns: 1fr 1fr; }
+  .mp-nav .el-menu-item { padding: 0 9px; }
+}

@@ -923,6 +923,20 @@ func (m *Manager) Delete(name string) (Site, error) {
 			linkTarget = t
 		}
 	}
+	// The enabled symlink must go BEFORE the transaction: the wildcard
+	// include still lists it, and nginx -t follows it to the deleted vhost
+	// (open() ENOENT), which would fail every delete on a sites-enabled
+	// layout. On failure the link is restored together with the file bytes.
+	if linkPath != "" {
+		if err := os.Remove(linkPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return Site{}, err
+		}
+	}
+	restoreLink := func() {
+		if linkPath != "" && linkTarget != "" {
+			_ = os.Symlink(linkTarget, linkPath)
+		}
+	}
 
 	// The zone table is rebuilt from the remaining sites as part of the same
 	// transaction, so deleting the last limited site cannot leave a vhost
@@ -930,6 +944,7 @@ func (m *Manager) Delete(name string) (Site, error) {
 	// file in an http-level include either.
 	rows, err := m.limitsRows("", nil, name)
 	if err != nil {
+		restoreLink()
 		return Site{}, err
 	}
 	table := renderLimits(rows)
@@ -937,6 +952,7 @@ func (m *Manager) Delete(name string) (Site, error) {
 	if len(rows) > 0 || m.limitsFileExists() {
 		tablePath, err := m.limitsPath()
 		if err != nil {
+			restoreLink()
 			return Site{}, err
 		}
 		files = append(files, configFile{Path: tablePath, Body: &table, OwnedCheck: parseLimitsMarker})
@@ -946,26 +962,21 @@ func (m *Manager) Delete(name string) (Site, error) {
 	// and deleting any site must not leave its block in the table.
 	upRows, err := m.upstreamRows("", nil, "", name)
 	if err != nil {
+		restoreLink()
 		return Site{}, err
 	}
 	if len(upRows) > 0 || m.upstreamsFileExists() {
 		tablePath, err := m.upstreamsPath()
 		if err != nil {
+			restoreLink()
 			return Site{}, err
 		}
 		upTable := renderUpstreams(upRows)
 		files = append(files, configFile{Path: tablePath, Body: &upTable, OwnedCheck: parseUpstreamsMarker})
 	}
 	if err := m.applyFiles(files); err != nil {
+		restoreLink()
 		return Site{}, err
-	}
-	if linkPath != "" && linkTarget != "" {
-		// The enabled symlink is not part of the nginx transaction: the vhost
-		// file it points at is gone, so nginx is already consistent. Recreating
-		// a dangling link on a later failure would only hide the deleted site.
-		_ = os.Remove(linkPath)
-	} else if linkPath != "" {
-		_ = os.Remove(linkPath)
 	}
 	// The certificate is panel data tied to this site, so it goes with the
 	// config. The document root stays; that is operator data.

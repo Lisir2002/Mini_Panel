@@ -1115,10 +1115,10 @@ onMounted(load);
 
       <el-form label-position="top" @submit.prevent="create">
         <div class="mp-row" style="align-items:flex-start;gap:12px;flex-wrap:wrap">
-          <el-form-item label="站点名（2-32 位小写字母/数字/连字符）" style="min-width:220px">
+          <el-form-item label="站点名（2-32 位小写字母/数字/连字符）" style="min-width:min(220px,100%)">
             <el-input v-model="form.name" placeholder="blog" maxlength="32" />
           </el-form-item>
-          <el-form-item label="域名（空格或逗号分隔，支持 *.example.com）" style="min-width:320px;flex:1">
+          <el-form-item label="域名（空格或逗号分隔，支持 *.example.com）" style="min-width:min(320px,100%);flex:1">
             <el-input v-model="form.domains" placeholder="blog.example.com www.blog.example.com" />
           </el-form-item>
         </div>
@@ -1133,7 +1133,7 @@ onMounted(load);
           </div>
         </el-form-item>
         <el-form-item label="PHP 版本（可省略，留空为纯静态）">
-          <el-select v-model="form.php_version" placeholder="纯静态" style="width:260px" :disabled="!phpAvailable">
+          <el-select v-model="form.php_version" placeholder="纯静态" style="width:min(260px,100%)" :disabled="!phpAvailable">
             <el-option label="纯静态（不执行 PHP）" value="" />
             <el-option v-for="v in phpVersions" :key="v" :label="'PHP ' + v + '（fpm）'" :value="v" />
           </el-select>
@@ -1157,7 +1157,9 @@ onMounted(load);
         </span>
       </div>
 
-      <table>
+      <div class="mp-swipehint">表格可左右滑动：右侧还有状态、HTTPS 与全部操作按钮</div>
+      <div class="mp-tablewrap">
+      <table class="mp-sitestable">
         <thead>
           <tr><th>站点</th><th>域名</th><th>根目录</th><th>状态</th><th>PHP</th><th>HTTPS</th><th>创建时间</th><th></th></tr>
         </thead>
@@ -1234,7 +1236,8 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:1260px;white-space:nowrap">
+            <td>
+              <div class="mp-actions">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
@@ -1295,11 +1298,13 @@ onMounted(load);
                   <el-button size="small" text type="danger">删除</el-button>
                 </template>
               </el-popconfirm>
+              </div>
             </td>
           </tr>
           <tr v-if="!rows.length"><td colspan="8" class="mp-muted">还没有由面板创建的站点。</td></tr>
         </tbody>
       </table>
+      </div>
 
       <el-dialog v-model="editOpen" :title="'编辑 · ' + (editTarget?.name || '')" width="min(620px, 94vw)">
         <el-alert v-if="editTarget?.tls?.enabled" type="info" :closable="false" style="margin-bottom:10px"
@@ -1377,9 +1382,9 @@ onMounted(load);
           </el-form-item>
           <template v-else>
             <el-form-item :label="'后端列表（最多 ' + maxProxyUpstreams + ' 个，只接受 http://主机:端口，不带路径）'">
-              <div v-for="(u, i) in proxyForm.upstreams" :key="i" style="display:flex;gap:8px;margin-bottom:6px;width:100%">
+              <div v-for="(u, i) in proxyForm.upstreams" :key="i" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:6px;width:100%">
                 <el-input v-model="u.target" placeholder="http://127.0.0.1:3000" maxlength="255" style="flex:1" />
-                <el-input-number v-model="u.weight" :min="1" :max="100" :step="1" controls-position="right" style="width:110px" />
+                <el-input-number v-model="u.weight" :min="1" :max="100" :step="1" controls-position="right" style="width:min(110px,100%)" />
                 <el-button size="small" text type="danger" :disabled="proxyForm.upstreams.length <= 1" @click="removeUpstream(i)">删除</el-button>
               </div>
               <el-button size="small" :disabled="proxyForm.upstreams.length >= maxProxyUpstreams" @click="addUpstream">添加后端</el-button>
@@ -1467,19 +1472,19 @@ onMounted(load);
       <el-dialog v-model="redirectPathsOpen" :title="'按路径跳转 · ' + (redirectPathsTarget?.name || '')" width="min(760px, 96vw)">
         <el-alert v-if="redirectPathsTarget?.redirect_paths?.length" type="info" :closable="false" style="margin-bottom:10px"
           :title="'该站点已有 ' + redirectPathsTarget.redirect_paths.length + ' 条路径例外。保存会用下面的列表整体替换；删除全部行后保存表示清除。'" />
-        <div class="mp-row" style="margin-bottom:8px;align-items:flex-end">
-          <div style="flex:1;min-width:200px"><span class="mp-muted mp-tiny">精确路径（区分大小写）</span></div>
-          <div style="width:110px"><span class="mp-muted mp-tiny">状态码</span></div>
-          <div style="flex:2;min-width:220px"><span class="mp-muted mp-tiny">跳转目标</span></div>
-          <div style="width:52px"></div>
+        <div class="mp-row mp-rulehead" style="margin-bottom:8px;align-items:flex-end">
+          <div style="flex:1;min-width:min(200px,100%)"><span class="mp-muted mp-tiny">精确路径（区分大小写）</span></div>
+          <div style="width:min(110px,100%)"><span class="mp-muted mp-tiny">状态码</span></div>
+          <div style="flex:2;min-width:min(220px,100%)"><span class="mp-muted mp-tiny">跳转目标</span></div>
+          <div style="width:min(52px,100%)"></div>
         </div>
         <div v-for="(rule, i) in redirectPathRules" :key="i" class="mp-row" style="margin-bottom:8px">
-          <el-input v-model="rule.path" maxlength="128" placeholder="/old" style="flex:1;min-width:200px" />
-          <el-select v-model="rule.code" style="width:110px">
+          <el-input v-model="rule.path" maxlength="128" placeholder="/old" style="flex:1;min-width:min(200px,100%)" />
+          <el-select v-model="rule.code" style="width:min(110px,100%)">
             <el-option label="301 永久" :value="301" />
             <el-option label="302 临时" :value="302" />
           </el-select>
-          <el-input v-model="rule.target" maxlength="255" placeholder="https://new.example.com" style="flex:2;min-width:220px" />
+          <el-input v-model="rule.target" maxlength="255" placeholder="https://new.example.com" style="flex:2;min-width:min(220px,100%)" />
           <el-button size="small" text type="danger" :disabled="busy" @click="removeRedirectPath(i)">删除</el-button>
         </div>
         <div class="mp-hint" style="margin-top:4px">
@@ -1508,16 +1513,16 @@ onMounted(load);
       <el-dialog v-model="errorPagesOpen" :title="'自定义错误页 · ' + (errorPagesTarget?.name || '')" width="min(700px, 96vw)">
         <el-alert v-if="errorPagesTarget?.error_pages?.length" type="info" :closable="false" style="margin-bottom:10px"
           :title="'该站点已有 ' + errorPagesTarget.error_pages.length + ' 条自定义错误页。保存会用下面的列表整体替换；删除全部行后保存表示清除。'" />
-        <div class="mp-row" style="margin-bottom:8px;align-items:flex-end">
-          <div style="width:130px"><span class="mp-muted mp-tiny">状态码</span></div>
-          <div style="flex:1;min-width:220px"><span class="mp-muted mp-tiny">站内路径（相对站点根目录）</span></div>
-          <div style="width:52px"></div>
+        <div class="mp-row mp-rulehead" style="margin-bottom:8px;align-items:flex-end">
+          <div style="width:min(130px,100%)"><span class="mp-muted mp-tiny">状态码</span></div>
+          <div style="flex:1;min-width:min(220px,100%)"><span class="mp-muted mp-tiny">站内路径（相对站点根目录）</span></div>
+          <div style="width:min(52px,100%)"></div>
         </div>
         <div v-for="(rule, i) in errorPageRules" :key="i" class="mp-row" style="margin-bottom:8px">
-          <el-select v-model="rule.code" style="width:130px">
+          <el-select v-model="rule.code" style="width:min(130px,100%)">
             <el-option v-for="c in errorPageCodes" :key="c" :label="String(c)" :value="c" />
           </el-select>
-          <el-input v-model="rule.path" maxlength="128" placeholder="/404.html" style="flex:1;min-width:220px" />
+          <el-input v-model="rule.path" maxlength="128" placeholder="/404.html" style="flex:1;min-width:min(220px,100%)" />
           <el-button size="small" text type="danger" :disabled="busy" @click="removeErrorPage(i)">删除</el-button>
         </div>
         <div class="mp-hint" style="margin-top:4px">
@@ -1552,7 +1557,7 @@ onMounted(load);
         <el-form label-position="top" @submit.prevent="saveLimit">
           <el-form-item label="请求速率上限（如 10r/s、200r/m、100r）">
             <el-input v-model="limitForm.request_rate" maxlength="16" placeholder="留空表示不做速率限制"
-              style="width:260px" />
+              style="width:min(260px,100%)" />
             <div class="mp-hint" style="margin-top:4px">
               面板按 <code class="mp-code">$binary_remote_addr</code>（单个客户端 IP）统计请求速率，
               超出后按下面的状态码拒绝。速率由后端解析与规范化，只接受
@@ -1561,7 +1566,7 @@ onMounted(load);
           </el-form-item>
           <el-form-item label="突发（burst，仅在设置了速率时有效）">
             <el-input v-model="limitForm.burst" maxlength="7" placeholder="如 20；留空则不写 burst"
-              style="width:200px" />
+              style="width:min(200px,100%)" />
             <div class="mp-hint" style="margin-top:4px">
               面板渲染 burst 时固定附带 <code class="mp-code">nodelay</code>：允许的突发请求立即放行，
               超出部分才排队或拒绝。这个开关不由页面控制。
@@ -1569,10 +1574,10 @@ onMounted(load);
           </el-form-item>
           <el-form-item label="单 IP 并发连接数上限">
             <el-input v-model="limitForm.connections" maxlength="7" placeholder="如 5；留空表示不限制连接数"
-              style="width:200px" />
+              style="width:min(200px,100%)" />
           </el-form-item>
           <el-form-item label="超限时返回的状态码">
-            <el-select v-model="limitForm.status" style="width:220px">
+            <el-select v-model="limitForm.status" style="width:min(220px,100%)">
               <el-option v-for="opt in limitStatuses" :key="opt.value" :label="opt.label" :value="opt.value" />
             </el-select>
             <div class="mp-hint" style="margin-top:4px">
@@ -1603,7 +1608,7 @@ onMounted(load);
         <el-form label-position="top" @submit.prevent="saveMeta">
           <el-form-item label="分组（可留空）">
             <el-input v-model="metaForm.group" maxlength="64" placeholder="如 电商 / 测试站 / 客户 A"
-              style="width:260px" />
+              style="width:min(260px,100%)" />
             <div class="mp-hint" style="margin-top:4px">
               单行标签，最长 64 个字符。分组只影响这个列表的展示与筛选，不会写进 nginx。
             </div>
@@ -1631,7 +1636,7 @@ onMounted(load);
             <el-radio-button value="access">访问日志</el-radio-button>
             <el-radio-button value="error">错误日志</el-radio-button>
           </el-radio-group>
-          <el-select v-model="logLines" size="small" style="width:120px" @change="loadLog">
+          <el-select v-model="logLines" size="small" style="width:min(120px,100%)" @change="loadLog">
             <el-option :value="100" label="尾 100 行" />
             <el-option :value="200" label="尾 200 行" />
             <el-option :value="500" label="尾 500 行" />
@@ -1697,7 +1702,7 @@ onMounted(load);
         <el-form label-position="top" @submit.prevent="saveAuth">
           <el-form-item label="用户名">
             <el-input v-model="authForm.username" maxlength="32" placeholder="例如 guest"
-              autocomplete="off" style="width:260px" />
+              autocomplete="off" style="width:min(260px,100%)" />
             <div class="mp-hint" style="margin-top:4px">
               1-32 位字母、数字、点、下划线或连字符，且以字母或数字开头。
             </div>
@@ -1705,7 +1710,7 @@ onMounted(load);
           <el-form-item label="口令（8-128 个字符）">
             <el-input v-model="authForm.password" type="password" show-password maxlength="128"
               placeholder="保存时必填；不会回显，也不会写进 nginx 配置" autocomplete="new-password"
-              style="width:320px" />
+              style="width:min(320px,100%)" />
             <div class="mp-hint" style="margin-top:4px">
               后端把它写成 <code class="mp-code">{SHA}</code>（base64(SHA-1)）行，存进面板管理的
               0600 口令文件；vhost 里只有 <code class="mp-code">auth_basic</code> 与
@@ -1923,10 +1928,19 @@ onMounted(load);
 
 <style scoped>
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
+/* 列宽下限：自动布局在窄容器里会把路径列挤成逐字换行。给关键列保底宽度，
+   放不下时由 .mp-tablewrap 横向滚动，而不是牺牲可读性。 */
+table.mp-sitestable { min-width: 1000px; }
+.mp-sitestable th, .mp-sitestable td { padding: 6px 6px; }
+.mp-sitestable td:nth-child(1), .mp-sitestable th:nth-child(1) { min-width: 160px; }
+.mp-sitestable td:nth-child(3), .mp-sitestable th:nth-child(3) { min-width: 160px; }
+.mp-sitestable td:nth-child(2) { max-width: 220px; }
+.mp-sitestable .mp-clip { max-width: 200px; }
+.mp-sitestable td:nth-child(7) { white-space: nowrap; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--mp-line); vertical-align: top; }
 thead th { color: var(--mp-muted); font-weight: 500; white-space: nowrap; }
 tr:last-child th, tr:last-child td { border-bottom: 0; }
 .mp-code { white-space: pre-wrap; word-break: break-all; }
 .mp-logtail { max-height: 52vh; overflow: auto; background: var(--mp-bg, #f6f7f9); border: 1px solid var(--mp-line); border-radius: 6px; padding: 10px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; margin: 0; }
-.mp-note-cell { max-width: 340px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+.mp-note-cell { max-width: min(340px, 60vw); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
 </style>

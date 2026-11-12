@@ -21,7 +21,7 @@
 | 两步验证 | **手写 RFC 6238 TOTP**（`internal/sec/totp.go:12-83`，HMAC-SHA1 / 30 秒 / 6 位 / ±1 窗口） | 算法约 80 行，引入第三方库换来的只是把攻击面挪到依赖里。窗口容忍时钟漂移但拒绝空码。 |
 | 面板证书 | 自签 ECDSA P-256，SAN 跟随本机地址（`internal/sec/tls.go`） | 面板自己只需要"不被中间人 + 不明文口令"，不需要公网信任链；站点证书是 M2 的事。 |
 | 前端（当前态 M0） | **单文件手写静态页** `webui/dist/index.html`，零构建步骤 | `go build` 出来的二进制立刻可以在浏览器里验收整条安全链路；没有 node_modules、没有 lockfile 漂移、CI 只跑 Go。 |
-| 前端（M1 起） | Vue 3 + Vite + Element Plus，`make web` 产出**单个** `webui/dist/index.html` | 站点/数据库/防火墙这些表格页需要真正的组件库。产物必须是单文件：安全入口之外的静态资源会被闸门伪装成 404，登录页会白屏（`TestUIBundleIsASingleSelfContainedFile`）。接口面不因换代而放宽，M0 的契约用例一条不许变红。 |
+| 前端（M1 起） | Vue 3 + Vite + Element Plus，`make web` 产出**单个** `webui/dist/index.html` | 站点/数据库/防火墙这些表格页需要真正的组件库。产物必须是单文件：安全入口之外的静态资源会被闸门伪装成 404，登录页会白屏（`TestUIBundleIsASingleSelfContainedFile`）。接口面不因换代而放宽，M0 的契约用例一条不许变红。UI 自适应层在 `web/src/styles.css:78` 起：页面本身永不横向滚动，宽表格进 `.mp-tablewrap` 容器内滚动，固定宽度控件 `min(Npx,100%)`，900/600/360px 三档收窄；验收用 Playwright 在 14 档视口扫全部页面与对话框共 210 项检查（口径见 功能设计 §5.22），不引入任何运行时依赖。 |
 | 打包 | `//go:embed all:dist`（`webui/embed.go:15`） | 没有 nginx vhost、没有静态根目录、没有"运行时得存在某个路径"。 |
 
 ### 1.1 直接依赖清单（与 `go.mod:5-12` 逐条对应，共 6 个）

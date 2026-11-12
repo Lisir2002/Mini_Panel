@@ -158,5 +158,6 @@ onMounted(async () => {
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--mp-line); vertical-align: top; }
 th { color: var(--mp-muted); font-weight: 500; width: 34%; }
+td { overflow-wrap: anywhere; }
 tr:last-child th, tr:last-child td { border-bottom: 0; }
 </style>

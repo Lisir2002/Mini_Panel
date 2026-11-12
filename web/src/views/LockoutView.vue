@@ -47,6 +47,10 @@ onMounted(load);
       <span class="mp-muted mp-tiny">{{ summary }}</span>
     </div>
 
+    <div class="mp-swipehint">表格可左右滑动查看全部列</div>
+
+    <div class="mp-tablewrap">
+
     <table>
       <thead>
         <tr>
@@ -66,6 +70,8 @@ onMounted(load);
         <tr v-if="!rows.length && !error"><td colspan="4" class="mp-muted">后端没有返回任何行。</td></tr>
       </tbody>
     </table>
+
+    </div>
 
     <div class="mp-hint">
       三条口径上的事，写在这里而不是每条行话里：<b>入口路径的值本身不在这一页出现</b>——它和会话令牌
