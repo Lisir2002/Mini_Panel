@@ -173,6 +173,9 @@ func proxyLocationBody(s Site) string {
 		b.WriteString("        proxy_set_header Upgrade $http_upgrade;\n")
 		b.WriteString("        proxy_set_header Connection \"upgrade\";\n")
 	}
+	if s.ProxyCache != nil {
+		b.WriteString(proxyCacheLines(s))
+	}
 	return b.String()
 }
 
@@ -213,6 +216,12 @@ func (m *Manager) SetProxy(name, target string, websocket bool) (Site, error) {
 	}
 	site.ProxyTarget, site.ProxyWebSocket = target, websocket
 	site.ProxyUpstreams, site.ProxyLBMethod = nil, ""
+	if target == "" && site.ProxyCache != nil {
+		// Clearing the last proxy owner drops the cache with it: the policy
+		// only means something beside a proxy_pass, and the zone table has to
+		// lose the row in the same transaction.
+		site.ProxyCache = nil
+	}
 	body := render(site)
 	files := []configFile{{Path: site.ConfigPath, Body: &body}}
 	if len(rows) > 0 || m.upstreamsFileExists() {
@@ -223,8 +232,19 @@ func (m *Manager) SetProxy(name, target string, websocket bool) (Site, error) {
 		table := renderUpstreams(rows)
 		files = append(files, configFile{Path: tablePath, Body: &table, OwnedCheck: parseUpstreamsMarker})
 	}
+	cacheRows, err := m.cacheRows(name, site.ProxyCache)
+	if err != nil {
+		return Site{}, err
+	}
+	files, err = m.cacheTableFile(cacheRows, files)
+	if err != nil {
+		return Site{}, err
+	}
 	if err := m.applyFiles(files); err != nil {
 		return Site{}, err
+	}
+	if target == "" {
+		m.removeCacheDir(name)
 	}
 	return site, nil
 }

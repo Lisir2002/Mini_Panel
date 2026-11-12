@@ -208,7 +208,10 @@ paths:
         target 是 http://host:port 后端（不带路径），weight 为 1-100（1 时省略）；
         proxy_lb_method 是均衡算法（ip_hash / least_conn，省略表示默认轮询）。
         它与 proxy_target 互斥（同一个 location / 只能有一种代理形式），
-        proxy_websocket 对两种形式含义相同。
+        proxy_websocket 对两种形式含义相同。proxy_cache 非空表示代理响应缓存
+        已启用，字段为 {valid_seconds, max_size_mb, inactive_minutes}；只对
+        GET/HEAD 的 200/302 生效，带 Authorization/Cookie 的请求双向旁路，
+        详见 /api/v1/sites/{name}/proxy-cache（第廿五片）。清除代理会连带清除缓存。
         redirect_target 非空表示站点把整站跳转到该 URL，redirect_code 是 301 或 302，
         redirect_keep_path 表示拼接 $request_uri 保留原路径；三者只在启用跳转后出现，
         且与 rewrite、proxy 三者互斥（都占用 location /）。redirect_paths 是精确路径
@@ -547,6 +550,67 @@ paths:
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { description: 面板没有管理这个站点 }
         "422": { description: nginx 拒绝，vhost 与 upstream 表都已回滚（nginx_rejected） }
+  /api/v1/sites/{name}/proxy-cache:
+    put:
+      tags: [site]
+      summary: 设置或清除站点反向代理的响应缓存
+      description: |
+        M2 第廿五片：请求体 {cache:{valid_seconds, max_size_mb, inactive_minutes}}；
+        {"cache":null} 表示清除缓存并删除该站点已缓存的字节，始终允许。
+        三个数值都必填且在界内：valid_seconds 1-2592000（缓存的 200/302 响应保持
+        新鲜的秒数）、max_size_mb 10-102400（磁盘上限）、inactive_minutes
+        1-43200（多久未被请求就淘汰）。没有隐式默认值——"这个页面会被旧内容
+        服务多久"必须是操作者做过的决定。
+        启用前提是站点已有代理所有者（proxy_target 或 proxy_upstreams 之一），
+        否则 400 invalid_site；反过来，清除代理（PUT /proxy 空目标或
+        PUT /proxy-upstreams 空表）会在同一次事务里连带清掉缓存策略与 zone 行，
+        并在事务提交后删除缓存目录。删除站点同样连带清理。
+        面板渲染的指令是固定的，调用方不能提交任何 nginx 配置文本：vhost 的
+        代理 location 里写 proxy_cache <站点派生 zone 名>、固定 cache key
+        （$scheme|$host|$request_method|$request_uri，Host 参与 key，同 vhost
+        多域名不共享条目）、proxy_cache_methods GET HEAD、proxy_cache_valid
+        200 302 <N>s、proxy_cache_lock on、对带 Authorization 或 Cookie 头的
+        请求双向旁路（不读缓存也不写缓存，个性化响应不会串用户），并加
+        X-Cache-Status 响应头（HIT/MISS/BYPASS 等，可用来现场验证）。
+        301 有意不缓存（永久跳转改了以后不应继续从磁盘服务旧目标）；nginx
+        自身的规则仍然生效：带 Set-Cookie 或 private/no-store Cache-Control
+        的响应不会被缓存，面板不覆盖它们。
+        proxy_cache_path 必须定义在 http 上下文，因此面板另写一个自己拥有的
+        表文件到本机 nginx.conf 里已存在通配 include 的目录，每次改动按当前
+        站点列表整表重建，最后一个缓存站点消失时删除该文件；缓存字节放在
+        /var/cache/minipanel/<站点>/（MINI_PANEL_ROOT 可整体重定位），关闭缓存、
+        清除代理或删除站点时一并删除。找不到通配 include 时 400 invalid_site
+        并说明原因。vhost 与表文件在同一次"写文件 → nginx -t → 通过才 reload"
+        事务里落盘，任一步失败两个文件都恢复原字节，响应 422 nginx_rejected。
+        成功响应是更新后的站点行，含 proxy_cache。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cache]
+              properties:
+                cache:
+                  nullable: true
+                  description: 缓存策略；null 表示清除
+                  type: object
+                  required: [valid_seconds, max_size_mb, inactive_minutes]
+                  properties:
+                    valid_seconds: { type: integer, minimum: 1, maximum: 2592000 }
+                    max_size_mb: { type: integer, minimum: 10, maximum: 102400 }
+                    inactive_minutes: { type: integer, minimum: 1, maximum: 43200 }
+      responses:
+        "200": { description: 已生效，返回更新后的站点行（含 proxy_cache） }
+        "400": { description: 数值越界、站点没有代理所有者，或本机 nginx.conf 没有 http 级通配 include（invalid_site） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx 拒绝，vhost 与缓存表都已回滚（nginx_rejected） }
   /api/v1/sites/{name}/redirect:
     put:
       tags: [site]

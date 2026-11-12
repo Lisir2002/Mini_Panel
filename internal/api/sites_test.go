@@ -31,6 +31,7 @@ type fakeSites struct {
 	rewriteErr       error
 	proxyErr         error
 	proxyLBErr       error
+	proxyCacheErr    error
 	redirectErr      error
 	redirectPathErr  error
 	errorPageErr     error
@@ -57,6 +58,7 @@ type fakeSites struct {
 	rewriteSets      int
 	proxySets        int
 	proxyLBSets      int
+	proxyCacheSets   int
 	redirectSets     int
 	redirectPathSets int
 	errorPageSets    int
@@ -185,6 +187,9 @@ func (f *fakeSites) SetProxy(name, target string, websocket bool) (platform.Site
 	}
 	s.ProxyTarget = strings.TrimSpace(target)
 	s.ProxyWebSocket = websocket
+	if s.ProxyTarget == "" {
+		s.ProxyCache = nil
+	}
 	f.sites[name] = s
 	f.proxySets++
 	return s, nil
@@ -204,6 +209,7 @@ func (f *fakeSites) SetProxyUpstreams(name string, upstreams []platform.SiteProx
 	}
 	if len(upstreams) == 0 {
 		s.ProxyUpstreams, s.ProxyLBMethod = nil, ""
+		s.ProxyCache = nil
 	} else {
 		s.ProxyUpstreams = append([]platform.SiteProxyUpstream(nil), upstreams...)
 		s.ProxyLBMethod = method
@@ -212,6 +218,32 @@ func (f *fakeSites) SetProxyUpstreams(name string, upstreams []platform.SiteProx
 	s.ProxyWebSocket = websocket
 	f.sites[name] = s
 	f.proxyLBSets++
+	return s, nil
+}
+
+// SetProxyCache records the response-cache policy on the row. The fake mirrors
+// the production contract at the HTTP layer: nil clears the policy, enabling
+// requires an active proxy in either form (ErrSiteInvalid otherwise), and
+// bounds validation lives in the nginx writer.
+func (f *fakeSites) SetProxyCache(name string, cache *platform.SiteProxyCache) (platform.SiteInfo, error) {
+	if f.proxyCacheErr != nil {
+		return platform.SiteInfo{}, f.proxyCacheErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	if cache != nil && s.ProxyTarget == "" && len(s.ProxyUpstreams) == 0 {
+		return platform.SiteInfo{}, fmt.Errorf("%w：响应缓存只对反向代理站点有意义", platform.ErrSiteInvalid)
+	}
+	if cache == nil {
+		s.ProxyCache = nil
+	} else {
+		c := *cache
+		s.ProxyCache = &c
+	}
+	f.sites[name] = s
+	f.proxyCacheSets++
 	return s, nil
 }
 

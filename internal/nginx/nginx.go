@@ -153,8 +153,13 @@ type Manager struct {
 	// from M2 on). Empty disables the layer; when set, a failed snapshot
 	// refuses the write — the panel must be able to undo before it changes.
 	HistoryDir string
-	Run        Runner
-	Now        func() time.Time
+	// CacheDir is the parent of the per-site reverse-proxy cache directories.
+	// Like LogDir it is host state: the paths are derived from it on every
+	// render and never stored in the marker. nginx creates the per-site
+	// subdirectories itself when it loads a proxy_cache_path definition.
+	CacheDir string
+	Run      Runner
+	Now      func() time.Time
 }
 
 // New detects the layout and returns a usable Manager. siteRoot is the parent
@@ -205,7 +210,8 @@ func NewWithHistoryDir(base, siteRoot, certDir, authDir, logDir, historyDir stri
 	if logDir == "" {
 		logDir = filepath.Join(base, "minipanel-logs")
 	}
-	return &Manager{Layout: l, SiteRoot: siteRoot, CertDir: certDir, AuthDir: authDir, LogDir: logDir, HistoryDir: historyDir, Run: ExecRunner, Now: time.Now}, nil
+	return &Manager{Layout: l, SiteRoot: siteRoot, CertDir: certDir, AuthDir: authDir, LogDir: logDir, HistoryDir: historyDir,
+		CacheDir: filepath.Join(base, "minipanel-cache"), Run: ExecRunner, Now: time.Now}, nil
 }
 
 // Site is one row of the site list: the facts the panel generated, not a
@@ -238,6 +244,11 @@ type Site struct {
 	// balancing vocabulary ("" = weighted round-robin, ip_hash, least_conn).
 	ProxyUpstreams []ProxyUpstream `json:"proxy_upstreams,omitempty"`
 	ProxyLBMethod  string          `json:"proxy_lb_method,omitempty"`
+	// ProxyCache is the response-cache policy for whichever proxy form owns
+	// location / (slice 25). Nil means no cache. The proxy_cache_path zone it
+	// names lives in a panel-owned http-level table file written in the same
+	// transaction, and the cached bytes live under the Manager's CacheDir.
+	ProxyCache *ProxyCache `json:"proxy_cache,omitempty"`
 	// RedirectTarget is the validated absolute URL when the site redirects
 	// every request. Redirect, proxy and rewrite all own `location /`, so at
 	// most one of them may be set. RedirectPaths adds exact path exceptions;
@@ -314,6 +325,7 @@ type markerPayload struct {
 	ProxyWebSocket    bool            `json:"proxy_websocket,omitempty"`
 	ProxyUpstreams    []ProxyUpstream `json:"proxy_upstreams,omitempty"`
 	ProxyLBMethod     string          `json:"proxy_lb_method,omitempty"`
+	ProxyCache        *ProxyCache     `json:"proxy_cache,omitempty"`
 	RedirectTarget    string          `json:"redirect_target,omitempty"`
 	RedirectCode      int             `json:"redirect_code,omitempty"`
 	RedirectKeepPath  bool            `json:"redirect_keep_path,omitempty"`
@@ -535,6 +547,7 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 		ConfigPath: p, CreatedAt: payload.CreatedAt, Index: payload.Index,
 		Rewrite: payload.Rewrite, ProxyTarget: payload.ProxyTarget, ProxyWebSocket: payload.ProxyWebSocket,
 		ProxyUpstreams: payload.ProxyUpstreams, ProxyLBMethod: payload.ProxyLBMethod,
+		ProxyCache:     payload.ProxyCache,
 		RedirectTarget: payload.RedirectTarget, RedirectCode: payload.RedirectCode,
 		RedirectKeepPath: payload.RedirectKeepPath, RedirectPaths: payload.RedirectPaths,
 		ErrorPages: payload.ErrorPages,
@@ -601,6 +614,16 @@ func parseMarker(body string) (markerPayload, bool) {
 		}
 		p.ProxyTarget, p.ProxyWebSocket = target, ws
 		p.ProxyUpstreams, p.ProxyLBMethod = ups, lbMethod
+		cache, err := normalizeProxyCache(p.ProxyCache)
+		if err != nil {
+			return markerPayload{}, false
+		}
+		if cache != nil && target == "" && len(ups) == 0 {
+			// A cache without a proxy owner would render proxy_cache directives
+			// into a static location; the file is not ours to serve.
+			return markerPayload{}, false
+		}
+		p.ProxyCache = cache
 		redirect, code, keepPath, err := normalizeRedirect(p.RedirectTarget, p.RedirectCode, p.RedirectKeepPath)
 		if err != nil {
 			return markerPayload{}, false
@@ -1027,10 +1050,25 @@ func (m *Manager) Delete(name string) (Site, error) {
 		upTable := renderUpstreams(upRows)
 		files = append(files, configFile{Path: tablePath, Body: &upTable, OwnedCheck: parseUpstreamsMarker})
 	}
+	// The proxy-cache table follows the same rule: the deleted site's zone row
+	// goes in the same transaction, and the last row removes the file.
+	cacheRows, err := m.cacheRows("", nil, name)
+	if err != nil {
+		restoreLink()
+		return Site{}, err
+	}
+	files, err = m.cacheTableFile(cacheRows, files)
+	if err != nil {
+		restoreLink()
+		return Site{}, err
+	}
 	if err := m.applyFiles(files); err != nil {
 		restoreLink()
 		return Site{}, err
 	}
+	// Cached bytes are panel data tied to the deleted vhost; drop them only
+	// after the transaction committed.
+	m.removeCacheDir(name)
 	// The certificate is panel data tied to this site, so it goes with the
 	// config. The document root stays; that is operator data.
 	if site.TLS != nil {
@@ -1055,6 +1093,7 @@ func render(s Site) string {
 		ProxyWebSocket:    s.ProxyWebSocket,
 		ProxyUpstreams:    s.ProxyUpstreams,
 		ProxyLBMethod:     s.ProxyLBMethod,
+		ProxyCache:        s.ProxyCache,
 		RedirectTarget:    s.RedirectTarget,
 		RedirectCode:      s.RedirectCode,
 		RedirectKeepPath:  s.RedirectKeepPath,

@@ -123,6 +123,21 @@ func (s *Server) siteProxyLBManager() (platform.SiteProxyLBManager, string) {
 	return pm, ""
 }
 
+// siteProxyCacheManager is the optional response-cache interface. A provider
+// without it (or without an http-level wildcard include on the host) returns
+// 403 capability with the provider's reason instead of a dead cache toggle.
+func (s *Server) siteProxyCacheManager() (platform.SiteProxyCacheManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	cm, ok := m.(platform.SiteProxyCacheManager)
+	if !ok || cm == nil {
+		return nil, "该平台的站点 Provider 没有实现反向代理缓存"
+	}
+	return cm, ""
+}
+
 // siteRedirectManager is the optional site-wide redirect interface. A provider
 // without it returns 403 capability with the reason below.
 func (s *Server) siteRedirectManager() (platform.SiteRedirectManager, string) {
@@ -585,6 +600,40 @@ func (s *Server) handleSiteProxyUpstreams(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_proxy_upstreams", "更新负载均衡失败："+err.Error())
+	}
+}
+
+// handleSiteProxyCache is PUT /api/v1/sites/{name}/proxy-cache. The body is
+// {"cache":{"valid_seconds":60,"max_size_mb":1024,"inactive_minutes":60}};
+// {"cache":null} clears the cache and removes the site's cached bytes. The
+// provider validates the bounds, requires a proxy owner for enabling, owns
+// the http-level proxy_cache_path table, and writes vhost plus table in one
+// test-before-reload transaction.
+func (s *Server) handleSiteProxyCache(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteProxyCacheManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Cache *platform.SiteProxyCache `json:"cache"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetProxyCache(chiParam(r, "name"), body.Cache)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_proxy_cache", "更新代理缓存失败："+err.Error())
 	}
 }
 

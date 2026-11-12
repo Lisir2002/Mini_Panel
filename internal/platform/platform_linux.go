@@ -39,6 +39,7 @@ var (
 	_ SiteRewriteManager      = linuxSites{}
 	_ SiteProxyManager        = linuxSites{}
 	_ SiteProxyLBManager      = linuxSites{}
+	_ SiteProxyCacheManager   = linuxSites{}
 	_ SiteRedirectManager     = linuxSites{}
 	_ SiteRedirectPathManager = linuxSites{}
 	_ SiteErrorPageManager    = linuxSites{}
@@ -126,6 +127,11 @@ func (linuxPlatform) Sites() (SiteManager, bool) {
 	if err != nil {
 		return nil, false
 	}
+	// Cached response bytes are runtime data, not config: they live under the
+	// conventional /var/cache root, one directory per site, never inside
+	// /etc/nginx and not under the 0700 data dir — nginx workers run as an
+	// unprivileged user and must be able to reach the cache directories.
+	m.CacheDir = rooted("/var/cache/minipanel")
 	// Writing /etc/nginx and reloading the server needs root. Reporting the
 	// capability without this check is how a panel ends up with a page whose
 	// every button returns EACCES.
@@ -258,6 +264,24 @@ func (l linuxSites) SetProxyUpstreams(name string, upstreams []SiteProxyUpstream
 		native[i] = nginx.ProxyUpstream{Target: u.Target, Weight: u.Weight}
 	}
 	s, err := l.m.SetProxyUpstreams(name, native, method, websocket)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
+// SetProxyCache enables, replaces or clears the response cache. The nginx
+// writer owns bounds validation, the http-level proxy_cache_path table and
+// the cache-directory lifecycle; this adapter translates the neutral policy
+// and errors.
+func (l linuxSites) SetProxyCache(name string, cache *SiteProxyCache) (SiteInfo, error) {
+	var native *nginx.ProxyCache
+	if cache != nil {
+		native = &nginx.ProxyCache{
+			ValidSeconds: cache.ValidSeconds, MaxSizeMB: cache.MaxSizeMB, InactiveMinutes: cache.InactiveMinutes,
+		}
+	}
+	s, err := l.m.SetProxyCache(name, native)
 	if err != nil {
 		return SiteInfo{}, mapNginxErr(err)
 	}
@@ -628,6 +652,11 @@ func toSiteInfo(s nginx.Site) SiteInfo {
 		out.ProxyUpstreams = make([]SiteProxyUpstream, len(s.ProxyUpstreams))
 		for i, u := range s.ProxyUpstreams {
 			out.ProxyUpstreams[i] = SiteProxyUpstream{Target: u.Target, Weight: u.Weight}
+		}
+	}
+	if s.ProxyCache != nil {
+		out.ProxyCache = &SiteProxyCache{
+			ValidSeconds: s.ProxyCache.ValidSeconds, MaxSizeMB: s.ProxyCache.MaxSizeMB, InactiveMinutes: s.ProxyCache.InactiveMinutes,
 		}
 	}
 	if len(s.ErrorPages) > 0 {

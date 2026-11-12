@@ -137,6 +137,12 @@ function proxyFilled() {
     : proxyForm.value.upstreams.some(u => u.target.trim());
 }
 
+// 响应缓存挂在代理的 location / 里：只有反向代理站点能开。三个数字全部必填，
+// 边界与后端一致；关闭开关并保存走 {"cache":null}，后端会连带删除已缓存字节。
+const cacheOpen = ref(false);
+const cacheTarget = ref(null);
+const cacheForm = ref({ enabled: false, valid_seconds: 60, max_size_mb: 512, inactive_minutes: 60 });
+
 const redirectOpen = ref(false);
 const redirectTarget = ref(null);
 const redirectForm = ref({ target: "", code: 301, keep_path: true });
@@ -614,6 +620,47 @@ async function saveProxy() {
   } catch (e) {
     // 400 invalid_site（URL / 权重 / 算法不合法、与伪静态冲突、或本机没有 http 级通配
     // include）与 422 nginx_rejected 都带后端原文；后端在返回前已回滚，页面原样显示。
+    error.value = e.message;
+    await load();
+  } finally { busy.value = false; }
+}
+
+function cacheLabel(r) {
+  const c = r.proxy_cache;
+  if (!c) return "";
+  return "响应缓存 · " + c.valid_seconds + "s · 上限 " + c.max_size_mb + "MB · 闲置 " + c.inactive_minutes + "min";
+}
+
+function openCache(r) {
+  error.value = ""; msg.value = "";
+  cacheTarget.value = r;
+  cacheForm.value = r.proxy_cache
+    ? { enabled: true, valid_seconds: r.proxy_cache.valid_seconds, max_size_mb: r.proxy_cache.max_size_mb, inactive_minutes: r.proxy_cache.inactive_minutes }
+    : { enabled: false, valid_seconds: 60, max_size_mb: 512, inactive_minutes: 60 };
+  cacheOpen.value = true;
+}
+
+async function saveCache() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const f = cacheForm.value;
+    const cache = f.enabled
+      ? { valid_seconds: Number(f.valid_seconds), max_size_mb: Number(f.max_size_mb), inactive_minutes: Number(f.inactive_minutes) }
+      : null;
+    const site = await api("/api/v1/sites/" + encodeURIComponent(cacheTarget.value.name) + "/proxy-cache",
+      { method: "PUT", body: JSON.stringify({ cache }) });
+    if (site.proxy_cache) {
+      msg.value = site.name + " 已启用响应缓存（" + cacheLabel(site) +
+        "）；只缓存 GET/HEAD 的 200/302 响应，带 Authorization 或 Cookie 的请求双向绕过。" +
+        "可用响应头 X-Cache-Status（MISS/HIT/BYPASS）验证；vhost 与 cache 表在同一次事务里通过 nginx -t 并重载。";
+    } else {
+      msg.value = site.name + " 已关闭响应缓存并删除已缓存字节；nginx 已通过 nginx -t 并重载。";
+    }
+    cacheOpen.value = false;
+    await load();
+  } catch (e) {
+    // 400 invalid_site（越界、没有代理宿主、本机没有 http 级通配 include）与
+    // 422 nginx_rejected 都带后端原文；后端在返回前已回滚，页面原样显示。
     error.value = e.message;
     await load();
   } finally { busy.value = false; }
@@ -1200,6 +1247,7 @@ onMounted(load);
                 <span v-if="r.proxy_websocket"> · WebSocket</span>
                 <div><code class="mp-code">{{ r.proxy_upstreams.map(u => u.target + (u.weight > 1 ? " ×" + u.weight : "")).join(" ") }}</code></div>
               </div>
+              <div v-if="r.proxy_cache" class="mp-muted mp-tiny">{{ cacheLabel(r) }}</div>
               <div v-if="r.redirect_target" class="mp-muted mp-tiny">
                 跳转 {{ r.redirect_code || 301 }} · <code class="mp-code">{{ r.redirect_target }}</code>
                 <span v-if="r.redirect_keep_path"> · 保留路径</span>
@@ -1266,6 +1314,10 @@ onMounted(load);
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
                 {{ proxyOn(r) ? "代理" : "反代" }}
+              </el-button>
+              <el-button size="small" text type="primary" :disabled="!proxyOn(r)"
+                :title="proxyOn(r) ? '' : '响应缓存只对反向代理站点开放；先启用代理或负载均衡。'" @click="openCache(r)">
+                {{ r.proxy_cache ? "缓存" : "响应缓存" }}
               </el-button>
               <el-button size="small" text type="primary" @click="openRedirect(r)">
                 {{ r.redirect_target ? "跳转" : "整站跳转" }}
@@ -1389,6 +1441,8 @@ onMounted(load);
           title="该站点正在整站跳转：两者都占用 location /。后端会拒绝保存代理；请先在“整站跳转”对话框里清空跳转目标。" />
         <el-alert v-if="proxyTarget?.hotlink" type="info" :closable="false" style="margin-bottom:10px"
           title="该站点已启用防盗链：静态资源由本机处理。后端会拒绝保存代理；请先在“防盗链”对话框里关闭。" />
+        <el-alert v-if="proxyTarget?.proxy_cache" type="warning" :closable="false" style="margin-bottom:10px"
+          title="该站点已启用响应缓存：清空代理并保存会在同一次事务里连带清除缓存策略与已缓存字节；单目标与负载均衡之间切换则保留缓存。" />
         <el-form label-position="top" @submit.prevent="saveProxy">
           <el-form-item label="代理形式（两种都占用 location /，保存一种会清掉另一种）">
             <el-radio-group v-model="proxyForm.mode">
@@ -1442,6 +1496,55 @@ onMounted(load);
           <el-button size="small" type="primary" :loading="busy"
             :disabled="proxyFilled() && (!!rewriteLabel(proxyTarget) || !!proxyTarget?.redirect_target || !!proxyTarget?.hotlink)" @click="saveProxy">
             {{ proxyFilled() ? "保存" : "清除代理" }}
+          </el-button>
+        </template>
+      </el-dialog>
+
+      <el-dialog v-model="cacheOpen" :title="'响应缓存 · ' + (cacheTarget?.name || '')" width="min(600px, 94vw)">
+        <el-alert v-if="cacheTarget?.proxy_cache" type="info" :closable="false" style="margin-bottom:10px"
+          :title="'该站点当前缓存：' + cacheLabel(cacheTarget) + '。关闭开关并保存即可清除策略与已缓存字节。'" />
+        <el-form label-position="top" @submit.prevent="saveCache">
+          <el-form-item>
+            <el-switch v-model="cacheForm.enabled" active-text="启用响应缓存" inactive-text="关闭" />
+            <div class="mp-hint" style="margin-top:6px">
+              缓存挂在反向代理的 <code class="mp-code">location /</code> 里，只缓存 GET/HEAD 请求的
+              200/302 响应（301 永久跳转不缓存）；带 Authorization 或 Cookie 的请求双向绕过缓存，
+              不会把某个用户的登录态响应发给别人。缓存键包含协议、Host、方法与完整 URI。
+            </div>
+          </el-form-item>
+          <template v-if="cacheForm.enabled">
+            <el-form-item label="缓存有效期（秒，1-2592000，即最长 30 天）">
+              <el-input-number v-model="cacheForm.valid_seconds" :min="1" :max="2592000" :step="10" controls-position="right" style="width:100%" />
+              <div class="mp-hint" style="margin-top:6px">
+                200/302 响应在缓存里保留这么久；到期后下一次请求会回源重新验证。上游返回
+                Cache-Control / Expires 时以上游为准。
+              </div>
+            </el-form-item>
+            <el-form-item label="磁盘容量上限（MB，10-102400）">
+              <el-input-number v-model="cacheForm.max_size_mb" :min="10" :max="102400" :step="128" controls-position="right" style="width:100%" />
+              <div class="mp-hint" style="margin-top:6px">
+                超出上限时 nginx 自动淘汰最久未用的缓存文件；缓存字节集中放在
+                /var/cache/minipanel/&lt;站点&gt;/，删除站点或关闭缓存时一并清理。
+              </div>
+            </el-form-item>
+            <el-form-item label="闲置淘汰（分钟，1-43200）">
+              <el-input-number v-model="cacheForm.inactive_minutes" :min="1" :max="43200" :step="10" controls-position="right" style="width:100%" />
+              <div class="mp-hint" style="margin-top:6px">
+                这么久没被访问的缓存条目会被淘汰，与有效期无关。
+              </div>
+            </el-form-item>
+          </template>
+          <div class="mp-hint">
+            保存后可用响应头 <code class="mp-code">X-Cache-Status</code> 验证：首次请求 MISS，
+            随后同一 URL 为 HIT，带 Cookie/Authorization 为 BYPASS。vhost 与 http 级
+            proxy_cache_path 表在同一次事务里落盘，一起通过 <code class="mp-code">nginx -t</code>
+            → reload，失败一起回滚；本机 nginx.conf 没有通配 include 时后端会带着理由拒绝。
+          </div>
+        </el-form>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="cacheOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy" @click="saveCache">
+            {{ cacheForm.enabled ? "保存" : "清除缓存" }}
           </el-button>
         </template>
       </el-dialog>

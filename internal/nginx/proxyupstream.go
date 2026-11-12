@@ -261,6 +261,11 @@ func (m *Manager) SetProxyUpstreams(name string, ups []ProxyUpstream, method str
 	site.ProxyUpstreams = ups
 	site.ProxyLBMethod = method
 	site.ProxyWebSocket = websocket
+	if len(ups) == 0 && site.ProxyCache != nil {
+		// Same rule as SetProxy: clearing the last proxy owner drops the cache
+		// policy and its zone row in the same transaction.
+		site.ProxyCache = nil
+	}
 	body := render(site)
 	table := renderUpstreams(rows)
 	files := []configFile{{Path: site.ConfigPath, Body: &body}}
@@ -271,8 +276,19 @@ func (m *Manager) SetProxyUpstreams(name string, ups []ProxyUpstream, method str
 		}
 		files = append(files, configFile{Path: tablePath, Body: &table, OwnedCheck: parseUpstreamsMarker})
 	}
+	cacheRows, err := m.cacheRows(name, site.ProxyCache)
+	if err != nil {
+		return Site{}, err
+	}
+	files, err = m.cacheTableFile(cacheRows, files)
+	if err != nil {
+		return Site{}, err
+	}
 	if err := m.applyFiles(files); err != nil {
 		return Site{}, err
+	}
+	if len(ups) == 0 {
+		m.removeCacheDir(name)
 	}
 	return site, nil
 }

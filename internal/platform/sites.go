@@ -49,6 +49,10 @@ type SiteInfo struct {
 	// block, so callers only ever name backends, never nginx text.
 	ProxyUpstreams []SiteProxyUpstream `json:"proxy_upstreams,omitempty"`
 	ProxyLBMethod  string              `json:"proxy_lb_method,omitempty"`
+	// ProxyCache is the response-cache policy for whichever proxy form owns
+	// location /; nil means no cache. The provider owns the http-level
+	// proxy_cache_path definition and the on-disk cache directory.
+	ProxyCache *SiteProxyCache `json:"proxy_cache,omitempty"`
 	// RedirectTarget is the validated absolute URL when the site redirects
 	// every request; empty means no redirect. RedirectCode is 301 or 302 and
 	// RedirectKeepPath says whether the original request path is appended.
@@ -152,6 +156,16 @@ type SiteProxyUpstream struct {
 	Weight int    `json:"weight,omitempty"`
 }
 
+// SiteProxyCache is one site's reverse-proxy response cache in platform-neutral
+// form. The provider validates the bounds, derives the zone name and cache
+// directory from the site name, and writes the http-level proxy_cache_path
+// definitions itself — a caller cannot name a zone or a path.
+type SiteProxyCache struct {
+	ValidSeconds    int `json:"valid_seconds"`
+	MaxSizeMB       int `json:"max_size_mb"`
+	InactiveMinutes int `json:"inactive_minutes"`
+}
+
 // SiteTrafficLimit is one site's traffic ceiling in platform-neutral form. The
 // provider validates the rate shape and the numeric bounds, derives the zone
 // names from the site name, and writes the nginx zone definitions themselves —
@@ -243,6 +257,16 @@ type SiteProxyManager interface {
 // Setting a single target via SetProxy clears the table, and vice versa.
 type SiteProxyLBManager interface {
 	SetProxyUpstreams(name string, upstreams []SiteProxyUpstream, method string, websocket bool) (SiteInfo, error)
+}
+
+// SiteProxyCacheManager is the optional response-cache half of the reverse
+// proxy. It is separate for the same reason as SiteProxyLBManager: nginx
+// defines proxy_cache_path outside any server block, so a host whose config
+// has no wildcard http-level include cannot offer caching, and that reason
+// has to reach the UI. A nil policy is always an allowed clear operation;
+// enabling requires a proxy owner, and clearing the proxy drops the cache.
+type SiteProxyCacheManager interface {
+	SetProxyCache(name string, cache *SiteProxyCache) (SiteInfo, error)
 }
 
 // SiteRedirectManager is the optional site-wide redirect half of a site writer.
