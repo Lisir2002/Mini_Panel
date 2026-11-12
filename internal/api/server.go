@@ -140,6 +140,8 @@ func (s *Server) routes() chi.Router {
 			r.Put("/sites/{name}/auth", s.handleSiteAuth)
 			r.Put("/sites/{name}/realip", s.handleSiteRealIP)
 			r.Put("/sites/{name}/meta", s.handleSiteMeta)
+			r.Put("/sites/{name}/autoindex", s.handleSiteAutoIndex)
+			r.Put("/sites/{name}/force-https", s.handleSiteForceHTTPS)
 			r.Post("/sites/{name}/tls", s.handleSiteTLSSet)
 			r.Delete("/sites/{name}/tls", s.handleSiteTLSClear)
 			r.Post("/sites/{name}/acme", s.handleSiteACME)

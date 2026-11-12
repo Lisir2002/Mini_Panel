@@ -187,7 +187,7 @@ paths:
         /api/v1/capabilities 里 site 那一项的 reason（本机没有 nginx / 面板不是
         root / 检测到 Apache 而写 Provider 目前只有 nginx），不在这里另写一套说法。
         每行是 {name, domains, root, config_path, enabled, created_at, tls?,
-        index?, php_version?, php_socket?, php_socket_state?, group?, note?}；enabled 在
+        index?, php_version?, php_socket?, php_socket_state?, autoindex?, group?, note?}；enabled 在
         sites-enabled 布局里等价于软链接存在，conf.d 布局里恒为 true。group 与 note 是
         面板侧的分组与备注，来自 SQLite 的 site_meta 表按站点名 join，不进 vhost 也不进
         marker，省略表示该站点没有被标注（详见 /api/v1/sites/{name}/meta）。index 只在
@@ -217,6 +217,9 @@ paths:
         字段为 {request_rate?, burst?, connections?, status?}；request_rate 是归一化后的
         速率（如 10r/s），burst 只在有速率时出现，status 为 0 时省略且表示 nginx 默认的 503。
         它引用的共享内存区由面板写在 http 级的独立文件里，与站点 vhost 同一次事务落盘。
+        autoindex=true 表示站点开启了 server 级目录列表（省略/false 表示关闭，详见
+        /api/v1/sites/{name}/autoindex）。tls.redirect=true 就是"强制 HTTPS"，它由证书接口设置，
+        也可用 /api/v1/sites/{name}/force-https 独立开关，前提同样是站点已启用 HTTPS。
       responses:
         "200": { description: 返回 total 与 items }
         "403": { $ref: "#/components/responses/CSRF" }
@@ -780,6 +783,69 @@ paths:
         "400": { description: 分组或备注超长/含控制字符（invalid_site） }
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { description: 面板没有管理这个站点 }
+  /api/v1/sites/{name}/autoindex:
+    put:
+      tags: [site]
+      summary: 开启或关闭站点的目录列表（autoindex）
+      description: |
+        M2 第十七片：请求体 {enabled}。enabled=true 在 vhost 的 server 级写一条固定
+        的 `autoindex on;`，enabled=false 则不写（沿用 nginx 默认关闭）。这是面板常量指令，
+        调用方不能提交任何配置文本。它只改变"请求落到一个没有默认文档的目录"时的行为，
+        不占用也不修改 location /、PHP、代理、伪静态、整站/按路径跳转、防盗链、访问密码、
+        真实 IP 与流量限制，因此与它们全部共存。关闭是始终允许的路径。
+        写配置走"渲染整份 vhost → nginx -t → 通过才 reload"，失败恢复原字节，响应 422。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                  description: true 开启目录列表，false 关闭（默认）
+      responses:
+        "200": { description: 已生效，返回更新后的站点行（含 autoindex） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx 拒绝，配置已回滚（nginx_rejected） }
+  /api/v1/sites/{name}/force-https:
+    put:
+      tags: [site]
+      summary: 开启或关闭站点的强制 HTTPS 跳转
+      description: |
+        M2 第十七片：请求体 {enabled}。这是证书接口早已携带的 TLS.redirect 状态的独立开关：
+        enabled=true 渲染 80 端口的 301 跳转块并从 TLS server 里去掉 listen 80，enabled=false
+        反过来。它仍是固定模板，调用方提交不了一行配置文本。前提：站点必须已经启用 HTTPS——
+        enabled=true 而站点没有可用证书时返回 400 invalid_site 并说明原因，因为把 HTTP 跳到一个
+        没配好的 443 正是本项目拒绝提供的死按钮。enabled=false 对已启用 HTTPS 的站点始终允许，
+        对纯 HTTP 站点是无操作（本来就没有跳转可去）。写配置走 test-before-reload，失败回滚。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                  description: true 强制 HTTP 跳转 HTTPS（需已启用 HTTPS），false 关闭
+      responses:
+        "200": { description: 已生效，返回更新后的站点行（tls.redirect 反映该状态） }
+        "400": { description: 站点未启用 HTTPS 却要求强制跳转（invalid_site） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx 拒绝，配置已回滚（nginx_rejected） }
   /api/v1/sites/{name}/tls:
     post:
       tags: [site]

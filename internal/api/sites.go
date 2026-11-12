@@ -196,6 +196,22 @@ func (s *Server) siteTrafficLimitManager() (platform.SiteTrafficLimitManager, st
 	return lm, ""
 }
 
+// siteBehaviorManager is the optional directory-listing / force-HTTPS interface.
+// A provider without it cannot offer either switch, so both endpoints answer 403
+// capability with the same reason rather than showing a toggle that writes
+// nothing.
+func (s *Server) siteBehaviorManager() (platform.SiteBehaviorManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	bm, ok := m.(platform.SiteBehaviorManager)
+	if !ok || bm == nil {
+		return nil, "该平台的站点 Provider 没有实现目录列表 / 强制 HTTPS 开关"
+	}
+	return bm, ""
+}
+
 // normalizeSiteMeta validates the panel-side group label and free-text note.
 // Neither reaches nginx — this only guards what goes into the store, so the
 // bounds are about keeping the UI list sane, not about config injection. A
@@ -574,6 +590,73 @@ func (s *Server) handleSiteHotlink(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_hotlink", "更新防盗链失败："+err.Error())
+	}
+}
+
+// handleSiteAutoIndex is PUT /api/v1/sites/{name}/autoindex. The body is
+// {"enabled":true}. enabled=false turns off nginx's server-level directory
+// listing. The provider renders the fixed `autoindex on` directive through
+// test-before-reload, so disabling is always allowed and enabling never touches
+// a location block.
+func (s *Server) handleSiteAutoIndex(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteBehaviorManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetAutoIndex(chiParam(r, "name"), body.Enabled)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_autoindex", "更新目录列表失败："+err.Error())
+	}
+}
+
+// handleSiteForceHTTPS is PUT /api/v1/sites/{name}/force-https. The body is
+// {"enabled":true}. enabled=true makes plain HTTP redirect to HTTPS; it is
+// refused with a reason when the site has no enabled certificate, because a
+// redirect to an unconfigured 443 is exactly the dead button this panel promises
+// never to render. enabled=false clears the redirect and is always allowed on an
+// HTTPS site.
+func (s *Server) handleSiteForceHTTPS(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteBehaviorManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetForceHTTPS(chiParam(r, "name"), body.Enabled)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_force_https", "更新强制 HTTPS 失败："+err.Error())
 	}
 }
 

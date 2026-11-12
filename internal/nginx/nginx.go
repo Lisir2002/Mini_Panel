@@ -217,6 +217,10 @@ type Site struct {
 	// the local asset block unreachable.
 	Hotlink           bool `json:"hotlink,omitempty"`
 	HotlinkAllowEmpty bool `json:"hotlink_allow_empty,omitempty"`
+	// AutoIndex turns on nginx's server-level directory listing. It only changes
+	// what happens to a request that resolves to a directory with no default
+	// document; it never disables the index or the location handlers.
+	AutoIndex bool `json:"autoindex,omitempty"`
 	// AuthUser is the Basic Auth username when the whole vhost is protected.
 	// AuthFile is the panel-owned password file for this site; it is derived
 	// from AuthDir on every read and never stored in the marker, because the
@@ -268,6 +272,7 @@ type markerPayload struct {
 	Limits            *TrafficLimit  `json:"limits,omitempty"`
 	Hotlink           bool           `json:"hotlink,omitempty"`
 	HotlinkAllowEmpty bool           `json:"hotlink_allow_empty,omitempty"`
+	AutoIndex         bool           `json:"autoindex,omitempty"`
 	AuthUser          string         `json:"auth_user,omitempty"`
 	RealIPFrom        []string       `json:"real_ip_from,omitempty"`
 	RealIPHeader      string         `json:"real_ip_header,omitempty"`
@@ -455,7 +460,8 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 		RedirectTarget: payload.RedirectTarget, RedirectCode: payload.RedirectCode,
 		RedirectKeepPath: payload.RedirectKeepPath, RedirectPaths: payload.RedirectPaths,
 		Hotlink: payload.Hotlink, HotlinkAllowEmpty: payload.HotlinkAllowEmpty,
-		AuthUser: payload.AuthUser, AuthFile: authPath(m.AuthDir, payload.Name),
+		AutoIndex: payload.AutoIndex,
+		AuthUser:  payload.AuthUser, AuthFile: authPath(m.AuthDir, payload.Name),
 		RealIPFrom: payload.RealIPFrom, RealIPHeader: payload.RealIPHeader,
 		PHPVersion: payload.PHPVersion, PHPSocket: payload.PHPSocket,
 	}
@@ -888,6 +894,7 @@ func render(s Site) string {
 		Limits:            s.Limits,
 		Hotlink:           s.Hotlink,
 		HotlinkAllowEmpty: s.HotlinkAllowEmpty,
+		AutoIndex:         s.AutoIndex,
 		AuthUser:          s.AuthUser,
 		RealIPFrom:        s.RealIPFrom,
 		RealIPHeader:      s.RealIPHeader,

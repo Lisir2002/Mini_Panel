@@ -420,6 +420,14 @@ func renderServer(s Site, tlsOn bool) string {
 	default:
 		b.WriteString("    index index.html index.htm;\n")
 	}
+	if s.AutoIndex {
+		// Server-level directory listing. It is a fixed directive with no
+		// arguments the caller controls: when on, a request that resolves to a
+		// directory with no default document gets nginx's listing instead of a
+		// 403/404. It does not own `location /`, so it coexists with every other
+		// site feature.
+		b.WriteString("    autoindex on;\n")
+	}
 	if tlsOn {
 		b.WriteString("\n    ssl_certificate " + s.TLS.CertPath + ";\n")
 		b.WriteString("    ssl_certificate_key " + s.TLS.KeyPath + ";\n")

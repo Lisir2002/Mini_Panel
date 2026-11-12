@@ -36,6 +36,7 @@ type fakeSites struct {
 	hotlinkErr       error
 	authErr          error
 	realIPErr        error
+	behaviorErr      error
 	created          int
 	deleted          int
 	tlsSets          int
@@ -52,6 +53,8 @@ type fakeSites struct {
 	hotlinkSets      int
 	authSets         int
 	realIPSets       int
+	autoIndexSets    int
+	forceHTTPSSets   int
 	lastCertLen      int
 }
 
@@ -282,6 +285,43 @@ func (f *fakeSites) SetRealIP(name string, from []string, header string) (platfo
 	}
 	f.sites[name] = s
 	f.realIPSets++
+	return s, nil
+}
+
+func (f *fakeSites) SetAutoIndex(name string, enabled bool) (platform.SiteInfo, error) {
+	if f.behaviorErr != nil {
+		return platform.SiteInfo{}, f.behaviorErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	s.AutoIndex = enabled
+	f.sites[name] = s
+	f.autoIndexSets++
+	return s, nil
+}
+
+// SetForceHTTPS mirrors the provider precondition at the HTTP layer: enabling
+// the redirect on a site with no enabled certificate is refused with
+// ErrSiteInvalid, exactly like the nginx writer. Clearing is always allowed for
+// an HTTPS site.
+func (f *fakeSites) SetForceHTTPS(name string, enabled bool) (platform.SiteInfo, error) {
+	if f.behaviorErr != nil {
+		return platform.SiteInfo{}, f.behaviorErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	if enabled && (s.TLS == nil || !s.TLS.Enabled) {
+		return platform.SiteInfo{}, fmt.Errorf("%w：强制 HTTPS 需要先为该站点启用 HTTPS", platform.ErrSiteInvalid)
+	}
+	if s.TLS != nil {
+		s.TLS.Redirect = enabled
+	}
+	f.sites[name] = s
+	f.forceHTTPSSets++
 	return s, nil
 }
 

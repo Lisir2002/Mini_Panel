@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五、十六：静态站点、站点证书、
+// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五、十六、十七：静态站点、站点证书、
 // PHP 版本绑定、基础设置编辑、伪静态模板、反向代理、整站跳转、防盗链、访问密码、真实 IP 解析、
 // 按路径跳转表、流量限制与分组 / 备注 / 搜索。
 // 这一页的边界与后端能力位图是同一句话，不另写一套：
@@ -40,6 +40,9 @@ import { store } from "../store";
 //   * 分组与备注是唯一一项完全不碰 nginx 的站点控制：它只写进面板自己的 SQLite（site_meta 表），
 //     列表按站点名 join 回来，既不进 vhost 也不进 marker，所以没有 nginx -t、没有 422。站点必须是
 //     Provider 当前列出的站点，否则后端 404；搜索与分组过滤都在已加载的列表上做，不额外打后端。
+//   * 目录列表是 server 级的固定 `autoindex` 开关（不占用 location /，与所有其它功能共存）；强制 HTTPS
+//     只在站点已启用证书时出现，因为它翻转的就是证书接口早已携带的 tls.redirect——没有证书时后端会
+//     以理由拒绝，页面也就不摆一个点了必然报错的按钮。两者都走 nginx -t → 通过才 reload，失败回滚。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
 //     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
 //     而不是等请求失败后才解释。
@@ -161,6 +164,34 @@ async function saveMeta() {
     // 400 分组/备注超长或含控制字符、404 站点不是面板管理的，都带后端原文。
     error.value = e.message;
   } finally { busy.value = false; }
+}
+
+// 目录列表是一个布尔开关：按钮直接提交取反后的值，后端渲染固定的 `autoindex`
+// 指令并走 nginx -t → reload。开关状态以刷新后的列表为准，页面不自己记住。
+async function toggleAutoIndex(r) {
+  error.value = ""; msg.value = ""; busy.value = true;
+  const want = !r.autoindex;
+  try {
+    await api("/api/v1/sites/" + encodeURIComponent(r.name) + "/autoindex",
+      { method: "PUT", body: JSON.stringify({ enabled: want }) });
+    msg.value = r.name + (want ? " 已开启目录列表（无默认文档的目录会列文件）" : " 已关闭目录列表");
+    await load();
+  } catch (e) { error.value = e.message; await load(); }
+  finally { busy.value = false; }
+}
+
+// 强制 HTTPS 只在站点已启用证书时出现：没有证书时后端会拒绝并给出理由，
+// 与其放一个点了必然报错的开关，不如按后端事实（r.tls.enabled）决定按钮可见性。
+async function toggleForceHTTPS(r) {
+  error.value = ""; msg.value = ""; busy.value = true;
+  const want = !(r.tls && r.tls.redirect);
+  try {
+    await api("/api/v1/sites/" + encodeURIComponent(r.name) + "/force-https",
+      { method: "PUT", body: JSON.stringify({ enabled: want }) });
+    msg.value = r.name + (want ? " 已开启强制 HTTPS（HTTP 请求 301 到 HTTPS）" : " 已关闭强制 HTTPS");
+    await load();
+  } catch (e) { error.value = e.message; await load(); }
+  finally { busy.value = false; }
 }
 
 function blankRedirectPathRule() {
@@ -904,7 +935,7 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:820px;white-space:nowrap">
+            <td style="width:1040px;white-space:nowrap">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
@@ -927,6 +958,18 @@ onMounted(load);
               <el-button size="small" text type="primary" @click="openMeta(r)">
                 {{ r.group || r.note ? "分组备注" : "分组/备注" }}
               </el-button>
+              <el-button size="small" text type="primary" @click="toggleAutoIndex(r)">
+                {{ r.autoindex ? "关目录列表" : "目录列表" }}
+              </el-button>
+              <el-popconfirm v-if="r.tls?.enabled"
+                :title="r.tls.redirect ? '关闭强制 HTTPS？80 端口将恢复直接提供服务，不再 301 到 443。' : '开启强制 HTTPS？所有 HTTP 请求将 301 跳转到 HTTPS（ACME 续期路径由后端豁免）。'"
+                confirm-button-text="确认" cancel-button-text="取消" width="300" @confirm="toggleForceHTTPS(r)">
+                <template #reference>
+                  <el-button size="small" text type="primary">
+                    {{ r.tls.redirect ? "关强制HTTPS" : "强制HTTPS" }}
+                  </el-button>
+                </template>
+              </el-popconfirm>
               <el-button size="small" text type="primary" :disabled="!phpAvailable && !r.php_version" @click="openPHP(r)">
                 PHP
               </el-button>

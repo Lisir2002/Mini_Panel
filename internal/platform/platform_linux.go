@@ -44,6 +44,7 @@ var (
 	_ SiteAuthManager         = linuxSites{}
 	_ SiteRealIPManager       = linuxSites{}
 	_ SiteTrafficLimitManager = linuxSites{}
+	_ SiteBehaviorManager     = linuxSites{}
 	_ SiteTLSManager          = linuxSites{}
 	_ SiteACMEManager         = linuxSites{}
 )
@@ -312,6 +313,29 @@ func (l linuxSites) SetLimits(name string, limit SiteTrafficLimit) (SiteInfo, er
 	return toSiteInfo(s), nil
 }
 
+// SetAutoIndex turns the site's server-level directory listing on or off. The
+// nginx writer owns the fixed `autoindex` directive and the test-before-reload
+// transaction; this adapter only translates the result.
+func (l linuxSites) SetAutoIndex(name string, enabled bool) (SiteInfo, error) {
+	s, err := l.m.SetAutoIndex(name, enabled)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
+// SetForceHTTPS turns the site's HTTP-to-HTTPS redirect on or off. The nginx
+// writer enforces the precondition (an enabled certificate) and renders the
+// redirect block, so forcing HTTPS is refused rather than half-configured when
+// the site has no TLS.
+func (l linuxSites) SetForceHTTPS(name string, enabled bool) (SiteInfo, error) {
+	s, err := l.m.SetForceHTTPS(name, enabled)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
 // resolvePHPBinding is the only version→socket translation. It returns empty
 // strings for "static site" and a typed error for anything discovery did not
 // prove, so the API can say "this host does not have PHP 8.2 (fpm)" instead of
@@ -482,6 +506,7 @@ func toSiteInfo(s nginx.Site) SiteInfo {
 		RedirectTarget: s.RedirectTarget, RedirectCode: s.RedirectCode,
 		RedirectKeepPath: s.RedirectKeepPath,
 		Hotlink:          s.Hotlink, HotlinkAllowEmpty: s.HotlinkAllowEmpty,
+		AutoIndex:  s.AutoIndex,
 		AuthUser:   s.AuthUser,
 		RealIPFrom: s.RealIPFrom, RealIPHeader: s.RealIPHeader,
 		ConfigPath: s.ConfigPath, Enabled: s.Enabled, CreatedAt: s.CreatedAt,

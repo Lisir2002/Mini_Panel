@@ -56,6 +56,11 @@ type SiteInfo struct {
 	// omitted until hotlink protection is enabled.
 	Hotlink           bool `json:"hotlink,omitempty"`
 	HotlinkAllowEmpty bool `json:"hotlink_allow_empty,omitempty"`
+	// AutoIndex is the server-level directory-listing switch. It is false when
+	// the site serves nginx's default 403/404 for a bare directory. Force-HTTPS
+	// is not a separate field here: it is `TLS.redirect`, which the certificate
+	// endpoints already set and the standalone PUT /force-https only toggles.
+	AutoIndex bool `json:"autoindex,omitempty"`
 	// AuthUser is the Basic Auth username when the whole site is password
 	// protected. The password itself is never stored in SiteInfo: only the
 	// provider's 0600 file holds a {SHA} hash, and no endpoint returns it.
@@ -234,6 +239,19 @@ type SiteRealIPManager interface {
 // Clearing (an empty limit) is always allowed.
 type SiteTrafficLimitManager interface {
 	SetLimits(name string, limit SiteTrafficLimit) (SiteInfo, error)
+}
+
+// SiteBehaviorManager is the optional pair of server-level behaviour switches:
+// directory listing (autoindex) and the HTTP-to-HTTPS redirect. Both are fixed
+// directives the provider renders — a caller only ever flips a boolean. It is a
+// single interface rather than two because both writes are the same kind of
+// operation (read the vhost, flip one server-level fact, test, reload), and a
+// provider that can do one can do the other. Force-HTTPS has its own precondition
+// (an enabled certificate) enforced in the provider, so a host without TLS tooling
+// still cannot be talked into a broken config.
+type SiteBehaviorManager interface {
+	SetAutoIndex(name string, enabled bool) (SiteInfo, error)
+	SetForceHTTPS(name string, enabled bool) (SiteInfo, error)
 }
 
 // SiteTLSManager is the optional certificate side of a site writer. Manual
