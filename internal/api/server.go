@@ -138,6 +138,8 @@ func (s *Server) routes() chi.Router {
 			r.Put("/sites/{name}/error-pages", s.handleSiteErrorPages)
 			r.Put("/sites/{name}/proxy-upstreams", s.handleSiteProxyUpstreams)
 			r.Put("/sites/{name}/cors", s.handleSiteCors)
+			r.Get("/sites/{name}/config", s.handleSiteConfigGet)
+			r.Put("/sites/{name}/config", s.handleSiteConfigPut)
 			r.Put("/sites/{name}/traffic-limit", s.handleSiteLimits)
 			r.Put("/sites/{name}/hotlink", s.handleSiteHotlink)
 			r.Put("/sites/{name}/auth", s.handleSiteAuth)

@@ -47,6 +47,7 @@ var (
 	_ SiteRealIPManager       = linuxSites{}
 	_ SiteTrafficLimitManager = linuxSites{}
 	_ SiteCorsManager         = linuxSites{}
+	_ SiteConfigManager       = linuxSites{}
 	_ SiteBehaviorManager     = linuxSites{}
 	_ SiteLogManager          = linuxSites{}
 	_ SiteTLSManager          = linuxSites{}
@@ -300,6 +301,26 @@ func (l linuxSites) SetErrorPages(name string, rules []SiteErrorPageRule) (SiteI
 		return SiteInfo{}, mapNginxErr(err)
 	}
 	return toSiteInfo(s), nil
+}
+
+// SiteConfig reads the exact on-disk bytes of one panel-owned vhost.
+func (l linuxSites) SiteConfig(name string) (SiteConfigInfo, error) {
+	c, err := l.m.ReadSiteConfig(name)
+	if err != nil {
+		return SiteConfigInfo{}, mapNginxErr(err)
+	}
+	return SiteConfigInfo{Name: c.Name, Path: c.Path, Content: c.Content}, nil
+}
+
+// SetSiteConfig writes operator-edited bytes through the nginx writer's
+// guarded transaction: marker immutable, nginx -t before reload, exact
+// restore on failure.
+func (l linuxSites) SetSiteConfig(name, content string) (SiteConfigInfo, error) {
+	c, err := l.m.WriteSiteConfig(name, content)
+	if err != nil {
+		return SiteConfigInfo{}, mapNginxErr(err)
+	}
+	return SiteConfigInfo{Name: c.Name, Path: c.Path, Content: c.Content}, nil
 }
 
 // SetCors replaces or clears the cross-origin policy. The nginx writer owns

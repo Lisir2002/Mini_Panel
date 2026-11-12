@@ -3,9 +3,9 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五、十六、十七、十八、十九、二十、廿一：静态站点、站点证书、
+// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五、十六、十七、十八、十九、二十、廿一、廿二：静态站点、站点证书、
 // PHP 版本绑定、基础设置编辑、伪静态模板、反向代理、整站跳转、防盗链、访问密码、真实 IP 解析、
-// 按路径跳转表、流量限制、分组 / 备注 / 搜索、目录列表 / 强制 HTTPS 开关、站点日志查看、自定义错误页、反向代理多上游负载均衡与 CORS 跨域策略。
+// 按路径跳转表、流量限制、分组 / 备注 / 搜索、目录列表 / 强制 HTTPS 开关、站点日志查看、自定义错误页、反向代理多上游负载均衡、CORS 跨域策略与受护栏的配置文件编辑。
 // 这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
@@ -64,6 +64,12 @@ import { store } from "../store";
 //     短路，不占用 location /，与所有站点功能共存；开启期间 OPTIONS 由本机直接回 204、不再
 //     转发到上游，上游自带的 CORS 头也不会被隐藏——这两条边界在对话框里原话写明。
 //     空来源列表清除策略，始终允许；* 与凭据开关互斥（浏览器禁止该组合，后端直接拒绝）。
+//   * 配置文件编辑是有护栏的编辑器，不是文件管理器：只读写面板自有 vhost（外部文件后端
+//     一律 404），GET 返回磁盘上的精确字节；保存时 `# minipanel-site:` 所有权标记行必须
+//     原样保留且只有一行，删改/复制都会被后端以理由拒绝。保存仍走 nginx -t → 通过才
+//     reload、失败恢复原字节。对话框把两条边界说清楚：标记行不可改（域名/根目录等用
+//     对应功能页），以及任何后续面板功能写入都会按 marker 重新生成整份配置、覆盖手工
+//     添加的指令——不假装手工编辑能永久生效。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
 //     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
 //     而不是等请求失败后才解释。
@@ -103,6 +109,10 @@ const rewritePresets = ref([]);
 const rewriteOpen = ref(false);
 const rewriteTarget = ref(null);
 const rewriteForm = ref({ preset: "none" });
+
+const configOpen = ref(false);
+const configTarget = ref(null);
+const configForm = ref({ path: "", content: "", original: "" });
 
 const corsOpen = ref(false);
 const corsTarget = ref(null);
@@ -709,6 +719,37 @@ async function saveAuth() {
   } finally { busy.value = false; }
 }
 
+async function openConfig(r) {
+  error.value = ""; msg.value = "";
+  configTarget.value = r;
+  busy.value = true;
+  try {
+    const cfg = await api("/api/v1/sites/" + encodeURIComponent(r.name) + "/config");
+    configForm.value = { path: cfg.path, content: cfg.content, original: cfg.content };
+    configOpen.value = true;
+  } catch (e) {
+    // 403 capability / 404 not_found 都带后端原文；不摆一个空编辑器。
+    error.value = e.message;
+  } finally { busy.value = false; }
+}
+
+async function saveConfig() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const cfg = await api("/api/v1/sites/" + encodeURIComponent(configTarget.value.name) + "/config",
+      { method: "PUT", body: JSON.stringify({ content: configForm.value.content }) });
+    configForm.value.original = cfg.content;
+    msg.value = configTarget.value.name + " 的配置已保存：nginx 已通过 nginx -t 并重载。" +
+      "注意：后续任何面板功能写入都会按标记重新生成整份配置，手工添加的指令会被覆盖。";
+    configOpen.value = false;
+    await load();
+  } catch (e) {
+    // 400 invalid_site（标记行被删改/超长）与 422 nginx_rejected 都带后端原文；
+    // 后端在返回前已恢复原字节，编辑器保留当前文本供修改。
+    error.value = e.message;
+  } finally { busy.value = false; }
+}
+
 function corsLabel(r) {
   if (!r.cors?.origins?.length) return "";
   const o = r.cors.origins[0] === "*" ? "任意来源" : r.cors.origins.length + " 个来源";
@@ -1193,7 +1234,7 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:1200px;white-space:nowrap">
+            <td style="width:1260px;white-space:nowrap">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
@@ -1216,6 +1257,7 @@ onMounted(load);
               <el-button size="small" text type="primary" @click="openCors(r)">
                 {{ r.cors?.origins?.length ? "CORS" : "跨域" }}
               </el-button>
+              <el-button size="small" text type="primary" @click="openConfig(r)">配置</el-button>
               <el-button size="small" text type="primary" @click="openLimit(r)">
                 {{ r.limits ? "限流" : "流量限制" }}
               </el-button>
@@ -1683,6 +1725,24 @@ onMounted(load);
           <el-button size="small" type="primary" :loading="busy" @click="saveAuth">
             {{ authForm.username ? "保存" : (authTarget?.auth_user ? "关闭访问密码" : "保存") }}
           </el-button>
+        </template>
+      </el-dialog>
+
+      <el-dialog v-model="configOpen" :title="'配置文件 · ' + (configTarget?.name || '')" width="min(860px, 96vw)">
+        <el-alert type="warning" :closable="false" style="margin-bottom:10px"
+          title="两条边界：① # minipanel-site: 标记行必须原样保留且只有一行，删改会被拒绝——域名、根目录等请用对应功能页修改；② 后续任何面板功能写入（改域名、切 PHP、设代理等）都会按标记重新生成整份配置，手工添加的指令会被覆盖。" />
+        <div class="mp-muted mp-tiny" style="margin-bottom:6px"><code class="mp-code">{{ configForm.path }}</code></div>
+        <el-input v-model="configForm.content" type="textarea" :rows="22" spellcheck="false"
+          style="font-family:monospace" />
+        <div class="mp-hint" style="margin-top:6px">
+          保存走与功能写入相同的事务：写文件 → <code class="mp-code">nginx -t</code> → 通过才 reload，
+          失败恢复原字节并原样显示 nginx 的拒绝理由；内容未变化时不触发 reload。最多 65536 字节。
+          标记之外的指令由你负责，面板不逐条解析。
+        </div>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="configOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy"
+            :disabled="configForm.content === configForm.original" @click="saveConfig">保存</el-button>
         </template>
       </el-dialog>
 

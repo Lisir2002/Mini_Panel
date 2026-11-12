@@ -692,6 +692,64 @@ paths:
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { description: 面板没有管理这个站点 }
         "422": { description: nginx 拒绝，已回滚（nginx_rejected） }
+  /api/v1/sites/{name}/config:
+    get:
+      tags: [site]
+      summary: 读取面板自有 vhost 的当前配置原文
+      description: |
+        M2 第廿二片：只读端点，返回 {name, path, content}。content 是磁盘上的
+        精确字节（含此前的手工编辑），不是按 marker 重新生成的近似值。只有面板
+        自有 vhost 可读；外部文件与不存在的站点一律 404 not_found，面板不展示
+        不属于它的配置。站点 Provider 没有实现配置编辑接口时返回 403 capability
+        并说明原因。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      responses:
+        "200": { description: 返回 name / path / content }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+    put:
+      tags: [site]
+      summary: 保存手工编辑的站点配置（受护栏约束，先测后生效）
+      description: |
+        M2 第廿二片：请求体 {content}，是整份编辑后的 vhost 文本，最多 65536
+        字节、不含 NUL。这是有护栏的编辑器，不是文件管理器：只有面板自有 vhost
+        可写（外部文件 404）；文件里的 `# minipanel-site:` 所有权标记行必须原样
+        保留且只有一行——删除、修改或复制标记行都返回 400 invalid_site 并说明
+        原因。域名、根目录等面板管理的事实请用对应功能端点修改，让标记漂移会
+        使站点列表与真实配置脱节。标记之外的指令由操作者负责，面板不逐条解析。
+        保存仍走与生成写入完全相同的事务：快照 → 写文件 → nginx -t → 通过才
+        reload，任一步失败恢复原字节，响应 422 nginx_rejected；内容未变化时
+        成功返回且不触发 reload。成功响应是 {name, path, content}。
+        边界原话写明：任何后续面板功能写入（改域名、切 PHP、设代理等）都会按
+        marker 重新生成整份 vhost，手工添加的指令会被覆盖——需要长期生效的
+        定制应使用对应的功能端点，或在每次功能变更后重新应用手工编辑。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                  maxLength: 65536
+                  description: 整份编辑后的 vhost 文本；所有权标记行必须原样保留
+      responses:
+        "200": { description: 已生效，返回 name / path / content }
+        "400": { description: 标记行被删改/复制、超长或含 NUL（invalid_site） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx 拒绝，已恢复原字节（nginx_rejected） }
   /api/v1/sites/{name}/cors:
     put:
       tags: [site]

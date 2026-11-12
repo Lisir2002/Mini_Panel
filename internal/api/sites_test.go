@@ -36,6 +36,8 @@ type fakeSites struct {
 	errorPageErr     error
 	limitErr         error
 	corsErr          error
+	configErr        error
+	configs          map[string]string
 	hotlinkErr       error
 	authErr          error
 	realIPErr        error
@@ -59,6 +61,8 @@ type fakeSites struct {
 	errorPageSets    int
 	limitSets        int
 	corsSets         int
+	configReads      int
+	configWrites     int
 	hotlinkSets      int
 	authSets         int
 	realIPSets       int
@@ -267,6 +271,38 @@ func (f *fakeSites) SetErrorPages(name string, rules []platform.SiteErrorPageRul
 	f.sites[name] = s
 	f.errorPageSets++
 	return s, nil
+}
+
+// SiteConfig returns the stored raw config for the site. The fake keeps one
+// string per site; the marker-immutability guard lives in the nginx writer.
+func (f *fakeSites) SiteConfig(name string) (platform.SiteConfigInfo, error) {
+	if f.configErr != nil {
+		return platform.SiteConfigInfo{}, f.configErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteConfigInfo{}, platform.ErrSiteMissing
+	}
+	f.configReads++
+	return platform.SiteConfigInfo{Name: name, Path: s.ConfigPath, Content: f.configs[name]}, nil
+}
+
+// SetSiteConfig stores the whole edited body. Validation lives in the nginx
+// writer; the fake only remembers the bytes.
+func (f *fakeSites) SetSiteConfig(name, content string) (platform.SiteConfigInfo, error) {
+	if f.configErr != nil {
+		return platform.SiteConfigInfo{}, f.configErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteConfigInfo{}, platform.ErrSiteMissing
+	}
+	if f.configs == nil {
+		f.configs = map[string]string{}
+	}
+	f.configs[name] = content
+	f.configWrites++
+	return platform.SiteConfigInfo{Name: name, Path: s.ConfigPath, Content: content}, nil
 }
 
 // SetCors records the cross-origin policy on the row. The fake mirrors the

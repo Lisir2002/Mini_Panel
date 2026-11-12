@@ -304,6 +304,23 @@ type SiteTrafficLimitManager interface {
 	SetLimits(name string, limit SiteTrafficLimit) (SiteInfo, error)
 }
 
+// SiteConfigInfo is one read of a panel-owned vhost: the path and the exact
+// bytes on disk, never a regenerated approximation.
+type SiteConfigInfo struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+// SiteConfigManager is the optional guarded config editor. Only panel-owned
+// vhosts can be read or written; the ownership marker line must survive an
+// edit byte for byte, and every accepted write still goes through the
+// provider's test-before-reload transaction. Foreign files are refused.
+type SiteConfigManager interface {
+	SiteConfig(name string) (SiteConfigInfo, error)
+	SetSiteConfig(name, content string) (SiteConfigInfo, error)
+}
+
 // SiteCorsManager is the optional cross-origin half of a site writer. The
 // operator supplies a structured policy (origins, methods, request headers,
 // credentials, preflight lifetime); the provider validates it and renders

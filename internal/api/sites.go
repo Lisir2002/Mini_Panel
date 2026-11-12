@@ -167,6 +167,20 @@ func (s *Server) siteErrorPageManager() (platform.SiteErrorPageManager, string) 
 	return em, ""
 }
 
+// siteConfigManager is the optional guarded config editor. A provider
+// without it returns 403 capability with the reason below.
+func (s *Server) siteConfigManager() (platform.SiteConfigManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	cm, ok := m.(platform.SiteConfigManager)
+	if !ok || cm == nil {
+		return nil, "该平台的站点 Provider 没有实现配置文件编辑"
+	}
+	return cm, ""
+}
+
 // siteCorsManager is the optional cross-origin interface. A provider without
 // it returns 403 capability with the reason below instead of a dead editor.
 func (s *Server) siteCorsManager() (platform.SiteCorsManager, string) {
@@ -655,6 +669,60 @@ func (s *Server) handleSiteErrorPages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_error_pages", "更新自定义错误页失败："+err.Error())
+	}
+}
+
+// handleSiteConfigGet is GET /api/v1/sites/{name}/config. It returns the
+// exact on-disk bytes of one panel-owned vhost; foreign files are refused
+// with the same not-found answer every other site endpoint gives.
+func (s *Server) handleSiteConfigGet(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteConfigManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	cfg, err := m.SiteConfig(chiParam(r, "name"))
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, cfg)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_config", "读取站点配置失败："+err.Error())
+	}
+}
+
+// handleSiteConfigPut is PUT /api/v1/sites/{name}/config. The body is
+// {"content":"..."}: the whole edited vhost. The provider requires the
+// ownership marker line to survive byte for byte, then writes through
+// test-before-reload with exact restore on failure.
+func (s *Server) handleSiteConfigPut(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteConfigManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	cfg, err := m.SetSiteConfig(chiParam(r, "name"), body.Content)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, cfg)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_config", "保存站点配置失败："+err.Error())
 	}
 }
 
