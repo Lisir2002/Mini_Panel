@@ -382,6 +382,12 @@ func (m *Manager) applyFiles(files []configFile) error {
 		return nil
 	}
 
+	// Every vhost now names per-site log files; the directory must exist and
+	// be worker-writable before nginx is asked to test or reload them.
+	if err := m.ensureLogDir(); err != nil {
+		return err
+	}
+
 	snapshots := make([]fileSnapshot, 0, len(files))
 	for _, f := range files {
 		prev, existed := readMaybe(f.Path)

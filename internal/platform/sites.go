@@ -254,6 +254,29 @@ type SiteBehaviorManager interface {
 	SetForceHTTPS(name string, enabled bool) (SiteInfo, error)
 }
 
+// SiteLogInfo is one read of a site's log tail. Exists=false is a real answer
+// (the vhost has not served a request since per-site logs were enabled), not
+// an error; Lines is always a non-nil slice so the page can render it directly.
+type SiteLogInfo struct {
+	Name      string   `json:"name"`
+	Kind      string   `json:"kind"`
+	Path      string   `json:"path"`
+	Exists    bool     `json:"exists"`
+	Size      int64    `json:"size"`
+	Lines     []string `json:"lines"`
+	Truncated bool     `json:"truncated"`
+}
+
+// SiteLogManager is the optional per-site log side: a read-only tail viewer
+// plus the one-time migration that gives pre-existing panel vhosts their log
+// directives. It is one interface because a provider that can read the logs
+// is exactly the provider that wrote them; a platform without it answers 403
+// capability with a reason instead of showing a dead button.
+type SiteLogManager interface {
+	MigrateSiteLogs() error
+	SiteLog(name, kind string, lines int) (SiteLogInfo, error)
+}
+
 // SiteTLSManager is the optional certificate side of a site writer. Manual
 // upload, self-signed generation and clearing all go through it. A platform
 // without this interface cannot offer the HTTPS controls, and the UI hides them

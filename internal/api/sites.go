@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -210,6 +211,21 @@ func (s *Server) siteBehaviorManager() (platform.SiteBehaviorManager, string) {
 		return nil, "该平台的站点 Provider 没有实现目录列表 / 强制 HTTPS 开关"
 	}
 	return bm, ""
+}
+
+// siteLogManager is the optional per-site log interface. A provider without it
+// cannot show log tails, so the endpoint answers 403 capability with a reason
+// rather than rendering a viewer that reads nothing.
+func (s *Server) siteLogManager() (platform.SiteLogManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	lm, ok := m.(platform.SiteLogManager)
+	if !ok || lm == nil {
+		return nil, "该平台的站点 Provider 没有实现站点日志查看"
+	}
+	return lm, ""
 }
 
 // normalizeSiteMeta validates the panel-side group label and free-text note.
@@ -657,6 +673,43 @@ func (s *Server) handleSiteForceHTTPS(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_force_https", "更新强制 HTTPS 失败："+err.Error())
+	}
+}
+
+// handleSiteLogs is GET /api/v1/sites/{name}/logs?kind=access&lines=100. It is
+// read-only: kind is one of the two fixed log names, lines is bounded by the
+// provider, and the file path is derived by the provider — the caller never
+// supplies a path. A site whose log file does not exist yet gets exists=false
+// with a reason the page can show, not a fake empty success.
+func (s *Server) handleSiteLogs(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteLogManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	kind := r.URL.Query().Get("kind")
+	if kind == "" {
+		kind = "access"
+	}
+	lines := 100
+	if v := r.URL.Query().Get("lines"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_site", "lines 必须是整数")
+			return
+		}
+		lines = n
+	}
+	lg, err := m.SiteLog(chiParam(r, "name"), kind, lines)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, lg)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_logs", "读取站点日志失败："+err.Error())
 	}
 }
 

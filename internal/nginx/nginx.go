@@ -142,8 +142,14 @@ type Manager struct {
 	// it is outside the vhost tree so a config glob cannot mistake a password
 	// file for a server block.
 	AuthDir string
-	Run     Runner
-	Now     func() time.Time
+	// LogDir holds the panel-managed per-site access/error logs. It is host
+	// state like AuthDir: the paths are derived from it on every read and are
+	// never stored in the marker. The directory must exist and be writable by
+	// the nginx worker before a vhost naming it is reloaded, which is what
+	// ensureLogDir guarantees inside every config transaction.
+	LogDir string
+	Run    Runner
+	Now    func() time.Time
 }
 
 // New detects the layout and returns a usable Manager. siteRoot is the parent
@@ -164,6 +170,13 @@ func NewWithCertDir(base, siteRoot, certDir string) (*Manager, error) {
 // own certificate and credential directories instead of leaving them inside the
 // nginx tree.
 func NewWithDirs(base, siteRoot, certDir, authDir string) (*Manager, error) {
+	return NewWithLogDir(base, siteRoot, certDir, authDir, filepath.Join(base, "minipanel-logs"))
+}
+
+// NewWithLogDir is NewWithDirs with an explicit per-site log directory. The
+// platform layer passes a directory under the panel's own log root so site
+// logs never land inside the nginx config tree.
+func NewWithLogDir(base, siteRoot, certDir, authDir, logDir string) (*Manager, error) {
 	l, err := Detect(base)
 	if err != nil {
 		return nil, err
@@ -177,7 +190,10 @@ func NewWithDirs(base, siteRoot, certDir, authDir string) (*Manager, error) {
 	if authDir == "" {
 		authDir = filepath.Join(base, "minipanel-auth")
 	}
-	return &Manager{Layout: l, SiteRoot: siteRoot, CertDir: certDir, AuthDir: authDir, Run: ExecRunner, Now: time.Now}, nil
+	if logDir == "" {
+		logDir = filepath.Join(base, "minipanel-logs")
+	}
+	return &Manager{Layout: l, SiteRoot: siteRoot, CertDir: certDir, AuthDir: authDir, LogDir: logDir, Run: ExecRunner, Now: time.Now}, nil
 }
 
 // Site is one row of the site list: the facts the panel generated, not a
@@ -227,6 +243,10 @@ type Site struct {
 	// directory is host state rather than a property of the site.
 	AuthUser string `json:"auth_user,omitempty"`
 	AuthFile string `json:"-"`
+	// LogDir is the directory this site's access/error logs live in. Like
+	// AuthFile it is host state derived from the Manager on every read, never
+	// stored in the marker: a tampered marker cannot move where logs are read.
+	LogDir string `json:"-"`
 	// RealIPFrom lists the proxy addresses or CIDRs whose forwarding header is
 	// trusted; RealIPHeader names that header. Both are empty when the site uses
 	// the peer address directly. The list is explicit because trusting every
@@ -462,6 +482,7 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 		Hotlink: payload.Hotlink, HotlinkAllowEmpty: payload.HotlinkAllowEmpty,
 		AutoIndex: payload.AutoIndex,
 		AuthUser:  payload.AuthUser, AuthFile: authPath(m.AuthDir, payload.Name),
+		LogDir:     m.LogDir,
 		RealIPFrom: payload.RealIPFrom, RealIPHeader: payload.RealIPHeader,
 		PHPVersion: payload.PHPVersion, PHPSocket: payload.PHPSocket,
 	}
@@ -604,6 +625,7 @@ func (m *Manager) Create(spec Spec) (Site, error) {
 		Name: spec.Name, Domains: domains, Root: root, Index: index,
 		ConfigPath: confPath, Enabled: true, CreatedAt: createdAt,
 		Rewrite: rewrite, PHPVersion: phpVersion, PHPSocket: phpSocket,
+		LogDir: m.LogDir,
 	}
 
 	// The document root is operator data, but creating it is part of creating
@@ -619,6 +641,10 @@ func (m *Manager) Create(spec Spec) (Site, error) {
 	if err := os.MkdirAll(m.Layout.Dir(), 0o755); err != nil {
 		m.undoRoot(root, madeRoot)
 		return Site{}, fmt.Errorf("创建配置目录: %w", err)
+	}
+	if err := m.ensureLogDir(); err != nil {
+		m.undoRoot(root, madeRoot)
+		return Site{}, err
 	}
 
 	var prev []byte

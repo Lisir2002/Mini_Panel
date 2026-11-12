@@ -66,40 +66,40 @@
   M2/M3/M4 的写操作接口（`WebServerCtl`、`FirewallCtl`、`PHPCtl`、`ServiceManager`）**现在就声明**，
   这样到里程碑时不需要重新塑形核心层。M2 第一片之后它们的现状不再相同：`PHPCtl` 在 Linux 上
   **已经是实现**（`internal/platform/platform_linux.go:30` 的 `var _ PHPCtl = linuxPlatform{}`，
-  方法体在 `:88`、`:93`、`:95`，底下是 `internal/php` 的现场探测），
+  方法体在 `internal/platform/platform_linux.go:89`、`internal/platform/platform_linux.go:94`、`internal/platform/platform_linux.go:96`，底下是 `internal/php` 的现场探测），
   `WebServerCtl`、`FirewallCtl`、`ServiceManager` 仍然只有类型定义、没有实现、没有路由。
   "有没有实现"这件事由编译器管：那句 `var _ PHPCtl = linuxPlatform{}` 一改签名就编不过。
   接口声明见 `internal/platform/paths.go:77`——那里同时写明 `PoolDir`/`SocketPath` 给的是
   **目标路径**，"这个名字上此刻有没有东西、内核里有没有人在听"是
-  `internal/php/php.go:270 DirStatus()` / `:286 SocketStatus()` 的另一次读，不是这个接口的方法
+  `internal/php/php.go:270 DirStatus()` / `internal/php/php.go:286 SocketStatus()` 的另一次读，不是这个接口的方法
   （M2 第二片把两次读分开，但没有改接口形状）。
 * `internal/php` 是 M2 新增的一个小包：它只做一件事——把"这台机器上有哪些能跑的 PHP 版本、
   每个版本的 SAPI/pool/socket 路径在哪"从文件系统证据里读出来（`internal/php/php.go:119 DiscoverIn()`），
   不写任何东西、不装任何东西。`internal/platform` 依赖它，而不是反过来。
   第六片只加了一个纯函数 `internal/php/php.go:352 FPMVersions()`：从探测结果里筛出带 fpm 的
   版本，作为 `php_fpm_versions` 与页面选择器的唯一来源。站点版本绑定在平台层
-  （`internal/platform/platform_linux.go:343 resolvePHPBinding()`）先按现场探测确认版本确有
+  （`internal/platform/platform_linux.go:366 resolvePHPBinding()`）先按现场探测确认版本确有
   fpm，再把 socket 交给 `internal/nginx` 写进 vhost；**不创建 per-site pool**。
   第七片没有扩大 `SiteManager`，而是新增可选的
   `internal/platform/sites.go:156 SiteSettingsManager`（`SetBasics`），由
-  `internal/platform/platform_linux.go:199` 接线到 nginx 的 `SetBasics`。这样旧 Provider 不必
+  `internal/platform/platform_linux.go:201` 接线到 nginx 的 `SetBasics`。这样旧 Provider 不必
   实现一个它做不到的写入口，页面也能从缺失的接口得出"本机不能编辑站点"，而不是画一个点了
   没反应的按钮。第八片同样走可选接口：`internal/platform/sites.go:179 SiteRewriteManager`
-  （`SetRewrite` / `RewritePresets`），由 `internal/platform/platform_linux.go:210` / `:221`
+  （`SetRewrite` / `RewritePresets`），由 `internal/platform/platform_linux.go:212` / `internal/platform/platform_linux.go:223`
   接线；模板集本身在 `internal/nginx/rewrite.go:54 RewritePresets()`，是编译进二进制的封闭
   词汇表，列表也由后端返回，页面不硬编码，因而不会与白名单漂移。第九片沿用同一模式：
   `internal/platform/sites.go:184 SiteProxyManager`（`SetProxy`），由
-  `internal/platform/platform_linux.go:235` 接线到 `internal/nginx/proxy.go:177 SetProxy()`；
+  `internal/platform/platform_linux.go:237` 接线到 `internal/nginx/proxy.go:177 SetProxy()`；
   反向代理的输入是一个经 `normalizeProxy`（`internal/nginx/proxy.go:138`）校验并规范化的 URL
   与一个 WebSocket 布尔值，指令由 `proxyLocationBody`（`internal/nginx/proxy.go:157`）
   固定生成；Provider 不实现该接口时端点返回 403 `capability` 并带上同一句理由，不假装
   写入路径存在。第十片同样新增可选接口
   `internal/platform/sites.go:197 SiteRedirectManager`（`SetRedirect`），由
-  `internal/platform/platform_linux.go:246` 接线到 `internal/nginx/redirect.go:56 SetRedirect()`；
+  `internal/platform/platform_linux.go:248` 接线到 `internal/nginx/redirect.go:56 SetRedirect()`；
   跳转与反向代理共用 `parseUpstreamURL`（`internal/nginx/proxy.go:54`）做 URL 校验，
   指令由 `redirectLocationBody`（`internal/nginx/redirect.go:45`）固定生成。第十一片再新增
   `internal/platform/sites.go:213 SiteHotlinkManager`（`SetHotlink`），由
-  `internal/platform/platform_linux.go:272` 接线到 `internal/nginx/hotlink.go:34 SetHotlink()`；
+  `internal/platform/platform_linux.go:274` 接线到 `internal/nginx/hotlink.go:34 SetHotlink()`；
   它只携带两个布尔值，扩展名表与 `valid_referers` 形式分别由
   `hotlinkExtensionPattern`（`internal/nginx/hotlink.go:9`）与
   `hotlinkLocationBody`（`internal/nginx/hotlink.go:16`）在 nginx 包内固定，平台层没有
@@ -107,28 +107,28 @@
   明确的写入接口，任何一边缺失都不会让页面凭空多出一个按钮；防盗链是正则 location，
   不加入 `location /` 的竞争，但也有独立接口与独立的缺失理由。第十二片新增
   `internal/platform/sites.go:222 SiteAuthManager`（`SetAuth`），由
-  `internal/platform/platform_linux.go:283` 接线到 `internal/nginx/auth.go:158 SetAuth()`；
+  `internal/platform/platform_linux.go:285` 接线到 `internal/nginx/auth.go:158 SetAuth()`；
   接口只收用户名与口令，摘要格式由 `authHash`（`internal/nginx/auth.go:48`）固定，
   口令文件路径由 `authPath`（`internal/nginx/auth.go:39`）在 nginx 包内推导，
   平台层与 HTTP 层都不接触摘要或文件路径。它是 server 级指令，因此没有与
   `location /` 的所有者互斥，也不需要为每个站点功能各加一个 `location /` 互斥开关。
   第十三片再新增 `internal/platform/sites.go:230 SiteRealIPManager`（`SetRealIP`），由
-  `internal/platform/platform_linux.go:294` 接线到 `internal/nginx/realip.go:113 SetRealIP()`；
+  `internal/platform/platform_linux.go:296` 接线到 `internal/nginx/realip.go:113 SetRealIP()`；
   接口只收可信代理地址/网段与两个固定 header 名称，地址校验与 `set_real_ip_from` /
   `real_ip_header` 的渲染都在 nginx 包内，平台层与 HTTP 层不能拼配置。它同样是 server
   级指令，不参与 `location /` 的所有者互斥。第十四片再新增
   `internal/platform/sites.go:205 SiteRedirectPathManager`（`SetRedirectPaths`），由
-  `internal/platform/platform_linux.go:257` 接线到 `internal/nginx/pathredirect.go:92 SetRedirectPaths()`；
+  `internal/platform/platform_linux.go:259` 接线到 `internal/nginx/pathredirect.go:92 SetRedirectPaths()`；
   平台侧的中立规则 `SiteRedirectRule`（`internal/platform/sites.go:106`）在 `toSiteInfo`
-  （`internal/platform/platform_linux.go:501`）一侧原样往返。路径与目标的校验、`location =`
+  （`internal/platform/platform_linux.go:524`）一侧原样往返。路径与目标的校验、`location =`
   块的渲染和 `$is_args$args` 常量全部在 nginx 包内完成（`internal/nginx/pathredirect.go:29` /
-  `:78`），目标复用整站跳转的 `parseUpstreamURL`，平台层与 HTTP 层同样没有拼配置的机会。
+  `internal/nginx/pathredirect.go:78`），目标复用整站跳转的 `parseUpstreamURL`，平台层与 HTTP 层同样没有拼配置的机会。
   它与整站跳转一样不是 `location /` 的所有者——只往 vhost 里追加精确例外块，因此不需要
   参与那三种所有者的互斥。
   第十五片再新增 `internal/platform/sites.go:240 SiteTrafficLimitManager`（`SetLimits`），由
-  `internal/platform/platform_linux.go:305` 接线到 `internal/nginx/limits.go:459 SetLimits()`；
+  `internal/platform/platform_linux.go:307` 接线到 `internal/nginx/limits.go:465 SetLimits()`；
   平台侧的中立值 `SiteTrafficLimit`（`internal/platform/sites.go:116`）只带速率字符串、突发、
-  连接数与状态码四个字段，在 `toSiteInfo`（`internal/platform/platform_linux.go:521`）一侧原样往返。
+  连接数与状态码四个字段，在 `toSiteInfo`（`internal/platform/platform_linux.go:544`）一侧原样往返。
   速率形状、数值边界与状态码白名单全由 `normalizeTrafficLimit`（`internal/nginx/limits.go:79`）
   判定，zone 名由 `limitZoneName`（`internal/nginx/limits.go:124`）从站点名派生，调用方点不了名。
   这一片与前面所有站点功能不同的地方是它要**同时落两个上下文**：server 级的 `limit_req` /
@@ -143,25 +143,41 @@
   `internal/platform/sites.go` 加一个 `Set*` 接口，是因为它们各自都要改一份 nginx 配置，
   改配置的能力必须按 Provider 分别有无、缺失时页面要能给出"这台没实现"的理由。分组与备注
   恰恰不改 nginx，它是纯面板数据，因此落点从 Provider 上移到了 store 与 HTTP 层：
-  `internal/store/store.go:510 ListSiteMeta()` / `:531 SaveSiteMeta()` / `:546 DeleteSiteMeta()`
-  直接操作 `site_meta` 表，`internal/api/sites.go:246 mergeSiteMeta()` 在列表读取时按站点名把
+  `internal/store/store.go:510 ListSiteMeta()` / `internal/store/store.go:531 SaveSiteMeta()` / `internal/store/store.go:546 DeleteSiteMeta()`
+  直接操作 `site_meta` 表，`internal/api/sites.go:262 mergeSiteMeta()` 在列表读取时按站点名把
   标注 join 进 `platform.SiteInfo` 的 `Group` / `Note` 两个字段（`internal/platform/sites.go:87`
-  / `:88`，Provider 自己永远留空）。门槛因此变成"平台能不能列站点"而不是"有没有某个写入接口"：
+  / `internal/platform/sites.go:88`，Provider 自己永远留空）。门槛因此变成"平台能不能列站点"而不是"有没有某个写入接口"：
   `handleSiteMeta` 复用 `siteManager()` 这道 site 能力闸门，再拿 `Provider.List()` 核对站点名，
   未管理返回 404——这条存在性校验是本片唯一的诚实性红线，取代了写入类片子里那套 `nginx -t`
   回滚纪律，因为它没有配置文件可回滚。搜索与分组过滤留在前端，对已经 join 过的列表做即时过滤。
   第十七片（目录列表 / 强制 HTTPS）回到 nginx 写入路径，新增
   `internal/platform/sites.go:252 SiteBehaviorManager`（`SetAutoIndex` 与 `SetForceHTTPS`），由
-  `internal/platform/platform_linux.go:319` / `:331` 接线到 `internal/nginx/behavior.go:18 SetAutoIndex()` /
-  `:41 SetForceHTTPS()`。它与前面每一片的差别是**不引入任何新的中立配置结构体**：`autoindex`
-  是 server 级布尔、直接进 `Site.AutoIndex`（`internal/nginx/nginx.go:223`）与 marker，`tls.go`
+  `internal/platform/platform_linux.go:321` / `internal/platform/platform_linux.go:333` 接线到 `internal/nginx/behavior.go:18 SetAutoIndex()` /
+  `internal/nginx/behavior.go:41 SetForceHTTPS()`。它与前面每一片的差别是**不引入任何新的中立配置结构体**：`autoindex`
+  是 server 级布尔、直接进 `Site.AutoIndex`（`internal/nginx/nginx.go:239`）与 marker，`tls.go`
   在 index 分流后写死 `autoindex on;`；强制 HTTPS 不新增真相，它翻转的就是证书接口早已写进 marker
   的 `tls.redirect`，所以这一片只在 nginx 层多读一个已有布尔、不复制一份第二真相。门槛仍是
-  "Provider 有没有实现 `SiteBehaviorManager`"（`internal/api/sites.go:203 siteBehaviorManager()`），
+  "Provider 有没有实现 `SiteBehaviorManager`"（`internal/api/sites.go:204 siteBehaviorManager()`），
   缺失时页面给出"这台没实现"的理由，因此不新增能力位。强制 HTTPS 在未启用证书时被
   `SetForceHTTPS` 以 `ErrInvalid` 挡回（HTTP 400 `invalid_site`），页面也只在 `r.tls?.enabled`
   时才显示该按钮——绝不放一个点了必然报错的开关。写入仍走 render → `nginx -t` → 通过才 reload →
   失败恢复原字节。
+  第十八片（网站日志查看器）新增 `internal/platform/sites.go:275 SiteLogManager`
+  （`MigrateSiteLogs` 与 `SiteLog`），由 `internal/platform/platform_linux.go:344` / `:351`
+  接线到 `internal/nginx/logs.go:190 MigrateSiteLogs()` / `:123 ReadLog()`。它与前面每一片的
+  差别是**读侧第一次成为主角**：写入侧只是给每份面板自有 vhost 加两条固定日志指令
+  （`internal/nginx/logs.go:55 siteLogLines()`），真正的工程难点在运行时前提——本机 nginx 1.18
+  实测 `nginx -t` 对不存在的日志目录照样通过，所以 `internal/nginx/logs.go:94 ensureLogDir()`
+  被接进全部三个写入咽喉点（applyFiles `internal/nginx/limits.go:387`、writeConfig
+  `internal/nginx/tls.go:248`、Create `internal/nginx/nginx.go:645`），先建目录、root 时再按
+  本机 nginx.conf 的 `user` 指令（`internal/nginx/logs.go:65 nginxUser()`）chown 给 worker，
+  然后才允许 test/reload。日志路径与 `AuthFile` 同款是派生主机状态（`internal/nginx/nginx.go:249`
+  `json:"-"`），不进 marker，渲染与读取共用 `internal/nginx/logs.go:48 siteLogPath()`。
+  旧 vhost 的迁移由 `cmd/minipanel/main.go:302 migrateSiteLogs()` 在 serve 启动时触发，整批
+  渲染放进同一次 applyFiles 事务（一次 `-t`、一次 reload、失败全部还原），外部文件不碰。
+  门槛沿用 site 能力 + 接口有无（`internal/api/sites.go:219 siteLogManager()`），不新增能力位；
+  查看器只读最后 1MB 窗口（`internal/nginx/logs.go:27 logTailWindow`），文件不存在返回
+  `exists=false` 的真实状态而不是错误。
 * `internal/acme` 是 M2 第五片新增的包：它只负责一件事——用 `golang.org/x/crypto/acme`
   走完 RFC 8555 的 HTTP-01 签发（`internal/acme/acme.go:125 Issue()`），并把 token 写进
   调用方给的 webroot。它不知道 nginx、不知道站点、不碰面板配置；证书装进 vhost 由
@@ -188,10 +204,10 @@
   平台实现再对它**当场验证过的**部分调用 `Allow()`，或调用 `Degrade()` 说清"主路径能做、缺的是哪一半"。
   默认拒绝，而不是默认允许。
   **实际状态**：`Allow()` 在生产代码里有五处——`internal/platform/detect.go:75` 点亮任何主机都成立的
-  `audit`，`internal/platform/platform_linux.go:623` / `:624` / `:630` 在"nginx 可识别、进程是 root、
-  `SiteACMEManager` 可用"时点亮 `site` / `site_write` / `ssl`，`:714` 在探测到带 fpm 的 PHP 版本
+  `audit`，`internal/platform/platform_linux.go:646` / `internal/platform/platform_linux.go:647` / `internal/platform/platform_linux.go:653` 在"nginx 可识别、进程是 root、
+  `SiteACMEManager` 可用"时点亮 `site` / `site_write` / `ssl`，`internal/platform/platform_linux.go:737` 在探测到带 fpm 的 PHP 版本
   且站点可写时点亮 `php_version_switch`。生产代码里的 `Degrade()` 有四处：
-  `platform_linux.go:619` / `:620`（nginx 在但不是 root）与 `:711` / `:721`（PHP 有运行时但缺后端 /
+  `platform_linux.go:642` / `platform_linux.go:643`（nginx 在但不是 root）与 `platform_linux.go:734` / `platform_linux.go:744`（PHP 有运行时但缺后端 /
   `php` 主路径仍缺安装卸载）。因此 `available` 不是只有 `audit`：`site`、`site_write`、`ssl`、
   `php_version_switch` 会在条件成立的主机上进入这一档；`php`、`database`、`firewall` 等仍停在
   `degraded` / `unavailable`。
@@ -199,7 +215,7 @@
   不写成"功能可用"。
 * `Deny()` / `Degrade()` / `Allow()` 三个入口都走同一个 `set()`：`Allow` 会清掉旧理由与
   fix/verify，`Deny` 与 `Degrade` 对未知 feature 名不 panic
-  （`internal/platform/capabilities.go:207 Deny()` / `:213 Degrade()` / `:225 Allow()`）。
+  （`internal/platform/capabilities.go:207 Deny()` / `internal/platform/capabilities.go:213 Degrade()` / `internal/platform/capabilities.go:225 Allow()`）。
   `Has()` 只认 `available`，`degraded` 一律算不可用（`internal/platform/capabilities.go:186 Has()`），
   所以"M2 把 php 报成 degraded"不会让任何一道按 `Has()` 把关的接口放行。
 * 五条测试：`TestDetectedCapabilitiesAreExplained`、`TestCapabilityStatesAreSymmetric`
@@ -211,16 +227,16 @@
 * 第一条测试里除了"关了必须有理由"，还有一张**白名单**：
   `internal/platform/capabilities_test.go:179 implemented := map[string]bool{FeatAudit: true}` 是
   **无条件白名单**（只有 `audit` 在任何主机上都算已交付）；`site` / `site_write` / `ssl` 走
-  `:220 siteWriterReady()` / `:234 siteTLSReady()` / `:251 phpSwitchReady()` 的**条件白名单**，谓词直接问平台实现
-  "此刻有没有可写的 nginx / 有没有 ACME / 有没有带 fpm 的 PHP"，随后双向断言（`:188-198` 白名单外报 `available` 报错；
-  `:205-211` 条件成立却没报成 `available` 也报错）。
+  `internal/platform/capabilities_test.go:220 siteWriterReady()` / `internal/platform/capabilities_test.go:234 siteTLSReady()` / `internal/platform/capabilities_test.go:251 phpSwitchReady()` 的**条件白名单**，谓词直接问平台实现
+  "此刻有没有可写的 nginx / 有没有 ACME / 有没有带 fpm 的 PHP"，随后双向断言（`internal/platform/capabilities_test.go:188-198` 白名单外报 `available` 报错；
+  `internal/platform/capabilities_test.go:205-211` 条件成立却没报成 `available` 也报错）。
   这一条把纪律从"不许没有理由"升级成"当前版本只许这些项是功能"——任何
   "探测到机制就 `Allow` 成功能"的写法，包括只在某一个平台上成立的写法，都会让测试变红。
   条件白名单只由 `Detect()` 的现场证据决定，所以同一份二进制在没装 nginx 的机器上
   `site` / `ssl` 仍是 `unavailable`，在只实现了手工证书的构建里 `ssl` 也到不了 `available`。
 * 理由文案有下限："未实现"不算理由，必须写清**随哪个里程碑/Provider 交付**。
   同一种关闭状态在不同机器上要说不同的话：Linux 上"没装 ufw/firewalld/nft"与"装了但写入
-  Provider 还没上"是两句不同理由（`platform_linux.go:641-648`），运维必须能分清是机器的问题
+  Provider 还没上"是两句不同理由（`platform_linux.go:664-671`），运维必须能分清是机器的问题
   还是面板版本的问题。
 
 ### 2.3 Windows 的差异（不是"以后再说"，是现在就写进位图）
@@ -238,8 +254,8 @@
 | 远程访问 | RDP，OpenSSH 为可选组件 | `RemoteAccess` 相应填充 |
 
 上表每一项都能在 `internal/platform/platform_windows.go:45-101 Detect()` 里逐行读到，
-`SchedulerKind`/`FirewallBackend` 等枚举在 `internal/platform/capabilities.go:20-27`（ReloadMode）、`:41-46`（PHPRuntimeMode）、
-`:51-58`（ExtensionInstallMode）、`:63-67`（SchedulerKind）、`:72-78`（FirewallBackend）、`:83-87`（RemoteAccess）。
+`SchedulerKind`/`FirewallBackend` 等枚举在 `internal/platform/capabilities.go:20-27`（ReloadMode）、`internal/platform/capabilities.go:41-46`（PHPRuntimeMode）、
+`internal/platform/capabilities.go:51-58`（ExtensionInstallMode）、`internal/platform/capabilities.go:63-67`（SchedulerKind）、`internal/platform/capabilities.go:72-78`（FirewallBackend）、`internal/platform/capabilities.go:83-87`（RemoteAccess）。
 **这些差异从 M0 就写进位图，不是"以后再说"**；而"在 Windows 上把它做完并支持"是
 `M5 —— Windows 完整支持`，验收定义见 `docs/里程碑.md` 的 M5 一节。
 
@@ -309,7 +325,7 @@
 
 `users` / `sessions` / `login_events` / `audit` / `settings` / `schema_meta`，全部由版本化
 迁移建立（`internal/store/store.go:87-181`）。`schema_meta.version` 比二进制新就**拒绝降级启动**
-（`:74-75`），避免旧二进制把新库改坏。
+（`internal/store/store.go:74-75`），避免旧二进制把新库改坏。
 
 * 建库与 `-wal`/`-shm` 一律 chmod 0600（`internal/store/store.go:53-61`）——sqlite 默认跟着 umask 走，而这里面是
   口令哈希、会话 ID 和审计记录。
@@ -321,8 +337,8 @@
   面板不控制的 DNS）、`panel.password_expiry_days`（0-3650）、`panel.basic_auth`、
   `panel.trust_proxy`。其余键一律 `400 immutable`。
 * 引导值在 `settings` 列表里也有行，但**值与来源都从进程现读**：`internal/api/system.go:108`
-  命中 `runtimeSetting()`（`:126`）就把 `value` 换成进程真正在用的值，并把 `source` 标成
-  `panel.json`（`:114`），没命中的运行态可写项才是 `db`（`:107`）。因此
+  命中 `runtimeSetting()`（`internal/api/system.go:126`）就把 `value` 换成进程真正在用的值，并把 `source` 标成
+  `panel.json`（`internal/api/system.go:114`），没命中的运行态可写项才是 `db`（`internal/api/system.go:107`）。因此
   **SQLite 里的 `panel.port` 只是初始化镜像，不是第二真源**（种子行见
   `internal/store/store.go:160`）——照镜像显示等于在设置页上显示一个根本没在监听的端口。
 * `panel.entrance` 的 `source` 是 `panel.json`，但**值永远不是入口路径本身**：开着的时候显示
@@ -358,12 +374,12 @@
    `/healthz` 永远可达。**持有合法 `mp_session` 后任何路径都可访问**——这是有意的：SPA 的导航、
    刷新与深链必须落在原路径上，把它们全部改写到一个魔法路径会拿可用的界面换一个勾。
    因此**入口不能缓解 XSS，也不能缓解 Cookie 泄露**，任何"安全入口保护登录后的面板"的表述都是
-   错的；`entranceGate` 的注释（`internal/api/server.go:201-219`）已经把这段结论写死，
+   错的；`entranceGate` 的注释（`internal/api/server.go:202-220`）已经把这段结论写死，
    文档与 README 必须原样表达这条边界。**"登录后逐路径校验入口"是 M1 待办**（见
    `docs/里程碑.md`），在它实现之前不得写成现状。真正的访问控制 = 监听地址 + 会话令牌与有效期
    + `panel.ip_allowlist` + CSRF + 登录锁定。
    伪装响应的**形态**也是一条决定：中性 HTML 错误页，只含状态码文本，不含产品名与版本
-   （`internal/api/server.go:294 disguise()` 的注释）。不用 Go 默认 `http.Error` 的
+   （`internal/api/server.go:295 disguise()` 的注释）。不用 Go 默认 `http.Error` 的
    `text/plain`，因为"404 Not Found"那 10 个字节本身就是运行环境指纹，而这条响应的目的正是
    让探测者学不到东西；也不冒充 nginx 的错误页——这个进程就是 web server，一张普通 404 是
    事实，冒充别人的错误页在事故响应时误导运维的程度不亚于误导扫描器。页面里内联
@@ -464,15 +480,15 @@ bcrypt 口令哈希、有效会话 ID 和整份审计记录：会话 ID 泄露�
 反应的按钮，或者一整块被藏起来的已交付功能。
 
 因此这条纪律是**测试强制**的，不是文档口径（M2 第一片是它的正面样本：`internal/php` 当场探到
-PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:682`
-起读现场，`:661` 报的是"检测到了什么、缺哪个后端"。第六片把"站点能绑定到某个已有版本"
+PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`internal/platform/platform_linux.go:705`
+起读现场，`internal/platform/platform_linux.go:684` 报的是"检测到了什么、缺哪个后端"。第六片把"站点能绑定到某个已有版本"
 交付了，`php_version_switch` 才允许在"站点可写 + 探测到 fpm"时 `available`；
 但 `php` 本身仍是 `degraded`，多版本安装/卸载与 `php_ext_source` 没有写入路径）：
 
-* `newBase()` 默认拒绝每一项功能并写好理由（`internal/platform/detect.go:18-76`，拒绝表 `:50`）；
+* `newBase()` 默认拒绝每一项功能并写好理由（`internal/platform/detect.go:18-76`，拒绝表 `internal/platform/detect.go:50`）；
 * `TestDetectedCapabilitiesAreExplained`（`internal/platform/capabilities_test.go:110`）除了
   "关了必须有理由"，还有一张**白名单**：`capabilities_test.go:181` 的
-  `implemented` 是无条件项（当前 `{FeatAudit: true}`），`:220`、`:234` 与 `:251` 的
+  `implemented` 是无条件项（当前 `{FeatAudit: true}`），`capabilities_test.go:220`、`capabilities_test.go:234` 与 `capabilities_test.go:251` 的
   `siteWriterReady` / `siteTLSReady` / `phpSwitchReady` 是条件项（`site`、`site_write`、`ssl`、
   `php_version_switch`）。白名单外任何 `available` 都失败，条件成立却没报成 `available` 也失败。
   所以本版本的 `available` 可以是 `audit`，也可以是现场证明可写的 `site` / `site_write` /
@@ -492,7 +508,7 @@ PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`inter
 的现象：**一个正确的断言连续飘红，通常不是测试坏了，而是生成器和它自己声明的规则不一致**。
 
 * **当时的矛盾**：字母表里留着 `i`，而同包的 `TestEntranceShape`（`internal/sec/sec_test.go:75`，
-  函数从 `:75` 开始）要求生成的入口不得出现 `"0o1liIO"` 这些"用手机键盘容易敲错的字符"，禁集
+  函数从 `internal/sec/sec_test.go:75` 开始）要求生成的入口不得出现 `"0o1liIO"` 这些"用手机键盘容易敲错的字符"，禁集
   **包含 `i`**。旧字母表 `abcdefghijkmnpqrstuvwxyz23456789` 是 32 个字符（只去了 `l`、`o`、`0`、`1`），
   于是 `NewEntrance()` 每个字符有 1/32 的概率取到 `i`，8 个字符里至少出现一个的概率
   `1-(31/32)^8 ≈ 22.4%`。当时的实测：分 3 批共 32 次
@@ -500,7 +516,7 @@ PHP 版本与 SAPI 之后，只改写 `php` 一项的状态与理由——`inter
   报错形如 `ambiguous character 'i' in entrance ...`；而全量 `make test` 常常是绿的——
   **"跑一次绿"从来不能证明随机缺陷不存在**。
 * **修复方式**：改生成器，不改断言——把 `i` 从字母表里删掉。现在是 `internal/sec/sec.go:116` 的
-  `abcdefghjkmnpqrstuvwxyz23456789`；`:108-115` 的注释把这次矛盾、为什么要排除易混字符、以及熵的
+  `abcdefghjkmnpqrstuvwxyz23456789`；`internal/sec/sec.go:108-115` 的注释把这次矛盾、为什么要排除易混字符、以及熵的
   算法都写在代码旁边：**23 个字母 + 8 个数字 = 31 个符号，8 字符 = `8·log2(31) ≈ 39.6` bit**。
   这两个数字可以独立复核：
   `python3 -c "a='abcdefghjkmnpqrstuvwxyz23456789'; import math; print(len(a), round(8*math.log2(len(a)),2))"`
@@ -521,7 +537,7 @@ go test -count=200 -run TestEntranceShape ./internal/sec/   # 本轮 ok：200 �
   形状本身是断言过的——`sec_test.go:77` 要求 `/` 前缀且 `len(e) == 9`，把 `NewEntrance()` 里的
   8 改成 6 会立刻红。**没被断言的是字母表**：`entranceAlphabet` 在任何测试文件里一次都没出现
   （`grep -rn "entranceAlphabet" --include='*_test.go' .` 为空），所以"31 个符号、不含易混字形"
-  这条规则只有 `:82` 的禁集在间接守着，往字母表里加回 `i` 只能靠概率撞上来才发现。这条记进 §8.4。
+  这条规则只有 `sec_test.go:82` 的禁集在间接守着，往字母表里加回 `i` 只能靠概率撞上来才发现。这条记进 §8.4。
 * 与 §8.1（数据文件权限）同类：缺陷应当由代码在创建时收紧，而不是靠文档提醒运维手抖。
 
 ### 8.4 测试缺口（诚实清单）
@@ -529,19 +545,19 @@ go test -count=200 -run TestEntranceShape ./internal/sec/   # 本轮 ok：200 �
 先说**已经补上的部分**（这不是缺口，写在这里是为了让 review 知道边界挪到哪了）：
 `cmd/minipanel/main_test.go`（489 行、11 个用例）把整层 CLI 语义纳入 CI——`init` 的
 `--bind/--port/--insecure-no-tls/--entrance` 真的落到 `panel.json`
-（`main_test.go:45 TestInitHonoursItsFlags`，含 `panel.json` 0600 断言 `:72`）；未知 flag / 多余位置参数 /
-未知子命令一律报错（`:77 TestInitRejectsUnknownAndExtraArgs`）；`--entrance -` 是关闭而不是"替我生成一个"
-（`:90 TestInitEntranceFlag`）；`reset-entrance` 同步配置文件与 settings 镜像、且 `--set` 与
-`--disable` 互斥（`:124 TestResetEntranceKeepsConfigAndMirrorInStep`）；`passwd` 置
+（`main_test.go:45 TestInitHonoursItsFlags`，含 `panel.json` 0600 断言 `main_test.go:72`）；未知 flag / 多余位置参数 /
+未知子命令一律报错（`main_test.go:77 TestInitRejectsUnknownAndExtraArgs`）；`--entrance -` 是关闭而不是"替我生成一个"
+（`main_test.go:90 TestInitEntranceFlag`）；`reset-entrance` 同步配置文件与 settings 镜像、且 `--set` 与
+`--disable` 互斥（`main_test.go:124 TestResetEntranceKeepsConfigAndMirrorInStep`）；`passwd` 置
 `must_change_pw`，并拒绝弱口令 / 空输入 / 非法用户名 / 双用户名
 （`cmd/minipanel/main_test.go:176 TestPasswdSetsMustChangeAndValidatesInput`）；`-h` 不算失败
-（`:219 TestSubcommandHelpIsNotAFailure`）；usage 文本与子命令、flag 清单一致
-（`:237 TestUsageCoversEveryCommand`）；banner 显示在用的端口与地址、入口关闭时写"未设置"
-（`:257 TestBannerReportsLiveConfigValues`）。
+（`cmd/minipanel/main_test.go:219 TestSubcommandHelpIsNotAFailure`）；usage 文本与子命令、flag 清单一致
+（`cmd/minipanel/main_test.go:237 TestUsageCoversEveryCommand`）；banner 显示在用的端口与地址、入口关闭时写"未设置"
+（`cmd/minipanel/main_test.go:257 TestBannerReportsLiveConfigValues`）。
 
 M2 第二片补上了一条曾经记在本表里的缺口：**`doctor` 打印的 socket 路径没有校验是不是真的有人在听**。
 现在 `internal/php/php.go:286 SocketStatus()` 读内核表 `/proc/net/unix` 判活
-（解析在 `:323 listeningSocketPaths()`，`St` 列 `01` 才是 LISTEN，Path 是行尾整段而不是某个固定列），
+（解析在 `internal/php/php.go:323 listeningSocketPaths()`，`St` 列 `01` 才是 LISTEN，Path 是行尾整段而不是某个固定列），
 `cmd/minipanel/php.go:30 phpProbe()` 把它和 `PHPCtl` 给的路径分开成两次读，`phpSummary()` 的句子
 因此变成"路径来自 PHPCtl，状态是此刻现场读的"。压它的三条：`internal/php/php_test.go` 的
 `TestStatesOfTheReportedPaths`（现场 bind 一个 unix socket、`SetUnlinkOnClose(false)` 后关闭，
@@ -562,12 +578,12 @@ M2 第二片补上了一条曾经记在本表里的缺口：**`doctor` 打印的
 | 面板自签证书生成、SAN 跟随本机地址重签 | `grep -rn "EnsureSelfSignedTLS" --include='*_test.go' .` 为空 | 代码 `internal/sec/tls.go:26`；`make doctor` 的证书行、`minipanel init` 的实际输出 |
 | `-wal` / `-shm` 的 0600 | `TestFilePermissionsAreOwnerOnly` 只 `os.Stat` 主库文件 | 代码 `internal/store/store.go:46-57` 的三元素循环 |
 | 面板证书与私钥的 0600 | `internal/sec` 只有一个测试文件且不碰证书 | 代码 `internal/sec/tls.go:74-86` |
-| `444`（挂断型）伪装真的会断连 | `disguise()` 的 Hijacker 分支只在配置 444 时走到，M0 测试跑的是 404 | 代码 `internal/api/server.go:294` |
+| `444`（挂断型）伪装真的会断连 | `disguise()` 的 Hijacker 分支只在配置 444 时走到，M0 测试跑的是 404 | 代码 `internal/api/server.go:295` |
 | ACME 只对 Pebble 跑过端到端，没有对 Let's Encrypt 生产环境真签过 | `grep -rn "pebble" --include='*_test.go' .` 只命中 `internal/acme/pebble_test.go`；它默认跳过（`pebble` 不在 PATH 时 `t.Skip`），CI 不会自动跑 | 协议流程由 `internal/acme` 的 9 个单元用例覆盖；端到端复核命令写在 README「如何验证」；生产签发仍受 80 端口可达与域名解析两个外部条件约束 |
 | DNS-01 / 通配符签发没有实现，也没有测试 | `grep -rn "DNS01\|dns-01\|Wildcard" --include='*.go' internal/` 只应命中通配符拒绝逻辑，不应有 DNS 客户端 | 代码在写任何配置之前拒绝（`internal/acme/acme.go` 的 `normalizeDomains` + `internal/platform/platform_linux.go` 的 `obtainACME`），HTTP 返回 `422 acme_unsupported`；通配符站点只能上传证书 |
 | 前端"灰 + 理由"的实际渲染 | 仓库里没有 UI 自动化：`make web` 编译前端并断言产物只有一个文件，`make check-ui` 断言能力 key 全覆盖与端点全覆盖，但**"页面画出来对不对"这一步仍然靠人**（真实浏览器的 puppeteer 脚本刻意不入仓库，它依赖本机 chrome） | `make check-ui` 的三条 + `make check-honesty` 保证理由必然存在；每轮里程碑手工跑一遍浏览器断言并在 README"如何验证"里记下条数 |
-| `minipanel passwd` 的 **tty 分支**（真关回显那一条） | 测试文件自己写明 `go test` 下 stdin 不是 tty（`cmd/minipanel/main_test.go:212-213`），所以 `term.IsTerminal` 为真的分支走不到；管道分支与全部校验分支**已经**在 CI 里 | 代码 `cmd/minipanel/main.go:685`（`IsTerminal`）→ `:691`（`term.ReadPassword`）、`:700`（`readLine`）；本轮用 `pty.fork()` 手工验证主端流里不回声明文。这是 §8.2 那条纪律的反面教材：**文案说"不回显"而代码没关 ECHO** 曾经成立过，只有断言能防它回来；补法是在测试里自建 pty，或把该分支抽成可注入接口 |
-| 入口字母表本身没有断言 | 形状是断言过的（`sec_test.go:77` 要求 `/` 前缀且 `len(e) == 9`，把 8 字符改短会红），但 `entranceAlphabet` 在测试里一次都没被引用（`grep -rn "entranceAlphabet" --include='*_test.go' .` 为空）：没人断言它是 31 个符号。往字母表里加回易混字符，只能靠 `:82` 那条禁集撞上来才发现 | 禁集断言 + §8.3 的 `-count=200` 重复；注释 `internal/sec/sec.go:108-115` 写明了 31 符号 × 8 字符 ≈ 39.6 bit |
+| `minipanel passwd` 的 **tty 分支**（真关回显那一条） | 测试文件自己写明 `go test` 下 stdin 不是 tty（`cmd/minipanel/main_test.go:212-213`），所以 `term.IsTerminal` 为真的分支走不到；管道分支与全部校验分支**已经**在 CI 里 | 代码 `cmd/minipanel/main.go:711`（`IsTerminal`）→ `cmd/minipanel/main.go:717`（`term.ReadPassword`）、`cmd/minipanel/main.go:726`（`readLine`）；本轮用 `pty.fork()` 手工验证主端流里不回声明文。这是 §8.2 那条纪律的反面教材：**文案说"不回显"而代码没关 ECHO** 曾经成立过，只有断言能防它回来；补法是在测试里自建 pty，或把该分支抽成可注入接口 |
+| 入口字母表本身没有断言 | 形状是断言过的（`sec_test.go:77` 要求 `/` 前缀且 `len(e) == 9`，把 8 字符改短会红），但 `entranceAlphabet` 在测试里一次都没被引用（`grep -rn "entranceAlphabet" --include='*_test.go' .` 为空）：没人断言它是 31 个符号。往字母表里加回易混字符，只能靠 `sec_test.go:82` 那条禁集撞上来才发现 | 禁集断言 + §8.3 的 `-count=200` 重复；注释 `internal/sec/sec.go:108-115` 写明了 31 符号 × 8 字符 ≈ 39.6 bit |
 | PHP 探测只认 Debian/Ubuntu 的布局 | `grep -rn remi internal/php/` 为空——`/etc/php/<版本>` + `/usr/{,s}bin` 之外的形状（RPM 系、remi/SCL 的 `/etc/opt/remi/php83`）没有任何 fixture 覆盖 | 代码 `internal/php/php.go:110-118` 的注释把这个假设写明了；找不到就报"未检测到"，而不是猜一个路径出来。M2 第二片给它加了一个**被动探测器**：`cmd/minipanel/php.go:124 phpBitmapMismatch()` 第四条规则——`PHPCtl` 报的 socket 在内核里是 LISTEN、而位图 `php_modes` 里没有 fpm，这两件事只可能来自两边看的不是同一处，于是 doctor 打一行"注意："点名"非 Debian 布局"。它不能修好探测，但能让这种机器上的错法从"静默 502"变成"自检先说出来"；正解仍然是补一组 redhat 形状的假 root，而不是往探测里塞 if |
 | socket 判活只说"有人在听"，不说听的**是不是 php-fpm**，也没做过一次 FastCGI 握手 | `grep -rn "net\.Dial\|fcgi" internal/php/ cmd/minipanel/php.go` 为空（本轮实测无输出）：`SocketStatus` 唯一的信息源是内核按路径记的账，路径背后是什么进程它不知道 | 代码 `internal/php/php.go:292 socketStatus()` 只在 `St` 列为 `01` 时报 listening；表读不到时返回 `unknown` 而不是猜"没人听"（`internal/php/php_test.go:448` 断言这条），文案对应 `cmd/minipanel/php.go:79 socketWords()` 里那句"读不到 /proc/net/unix，判断不了"。"这个后端真的能执行 PHP 吗"要等 M2 的站点写入侧发一次 FastCGI 请求才算验证过 |
 | `MINI_PANEL_DEBUG=1` 目前没有可观察效果 | `newLogger()`（`cmd/minipanel/main.go:165`）会降到 Debug 级，但 `grep -rn "\.Debug(" --include='*.go' internal cmd \| grep -v _test` 为空 | 它只是留口。`README.md` 快速上手一节已按"今天不会多出任何输出"来写，等真出现 Debug 埋点这条缺口自动消失 |
@@ -602,8 +618,8 @@ M2 第二片补上了一条曾经记在本表里的缺口：**`doctor` 打印的
 现在的防回归方式（不是注释，是断言）：
 
 * `cmd/minipanel/main_test.go:45 TestInitHonoursItsFlags` 逐个读回 `cfg.Port` / `cfg.Bind` / `cfg.TLS`，
-  错误信息写得很直白："a silently dropped flag is worse than no flag at all"（`:53`）；
-  并断言 `panel.json` 落盘 0600（`:72`，理由：这个文件里放着入口和 TLS 开关）。
+  错误信息写得很直白："a silently dropped flag is worse than no flag at all"（`cmd/minipanel/main_test.go:53`）；
+  并断言 `panel.json` 落盘 0600（`cmd/minipanel/main_test.go:72`，理由：这个文件里放着入口和 TLS 开关）。
 * `cmd/minipanel/main_test.go:77 TestInitRejectsUnknownAndExtraArgs` 堵掉"多写了 flag/参数但被忽略"的另一半：
   `--bogus`、多余位置参数、未知子命令三种都必须返回错误。
 * `cmd/minipanel/main_test.go:257 TestBannerReportsLiveConfigValues` 要求 banner 里的端口/地址/URL 与配置一致，

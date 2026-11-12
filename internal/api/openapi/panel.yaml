@@ -846,6 +846,51 @@ paths:
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { description: 面板没有管理这个站点 }
         "422": { description: nginx 拒绝，配置已回滚（nginx_rejected） }
+  /api/v1/sites/{name}/logs:
+    get:
+      tags: [site]
+      summary: 查看站点访问 / 错误日志的尾部
+      description: |
+        M2 第十八片：只读端点。kind=access（默认）或 error，lines 为 1-500 的整数
+        （默认 100）。日志路径由后端从站点名派生（面板自有的按站点日志目录），调用方
+        提交不了任何路径；读取前先核对该站点是面板自有 vhost，外部文件一律 404。
+        每个面板自有 vhost 都带固定的 access_log（combined 格式）与 error_log 指令，
+        强制 HTTPS 的 80 端口跳转块同样写日志；面板启动时把旧 vhost 一次性迁移到
+        按站点日志（整批 nginx -t → 通过才 reload → 失败全部还原）。
+        日志文件尚不存在（迁移后还没有请求）时返回 200 且 exists=false、lines 为空，
+        这是真实状态而不是错误；文件超过读取窗口或行数超过 lines 时 truncated=true。
+        站点 Provider 没有实现日志接口时返回 403 capability 并说明原因。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+        - name: kind
+          in: query
+          required: false
+          schema: { type: string, enum: [access, error], default: access }
+        - name: lines
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: 日志尾部（exists=false 表示文件尚未产生）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+                  kind: { type: string, enum: [access, error] }
+                  path: { type: string, description: 后端派生的日志文件路径 }
+                  exists: { type: boolean }
+                  size: { type: integer, format: int64, description: 文件字节数 }
+                  lines: { type: array, items: { type: string } }
+                  truncated: { type: boolean, description: 还有更早的内容未返回 }
+        "400": { description: kind / lines 非法（invalid_site） }
+        "403": { description: 站点能力不可用或 Provider 未实现日志接口（capability） }
+        "404": { description: 面板没有管理这个站点 }
   /api/v1/sites/{name}/tls:
     post:
       tags: [site]

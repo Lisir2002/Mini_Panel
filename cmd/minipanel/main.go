@@ -274,6 +274,7 @@ func cmdServe(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	migrateSiteLogs(e)
 	startACMERenewal(ctx, e)
 	select {
 	case err := <-errCh:
@@ -292,6 +293,31 @@ func cmdServe(args []string) error {
 // acmeRenewEvery is the background scan interval. Certificates are checked, not
 // blindly renewed: only ACME-issued ones inside the thirty-day window are touched.
 const acmeRenewEvery = 12 * time.Hour
+
+// migrateSiteLogs gives vhosts created before per-site logs existed their two
+// log directives, in one test-before-reload transaction owned by the provider.
+// It runs once at serve start. A failure is logged with the provider's reason
+// and never crashes the panel: the sites keep serving exactly as before, and
+// the log viewer will say the files are not there yet rather than pretend.
+func migrateSiteLogs(e *env) {
+	sp, ok := e.plat.(platform.SiteProvider)
+	if !ok {
+		return
+	}
+	m, ok := sp.Sites()
+	if !ok || m == nil {
+		return
+	}
+	lm, ok := m.(platform.SiteLogManager)
+	if !ok || lm == nil {
+		return
+	}
+	if err := lm.MigrateSiteLogs(); err != nil {
+		e.log.Warn("站点日志迁移未生效，站点配置保持原样", "err", err)
+		return
+	}
+	e.log.Info("站点日志已就绪：每个面板自有站点写入独立的访问 / 错误日志")
+}
 
 // startACMERenewal starts the only background task this milestone adds. It is
 // deliberately tied to the serve context: the same SIGTERM that stops HTTP also

@@ -243,6 +243,11 @@ func (m *Manager) setTLS(site Site, certPEM, keyPEM []byte, redirect, selfSigned
 }
 
 func (m *Manager) writeConfig(path, body string) error {
+	// The TLS paths write vhosts outside applyFiles; they name the same
+	// per-site log files, so the log directory needs the same guarantee.
+	if err := m.ensureLogDir(); err != nil {
+		return err
+	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(body), 0o644); err != nil {
 		return err
@@ -381,8 +386,14 @@ func renderRedirect(s Site) string {
 	b.WriteString("server {\n")
 	b.WriteString("    listen 80;\n")
 	b.WriteString("    server_name " + strings.Join(s.Domains, " ") + ";\n\n")
-	b.WriteString("    root " + s.Root + ";\n\n")
-	b.WriteString("    location ^~ /.well-known/acme-challenge/ {\n")
+	b.WriteString("    root " + s.Root + ";\n")
+	if s.LogDir != "" {
+		// The redirect block answers every plain-HTTP request when force
+		// HTTPS is on; without its own log lines those requests would leave
+		// no per-site trace at all.
+		b.WriteString("\n" + siteLogLines(s.LogDir, s.Name))
+	}
+	b.WriteString("\n    location ^~ /.well-known/acme-challenge/ {\n")
 	b.WriteString("        default_type text/plain;\n")
 	b.WriteString("        try_files $uri =404;\n")
 	b.WriteString("    }\n\n")
@@ -427,6 +438,12 @@ func renderServer(s Site, tlsOn bool) string {
 		// 403/404. It does not own `location /`, so it coexists with every other
 		// site feature.
 		b.WriteString("    autoindex on;\n")
+	}
+	if s.LogDir != "" {
+		// Per-site logs. The paths are derived host state, never marker data;
+		// ensureLogDir has made the directory worker-writable before this
+		// config is ever tested or reloaded.
+		b.WriteString("\n" + siteLogLines(s.LogDir, s.Name))
 	}
 	if tlsOn {
 		b.WriteString("\n    ssl_certificate " + s.TLS.CertPath + ";\n")

@@ -3,9 +3,9 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五、十六、十七：静态站点、站点证书、
+// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五、十六、十七、十八：静态站点、站点证书、
 // PHP 版本绑定、基础设置编辑、伪静态模板、反向代理、整站跳转、防盗链、访问密码、真实 IP 解析、
-// 按路径跳转表、流量限制与分组 / 备注 / 搜索。
+// 按路径跳转表、流量限制、分组 / 备注 / 搜索、目录列表 / 强制 HTTPS 开关与站点日志查看。
 // 这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
@@ -43,6 +43,9 @@ import { store } from "../store";
 //   * 目录列表是 server 级的固定 `autoindex` 开关（不占用 location /，与所有其它功能共存）；强制 HTTPS
 //     只在站点已启用证书时出现，因为它翻转的就是证书接口早已携带的 tls.redirect——没有证书时后端会
 //     以理由拒绝，页面也就不摆一个点了必然报错的按钮。两者都走 nginx -t → 通过才 reload，失败回滚。
+//   * 站点日志是只读查看器：每个面板自有 vhost 都带固定的按站点 access_log / error_log，
+//     页面只选"访问 / 错误"与行数，路径由后端派生，提交不了任何路径。文件还没产生时后端
+//     返回 exists=false，页面如实说"尚无日志"，不假装读到了空文件就是成功。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
 //     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
 //     而不是等请求失败后才解释。
@@ -127,6 +130,15 @@ const metaForm = ref({ group: "", note: "" });
 const search = ref("");
 const groupFilter = ref("");
 
+// 日志查看器是只读的：kind 与行数发给后端，路径由后端派生。logData 为 null
+// 表示还没读；exists=false 是后端的真实回答（文件尚未产生），页面如实显示。
+const logOpen = ref(false);
+const logTarget = ref(null);
+const logKind = ref("access");
+const logLines = ref(100);
+const logData = ref(null);
+const logLoading = ref(false);
+
 const groups = computed(() => {
   const set = new Set();
   for (const r of rows.value) if (r.group) set.add(r.group);
@@ -192,6 +204,30 @@ async function toggleForceHTTPS(r) {
     await load();
   } catch (e) { error.value = e.message; await load(); }
   finally { busy.value = false; }
+}
+
+// 日志查看：打开对话框即读一次，切换类型 / 行数或点刷新再读。后端负责路径派生、
+// 所有权核对与尾部截断；页面只展示后端返回的事实，包括"文件尚不存在"。
+function openLog(r) {
+  logTarget.value = r;
+  logKind.value = "access";
+  logLines.value = 100;
+  logData.value = null;
+  logOpen.value = true;
+  loadLog();
+}
+
+async function loadLog() {
+  if (!logTarget.value) return;
+  logLoading.value = true;
+  error.value = "";
+  try {
+    logData.value = await api("/api/v1/sites/" + encodeURIComponent(logTarget.value.name) +
+      "/logs?kind=" + logKind.value + "&lines=" + logLines.value);
+  } catch (e) {
+    logData.value = null;
+    error.value = e.message;
+  } finally { logLoading.value = false; }
 }
 
 function blankRedirectPathRule() {
@@ -935,7 +971,7 @@ onMounted(load);
               </div>
             </td>
             <td class="mp-muted mp-tiny">{{ r.created_at }}</td>
-            <td style="width:1040px;white-space:nowrap">
+            <td style="width:1120px;white-space:nowrap">
               <el-button size="small" text type="primary" @click="openEdit(r)">编辑</el-button>
               <el-button size="small" text type="primary" @click="openRewrite(r)">伪静态</el-button>
               <el-button size="small" text type="primary" @click="openProxy(r)">
@@ -970,6 +1006,7 @@ onMounted(load);
                   </el-button>
                 </template>
               </el-popconfirm>
+              <el-button size="small" text type="primary" @click="openLog(r)">日志</el-button>
               <el-button size="small" text type="primary" :disabled="!phpAvailable && !r.php_version" @click="openPHP(r)">
                 PHP
               </el-button>
@@ -1250,6 +1287,33 @@ onMounted(load);
         </template>
       </el-dialog>
 
+      <el-dialog v-model="logOpen" :title="'站点日志 · ' + (logTarget?.name || '')" width="min(860px, 96vw)">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+          <el-radio-group v-model="logKind" size="small" @change="loadLog">
+            <el-radio-button value="access">访问日志</el-radio-button>
+            <el-radio-button value="error">错误日志</el-radio-button>
+          </el-radio-group>
+          <el-select v-model="logLines" size="small" style="width:120px" @change="loadLog">
+            <el-option :value="100" label="尾 100 行" />
+            <el-option :value="200" label="尾 200 行" />
+            <el-option :value="500" label="尾 500 行" />
+          </el-select>
+          <el-button size="small" :loading="logLoading" @click="loadLog">刷新</el-button>
+          <span v-if="logData" class="mp-muted mp-tiny">
+            {{ logData.path }} · {{ logData.size }} 字节
+            <template v-if="logData.truncated"> · 只显示尾部，更早的内容未加载</template>
+          </span>
+        </div>
+        <el-alert v-if="logData && !logData.exists" type="info" :closable="false"
+          title="该站点的这个日志文件还不存在：vhost 已带按站点日志指令，但迁移后还没有请求写进来。产生访问或错误后刷新即可看到。" />
+        <pre v-else-if="logData && logData.lines.length" class="mp-logtail">{{ logData.lines.join("\n") }}</pre>
+        <div v-else-if="logData" class="mp-muted">日志文件存在但暂时没有内容。</div>
+        <div v-else-if="logLoading" class="mp-muted">读取中…</div>
+        <template #footer>
+          <el-button size="small" @click="logOpen = false">关闭</el-button>
+        </template>
+      </el-dialog>
+
       <el-dialog v-model="hotlinkOpen" :title="'防盗链 · ' + (hotlinkTarget?.name || '')" width="min(620px, 94vw)">
         <el-alert v-if="hotlinkTarget?.proxy_target" type="info" :closable="false" style="margin-bottom:10px"
           title="该站点正在使用反向代理：静态资源不在本机，防盗链无从生效。后端会拒绝启用；请先在“代理”对话框里清空上游 URL。" />
@@ -1463,5 +1527,6 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--mp-l
 thead th { color: var(--mp-muted); font-weight: 500; white-space: nowrap; }
 tr:last-child th, tr:last-child td { border-bottom: 0; }
 .mp-code { white-space: pre-wrap; word-break: break-all; }
+.mp-logtail { max-height: 52vh; overflow: auto; background: var(--mp-bg, #f6f7f9); border: 1px solid var(--mp-line); border-radius: 6px; padding: 10px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; margin: 0; }
 .mp-note-cell { max-width: 340px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
 </style>

@@ -45,6 +45,7 @@ var (
 	_ SiteRealIPManager       = linuxSites{}
 	_ SiteTrafficLimitManager = linuxSites{}
 	_ SiteBehaviorManager     = linuxSites{}
+	_ SiteLogManager          = linuxSites{}
 	_ SiteTLSManager          = linuxSites{}
 	_ SiteACMEManager         = linuxSites{}
 )
@@ -113,8 +114,9 @@ func (linuxPlatform) WebServer() (WebServerCtl, bool) {
 }
 
 func (linuxPlatform) Sites() (SiteManager, bool) {
-	m, err := nginx.NewWithDirs(nginxRoot(), linuxPlatform{}.SiteRoot(),
-		rooted("/etc/minipanel/certs"), rooted("/etc/minipanel/auth"))
+	m, err := nginx.NewWithLogDir(nginxRoot(), linuxPlatform{}.SiteRoot(),
+		rooted("/etc/minipanel/certs"), rooted("/etc/minipanel/auth"),
+		rooted("/var/log/minipanel/sites"))
 	if err != nil {
 		return nil, false
 	}
@@ -334,6 +336,27 @@ func (l linuxSites) SetForceHTTPS(name string, enabled bool) (SiteInfo, error) {
 		return SiteInfo{}, mapNginxErr(err)
 	}
 	return toSiteInfo(s), nil
+}
+
+// MigrateSiteLogs gives pre-existing panel vhosts their per-site log directives
+// in one test-before-reload transaction. It is called once at panel start; a
+// failure is reported, never hidden, and leaves every vhost as it was.
+func (l linuxSites) MigrateSiteLogs() error {
+	return mapNginxErr(l.m.MigrateSiteLogs())
+}
+
+// SiteLog reads the tail of one of the site's two log files. The nginx writer
+// owns the path derivation and the ownership check; this adapter only
+// translates the result.
+func (l linuxSites) SiteLog(name, kind string, lines int) (SiteLogInfo, error) {
+	lg, err := l.m.ReadLog(name, kind, lines)
+	if err != nil {
+		return SiteLogInfo{}, mapNginxErr(err)
+	}
+	return SiteLogInfo{
+		Name: lg.Name, Kind: lg.Kind, Path: lg.Path, Exists: lg.Exists,
+		Size: lg.Size, Lines: lg.Lines, Truncated: lg.Truncated,
+	}, nil
 }
 
 // resolvePHPBinding is the only version→socket translation. It returns empty

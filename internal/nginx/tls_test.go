@@ -327,6 +327,9 @@ func TestPrepareACMEUpgradesOldRedirectConfig(t *testing.T) {
 	old := strings.Replace(string(body),
 		`    root `+m.SiteRoot+`/blog;
 
+    access_log `+m.LogDir+`/blog.access.log combined;
+    error_log `+m.LogDir+`/blog.error.log;
+
     location ^~ /.well-known/acme-challenge/ {
         default_type text/plain;
         try_files $uri =404;

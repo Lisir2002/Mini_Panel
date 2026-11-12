@@ -37,6 +37,9 @@ type fakeSites struct {
 	authErr          error
 	realIPErr        error
 	behaviorErr      error
+	logsErr          error
+	migrateErr       error
+	logMissing       bool
 	created          int
 	deleted          int
 	tlsSets          int
@@ -55,6 +58,10 @@ type fakeSites struct {
 	realIPSets       int
 	autoIndexSets    int
 	forceHTTPSSets   int
+	logReads         int
+	migrateCalls     int
+	lastLogKind      string
+	lastLogLines     int
 	lastCertLen      int
 }
 
@@ -323,6 +330,46 @@ func (f *fakeSites) SetForceHTTPS(name string, enabled bool) (platform.SiteInfo,
 	f.sites[name] = s
 	f.forceHTTPSSets++
 	return s, nil
+}
+
+// SiteLog mirrors the nginx reader's contract at the HTTP layer: closed kind
+// vocabulary, bounded line count, panel-owned sites only, and exists=false as
+// a real answer for a file that has not been written yet.
+func (f *fakeSites) SiteLog(name, kind string, lines int) (platform.SiteLogInfo, error) {
+	if f.logsErr != nil {
+		return platform.SiteLogInfo{}, f.logsErr
+	}
+	if _, ok := f.sites[name]; !ok {
+		return platform.SiteLogInfo{}, platform.ErrSiteMissing
+	}
+	if kind != "access" && kind != "error" {
+		return platform.SiteLogInfo{}, fmt.Errorf("%w：日志类型只能是 access 或 error", platform.ErrSiteInvalid)
+	}
+	if lines < 1 || lines > 500 {
+		return platform.SiteLogInfo{}, fmt.Errorf("%w：行数必须在 1-500 之间", platform.ErrSiteInvalid)
+	}
+	f.logReads++
+	f.lastLogKind = kind
+	f.lastLogLines = lines
+	out := platform.SiteLogInfo{
+		Name: name, Kind: kind,
+		Path:  "/var/log/minipanel/sites/" + name + "." + kind + ".log",
+		Lines: []string{},
+	}
+	if f.logMissing {
+		return out, nil
+	}
+	out.Exists = true
+	out.Size = 1234
+	for i := 1; i <= 3 && i <= lines; i++ {
+		out.Lines = append(out.Lines, fmt.Sprintf("%s-line-%d", kind, i))
+	}
+	return out, nil
+}
+
+func (f *fakeSites) MigrateSiteLogs() error {
+	f.migrateCalls++
+	return f.migrateErr
 }
 
 func (f *fakeSites) SetRewrite(name, preset string) (platform.SiteInfo, error) {
