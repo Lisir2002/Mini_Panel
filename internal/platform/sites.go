@@ -82,7 +82,11 @@ type SiteInfo struct {
 	RealIPHeader string   `json:"real_ip_header,omitempty"`
 	// Limits is the site's traffic ceiling; nil means the site is not limited.
 	// The provider owns the shared-memory zone definitions that go with it.
-	Limits     *SiteTrafficLimit `json:"limits,omitempty"`
+	Limits *SiteTrafficLimit `json:"limits,omitempty"`
+	// Cors is the site's cross-origin policy; nil means CORS is off. The
+	// provider renders fixed server-level headers and answers OPTIONS locally
+	// while it is on; it does not own location / and coexists with everything.
+	Cors       *SiteCorsSettings `json:"cors,omitempty"`
 	PHPVersion string            `json:"php_version,omitempty"`
 	PHPSocket  string            `json:"php_socket,omitempty"`
 	// PHPSocketState is the live state of PHPSocket (listening / idle / absent /
@@ -126,6 +130,18 @@ type SiteRedirectRule struct {
 type SiteErrorPageRule struct {
 	Code int    `json:"code"`
 	Path string `json:"path"`
+}
+
+// SiteCorsSettings is one site's cross-origin policy in platform-neutral
+// form. Origins is either exactly ["*"] or a list of exact scheme://host[:port]
+// origins; the provider validates shapes, the closed method vocabulary and the
+// bounds, and renders the fixed headers itself. An empty origin list clears.
+type SiteCorsSettings struct {
+	Origins     []string `json:"origins"`
+	Methods     []string `json:"methods,omitempty"`
+	Headers     []string `json:"headers,omitempty"`
+	Credentials bool     `json:"credentials,omitempty"`
+	MaxAge      int      `json:"max_age,omitempty"`
 }
 
 // SiteProxyUpstream is one backend in a site's load-balanced proxy table. The
@@ -286,6 +302,15 @@ type SiteRealIPManager interface {
 // Clearing (an empty limit) is always allowed.
 type SiteTrafficLimitManager interface {
 	SetLimits(name string, limit SiteTrafficLimit) (SiteInfo, error)
+}
+
+// SiteCorsManager is the optional cross-origin half of a site writer. The
+// operator supplies a structured policy (origins, methods, request headers,
+// credentials, preflight lifetime); the provider validates it and renders
+// fixed server-level add_header directives plus an OPTIONS short-circuit.
+// Clearing (an empty origin list) is always allowed.
+type SiteCorsManager interface {
+	SetCors(name string, policy SiteCorsSettings) (SiteInfo, error)
 }
 
 // SiteBehaviorManager is the optional pair of server-level behaviour switches:

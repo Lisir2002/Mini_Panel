@@ -167,6 +167,20 @@ func (s *Server) siteErrorPageManager() (platform.SiteErrorPageManager, string) 
 	return em, ""
 }
 
+// siteCorsManager is the optional cross-origin interface. A provider without
+// it returns 403 capability with the reason below instead of a dead editor.
+func (s *Server) siteCorsManager() (platform.SiteCorsManager, string) {
+	m, why := s.siteManager()
+	if m == nil {
+		return nil, why
+	}
+	cm, ok := m.(platform.SiteCorsManager)
+	if !ok || cm == nil {
+		return nil, "该平台的站点 Provider 没有实现 CORS 跨域设置"
+	}
+	return cm, ""
+}
+
 // siteHotlinkManager is the optional hotlink-protection interface. A provider
 // without it returns 403 capability with the reason below.
 func (s *Server) siteHotlinkManager() (platform.SiteHotlinkManager, string) {
@@ -641,6 +655,39 @@ func (s *Server) handleSiteErrorPages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, "site_error_pages", "更新自定义错误页失败："+err.Error())
+	}
+}
+
+// handleSiteCors is PUT /api/v1/sites/{name}/cors. The body is
+// {"origins":["https://app.example.com"],"methods":["GET","POST"],
+// "headers":["Content-Type"],"credentials":false,"max_age":600}; an empty
+// origins list clears the policy. The provider validates the origin shapes,
+// the closed method vocabulary and the bounds, and renders fixed server-level
+// add_header directives plus an OPTIONS short-circuit through
+// test-before-reload.
+func (s *Server) handleSiteCors(w http.ResponseWriter, r *http.Request) {
+	m, why := s.siteCorsManager()
+	if m == nil {
+		writeErr(w, http.StatusForbidden, "capability", why)
+		return
+	}
+	var policy platform.SiteCorsSettings
+	if err := decodeBody(r, &policy); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "请求体不是合法 JSON")
+		return
+	}
+	site, err := m.SetCors(chiParam(r, "name"), policy)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, site)
+	case errors.Is(err, platform.ErrSiteMissing):
+		writeErr(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, platform.ErrSiteInvalid):
+		writeErr(w, http.StatusBadRequest, "invalid_site", err.Error())
+	case errors.Is(err, platform.ErrSiteRefused):
+		writeErr(w, http.StatusUnprocessableEntity, "nginx_rejected", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "site_cors", "更新 CORS 失败："+err.Error())
 	}
 }
 

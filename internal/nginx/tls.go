@@ -479,6 +479,12 @@ func renderServer(s Site, tlsOn bool) string {
 		// site feature.
 		b.WriteString("\n" + trafficLimitLines(s.Name, *s.Limits))
 	}
+	if s.Cors != nil {
+		// Server-level CORS policy. It does not own location /, so it works
+		// with static, proxy and redirect sites alike; while on, OPTIONS is
+		// answered locally with 204 and never reaches the upstream.
+		b.WriteString("\n" + corsLines(*s.Cors))
+	}
 	if len(s.ErrorPages) > 0 {
 		// Exact static locations for the error page files, rendered before
 		// the catch-all so a dead upstream or a site-wide redirect can never

@@ -3,9 +3,9 @@ import { computed, onMounted, ref } from "vue";
 import { api } from "../api";
 import { store } from "../store";
 
-// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五、十六、十七、十八、十九、二十：静态站点、站点证书、
+// M2 第三、四、六、七、八、九、十、十一、十二、十三、十四、十五、十六、十七、十八、十九、二十、廿一：静态站点、站点证书、
 // PHP 版本绑定、基础设置编辑、伪静态模板、反向代理、整站跳转、防盗链、访问密码、真实 IP 解析、
-// 按路径跳转表、流量限制、分组 / 备注 / 搜索、目录列表 / 强制 HTTPS 开关、站点日志查看、自定义错误页与反向代理多上游负载均衡。
+// 按路径跳转表、流量限制、分组 / 备注 / 搜索、目录列表 / 强制 HTTPS 开关、站点日志查看、自定义错误页、反向代理多上游负载均衡与 CORS 跨域策略。
 // 这一页的边界与后端能力位图是同一句话，不另写一套：
 //   * site / site_write 由 Detect() 现场决定（装了 nginx、进程是 root、配置目录可识别）。
 //     不可用时这页只显示后端给的理由与 fix_action，不画一个点了没反应的"新建"按钮。
@@ -58,6 +58,12 @@ import { store } from "../store";
 //     跳转的同名例外冲突（后端两个方向都以理由拒绝）。整表替换、空表清除，最多 10 条。
 //     它只替换 nginx 本机产生的错误，反代站点的上游错误响应原样透传；错误页文件要放在
 //     站点根目录下，缺失时 nginx 回退到内置错误页，页面在对话框里把这两条边界说清楚。
+//   * CORS 只编辑结构化的跨域策略：来源列表（["*"] 或精确 scheme://host[:port]，最多 10 个）、
+//     方法闭集（GET/HEAD/POST/PUT/DELETE/PATCH/OPTIONS，省略默认前三）、允许请求头（省略反射
+//     预检请求头）、凭据开关与预检缓存秒数。后端渲染固定 server 级 add_header 加一个 OPTIONS
+//     短路，不占用 location /，与所有站点功能共存；开启期间 OPTIONS 由本机直接回 204、不再
+//     转发到上游，上游自带的 CORS 头也不会被隐藏——这两条边界在对话框里原话写明。
+//     空来源列表清除策略，始终允许；* 与凭据开关互斥（浏览器禁止该组合，后端直接拒绝）。
 //   * ssl 可用时证书有三条来源：ACME HTTP-01 自动签发与续期、手工上传、自签。通配符
 //     只能用上传，因为 HTTP-01 无法验证 *.example.com——页面在 ACME 选项旁直接说明，
 //     而不是等请求失败后才解释。
@@ -97,6 +103,11 @@ const rewritePresets = ref([]);
 const rewriteOpen = ref(false);
 const rewriteTarget = ref(null);
 const rewriteForm = ref({ preset: "none" });
+
+const corsOpen = ref(false);
+const corsTarget = ref(null);
+const corsForm = ref({ origins: "", methods: [], headers: "", credentials: false, maxAge: 0 });
+const corsMethodOptions = ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"];
 
 const proxyOpen = ref(false);
 const proxyTarget = ref(null);
@@ -698,6 +709,52 @@ async function saveAuth() {
   } finally { busy.value = false; }
 }
 
+function corsLabel(r) {
+  if (!r.cors?.origins?.length) return "";
+  const o = r.cors.origins[0] === "*" ? "任意来源" : r.cors.origins.length + " 个来源";
+  return "CORS · " + o + (r.cors.credentials ? " · 凭据" : "");
+}
+
+function openCors(r) {
+  error.value = ""; msg.value = "";
+  corsTarget.value = r;
+  corsForm.value = {
+    origins: (r.cors?.origins || []).join("\n"),
+    methods: r.cors?.methods ? [...r.cors.methods] : [],
+    headers: (r.cors?.headers || []).join(", "),
+    credentials: !!r.cors?.credentials,
+    maxAge: r.cors?.max_age || 0,
+  };
+  corsOpen.value = true;
+}
+
+async function saveCors() {
+  error.value = ""; msg.value = ""; busy.value = true;
+  try {
+    const origins = parseDomains(corsForm.value.origins);
+    const headers = corsForm.value.headers.split(",").map(h => h.trim()).filter(Boolean);
+    const site = await api("/api/v1/sites/" + encodeURIComponent(corsTarget.value.name) + "/cors",
+      { method: "PUT", body: JSON.stringify({
+        origins, methods: corsForm.value.methods, headers,
+        credentials: corsForm.value.credentials, max_age: Number(corsForm.value.maxAge) || 0,
+      }) });
+    if (site.cors?.origins?.length) {
+      msg.value = site.name + " 已启用 CORS：" +
+        (site.cors.origins[0] === "*" ? "允许任意来源" : "允许 " + site.cors.origins.length + " 个来源") +
+        "；OPTIONS 预检由本机直接回 204，nginx 已通过 nginx -t 并重载。";
+    } else {
+      msg.value = site.name + " 已清除 CORS 策略，跨域响应头与 OPTIONS 短路一并移除。";
+    }
+    corsOpen.value = false;
+    await load();
+  } catch (e) {
+    // 400 invalid_site（来源/方法/请求头/缓存时间不合法、* 与凭据混用）与
+    // 422 nginx_rejected 都带后端原文；后端在返回前没有留下任何写入。
+    error.value = e.message;
+    await load();
+  } finally { busy.value = false; }
+}
+
 function openRealIP(r) {
   error.value = ""; msg.value = "";
   realTarget.value = r;
@@ -1107,6 +1164,10 @@ onMounted(load);
                 <code class="mp-code">{{ errorPagesWords(r) }}</code>
               </div>
               <div v-if="r.limits" class="mp-muted mp-tiny">流量限制 · {{ limitLabel(r) }}</div>
+              <div v-if="r.cors?.origins?.length" class="mp-muted mp-tiny">
+                {{ corsLabel(r) }} · {{ (r.cors.methods || ["GET","HEAD","POST"]).join("/") }}
+                <div><code class="mp-code">{{ r.cors.origins.join(" ") }}</code></div>
+              </div>
             </td>
             <td>
               <span class="mp-tag on" v-if="r.enabled">已启用</span>
@@ -1152,6 +1213,9 @@ onMounted(load);
                 {{ r.auth_user ? "访问密码" : "加密码" }}
               </el-button>
               <el-button size="small" text type="primary" @click="openRealIP(r)">真实 IP</el-button>
+              <el-button size="small" text type="primary" @click="openCors(r)">
+                {{ r.cors?.origins?.length ? "CORS" : "跨域" }}
+              </el-button>
               <el-button size="small" text type="primary" @click="openLimit(r)">
                 {{ r.limits ? "限流" : "流量限制" }}
               </el-button>
@@ -1618,6 +1682,50 @@ onMounted(load);
           <el-button size="small" :disabled="busy" @click="authOpen = false">取消</el-button>
           <el-button size="small" type="primary" :loading="busy" @click="saveAuth">
             {{ authForm.username ? "保存" : (authTarget?.auth_user ? "关闭访问密码" : "保存") }}
+          </el-button>
+        </template>
+      </el-dialog>
+
+      <el-dialog v-model="corsOpen" :title="'CORS 跨域 · ' + (corsTarget?.name || '')" width="min(640px, 94vw)">
+        <el-alert v-if="corsTarget?.cors?.origins?.length" type="info" :closable="false" style="margin-bottom:10px"
+          title="该站点已启用 CORS。清空来源列表并保存即可关闭，跨域响应头与 OPTIONS 短路一并移除。" />
+        <el-form label-position="top" @submit.prevent="saveCors">
+          <el-form-item label="允许的来源（每行一条，最多 10 条；单独一行 * 表示任意来源）">
+            <el-input v-model="corsForm.origins" type="textarea" :rows="4"
+              placeholder="https://app.example.com&#10;http://localhost:5173" />
+            <div class="mp-hint" style="margin-top:6px">
+              只接受精确的 <code class="mp-code">scheme://主机[:端口]</code>（http/https，不带路径）；
+              <code class="mp-code">*</code> 不能与其它来源混用。未列出的来源得不到
+              <code class="mp-code">Access-Control-Allow-Origin</code> 头，并附 <code class="mp-code">Vary: Origin</code>。
+            </div>
+          </el-form-item>
+          <el-form-item label="允许的方法（不勾选默认 GET / HEAD / POST）">
+            <el-checkbox-group v-model="corsForm.methods">
+              <el-checkbox v-for="m in corsMethodOptions" :key="m" :value="m">{{ m }}</el-checkbox>
+            </el-checkbox-group>
+          </el-form-item>
+          <el-form-item label="允许的请求头（逗号分隔，最多 20 个；留空反射预检请求头）">
+            <el-input v-model="corsForm.headers" placeholder="Content-Type, Authorization" />
+          </el-form-item>
+          <el-form-item>
+            <el-checkbox v-model="corsForm.credentials" :disabled="corsForm.origins.trim() === '*'">
+              允许携带凭据（Cookie / HTTP 认证）
+            </el-checkbox>
+            <el-input-number v-model="corsForm.maxAge" :min="0" :max="86400" :step="60" controls-position="right" style="margin-left:16px" />
+            <span class="mp-hint" style="margin-left:8px">预检缓存秒数（0 表示不下发）</span>
+            <div class="mp-hint">
+              浏览器禁止 <code class="mp-code">*</code> 来源携带凭据，后端会直接拒绝该组合。
+              开启期间 OPTIONS 预检由本机直接回 204，<b>不再转发到上游</b>；面板也不会隐藏上游
+              自己返回的 CORS 头，上游同样发 CORS 头时请关掉其中一边，否则浏览器会看到重复值。
+              它是 server 级固定头，不占用 <code class="mp-code">location /</code>，与代理、跳转、
+              伪静态等全部站点功能共存；强制 HTTPS 站点请让前端直接使用 https 来源。
+            </div>
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button size="small" :disabled="busy" @click="corsOpen = false">取消</el-button>
+          <el-button size="small" type="primary" :loading="busy" @click="saveCors">
+            {{ corsForm.origins.trim() ? "保存" : (corsTarget?.cors?.origins?.length ? "关闭 CORS" : "保存") }}
           </el-button>
         </template>
       </el-dialog>

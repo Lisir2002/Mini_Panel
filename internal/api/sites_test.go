@@ -35,6 +35,7 @@ type fakeSites struct {
 	redirectPathErr  error
 	errorPageErr     error
 	limitErr         error
+	corsErr          error
 	hotlinkErr       error
 	authErr          error
 	realIPErr        error
@@ -57,6 +58,7 @@ type fakeSites struct {
 	redirectPathSets int
 	errorPageSets    int
 	limitSets        int
+	corsSets         int
 	hotlinkSets      int
 	authSets         int
 	realIPSets       int
@@ -264,6 +266,28 @@ func (f *fakeSites) SetErrorPages(name string, rules []platform.SiteErrorPageRul
 	}
 	f.sites[name] = s
 	f.errorPageSets++
+	return s, nil
+}
+
+// SetCors records the cross-origin policy on the row. The fake mirrors the
+// production contract: an empty origin list clears it; shape/method/bounds
+// validation lives in the nginx writer.
+func (f *fakeSites) SetCors(name string, policy platform.SiteCorsSettings) (platform.SiteInfo, error) {
+	if f.corsErr != nil {
+		return platform.SiteInfo{}, f.corsErr
+	}
+	s, ok := f.sites[name]
+	if !ok {
+		return platform.SiteInfo{}, platform.ErrSiteMissing
+	}
+	if len(policy.Origins) == 0 {
+		s.Cors = nil
+	} else {
+		c := policy
+		s.Cors = &c
+	}
+	f.sites[name] = s
+	f.corsSets++
 	return s, nil
 }
 

@@ -225,6 +225,11 @@ paths:
         字段为 {request_rate?, burst?, connections?, status?}；request_rate 是归一化后的
         速率（如 10r/s），burst 只在有速率时出现，status 为 0 时省略且表示 nginx 默认的 503。
         它引用的共享内存区由面板写在 http 级的独立文件里，与站点 vhost 同一次事务落盘。
+        cors 非空表示站点启用了跨域策略，字段为 {origins, methods?, headers?,
+        credentials?, max_age?}；origins 是 ["*"] 或精确 scheme://host[:port] 来源列表，
+        methods 省略表示 GET/HEAD/POST，headers 省略表示反射预检请求头。它是 server 级
+        固定头加一个 OPTIONS 短路，不占用 location /，与所有站点功能共存；开启期间
+        OPTIONS 请求由本机直接回 204，不再转发到上游。
         autoindex=true 表示站点开启了 server 级目录列表（省略/false 表示关闭，详见
         /api/v1/sites/{name}/autoindex）。tls.redirect=true 就是"强制 HTTPS"，它由证书接口设置，
         也可用 /api/v1/sites/{name}/force-https 独立开关，前提同样是站点已启用 HTTPS。
@@ -684,6 +689,76 @@ paths:
       responses:
         "200": { description: 已生效，返回更新后的站点行 }
         "400": { description: 状态码或路径不合法（invalid_site） }
+        "403": { $ref: "#/components/responses/CSRF" }
+        "404": { description: 面板没有管理这个站点 }
+        "422": { description: nginx 拒绝，已回滚（nginx_rejected） }
+  /api/v1/sites/{name}/cors:
+    put:
+      tags: [site]
+      summary: 替换或清除站点的 CORS 跨域策略
+      description: |
+        M2 第廿一片：请求体 {origins, methods, headers, credentials, max_age}。
+        origins 是整个策略的替代值：空数组表示清除 CORS，这是始终允许的救援路径
+        （其余字段一并忽略）；["*"] 表示允许任意来源；否则是最多 10 个精确来源，
+        形如 scheme://host[:port]（http/https，不带路径、查询串、userinfo 或 nginx
+        元字符），重复拒绝，通配符不能与其它来源混用。
+        methods 是封闭列表 GET/HEAD/POST/PUT/DELETE/PATCH/OPTIONS 的子集，省略
+        默认 GET/HEAD/POST；headers 是最多 20 个合法 header 名，省略表示把预检的
+        Access-Control-Request-Headers 原样反射回去；credentials=true 渲染
+        Access-Control-Allow-Credentials: true，且与通配符 * 互斥（浏览器禁止该
+        组合，后端直接 400）；max_age 是预检缓存秒数 0-86400，0 表示不渲染该头。
+        面板渲染的指令是固定的，调用方不能提交任何 nginx 配置文本：server 级
+        add_header（全部带 always，错误响应也带 CORS 头）。精确来源列表用每个
+        来源一条 if ($http_origin = ...) 把匹配到的来源写进面板命名的变量再回显，
+        未列出的来源得不到 Access-Control-Allow-Origin 头（nginx 跳过空值头），
+        并附 Vary: Origin；不需要 http 级 map，因此不依赖通配 include。
+        开启期间 OPTIONS 请求由 server 级短路直接回 204（预检不再转发到上游），
+        204 响应继承同一组 CORS 头。它不占用 location /，与静态、伪静态、反向代理
+        （单目标与多上游）、整站/按路径跳转、防盗链、访问密码、真实 IP、目录列表、
+        流量限制、错误页和 PHP 绑定全部共存。
+        边界原话写明：面板不隐藏上游自己返回的 CORS 头（不做 proxy_hide_header），
+        上游也发 CORS 头时浏览器会看到重复值，需要关掉其中一边；强制 HTTPS 站点
+        的 80 端口跳转块不带 CORS 头，前端应直接使用 https 来源。
+        写入仍走"写配置 → nginx -t → 通过才 reload"；失败恢复原字节，响应 422
+        nginx_rejected。成功响应是更新后的站点行，含 cors。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-z][a-z0-9-]{1,31}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [origins]
+              properties:
+                origins:
+                  type: array
+                  maxItems: 10
+                  items: { type: string }
+                  description: '["*"] 或精确 scheme://host[:port] 来源列表；空数组清除'
+                methods:
+                  type: array
+                  items:
+                    type: string
+                    enum: [GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS]
+                  description: 允许的方法；省略默认 GET/HEAD/POST
+                headers:
+                  type: array
+                  maxItems: 20
+                  items: { type: string }
+                  description: 允许的请求头名；省略表示反射预检的 Access-Control-Request-Headers
+                credentials: { type: boolean, description: 是否允许携带凭据；与通配符 * 互斥 }
+                max_age:
+                  type: integer
+                  minimum: 0
+                  maximum: 86400
+                  description: 预检缓存秒数；0 表示不渲染该头
+      responses:
+        "200": { description: 已生效，返回更新后的站点行（含 cors） }
+        "400": { description: 来源、方法、请求头或缓存时间不合法，或 * 与凭据/其它来源混用（invalid_site） }
         "403": { $ref: "#/components/responses/CSRF" }
         "404": { description: 面板没有管理这个站点 }
         "422": { description: nginx 拒绝，已回滚（nginx_rejected） }

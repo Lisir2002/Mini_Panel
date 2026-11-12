@@ -268,6 +268,10 @@ type Site struct {
 	// The shared memory zones it names are defined in a separate panel-owned
 	// file at http level, written in the same transaction as this vhost.
 	Limits *TrafficLimit `json:"limits,omitempty"`
+	// Cors is the site's cross-origin policy, nil when CORS is off. It renders
+	// fixed server-level add_header directives plus an OPTIONS short-circuit
+	// and does not own `location /`, so it coexists with every other feature.
+	Cors *CorsSettings `json:"cors,omitempty"`
 	// PHPVersion and PHPSocket name the fpm backend this site's .php location
 	// points at. The socket is supplied by the platform layer, which derives it
 	// from a discovered installation; it is never taken from an HTTP request.
@@ -304,6 +308,7 @@ type markerPayload struct {
 	RedirectPaths     []RedirectRule  `json:"redirect_paths,omitempty"`
 	ErrorPages        []ErrorPageRule `json:"error_pages,omitempty"`
 	Limits            *TrafficLimit   `json:"limits,omitempty"`
+	Cors              *CorsSettings   `json:"cors,omitempty"`
 	Hotlink           bool            `json:"hotlink,omitempty"`
 	HotlinkAllowEmpty bool            `json:"hotlink_allow_empty,omitempty"`
 	AutoIndex         bool            `json:"autoindex,omitempty"`
@@ -503,6 +508,7 @@ func (m *Manager) readSite(filename string) (Site, bool) {
 		PHPVersion: payload.PHPVersion, PHPSocket: payload.PHPSocket,
 	}
 	s.Limits = limitsFromMarker(payload)
+	s.Cors = corsFromMarker(payload)
 	s.TLS = m.tlsFromMarker(payload)
 	if lp := m.Layout.LinkPath(payload.Name); lp != "" {
 		if fi, err := os.Lstat(lp); err == nil && fi.Mode()&os.ModeSymlink != 0 {
@@ -574,6 +580,17 @@ func parseMarker(body string) (markerPayload, bool) {
 		p.ErrorPages = errorPages
 		if err := errorPagesCollide(p.ErrorPages, p.RedirectPaths); err != nil {
 			return markerPayload{}, false
+		}
+		if p.Cors != nil {
+			cors, err := normalizeCors(*p.Cors)
+			if err != nil {
+				return markerPayload{}, false
+			}
+			if len(cors.Origins) == 0 {
+				p.Cors = nil
+			} else {
+				p.Cors = &cors
+			}
 		}
 		if p.Limits != nil {
 			limit, err := normalizeTrafficLimit(*p.Limits)
@@ -980,6 +997,7 @@ func render(s Site) string {
 		RedirectPaths:     s.RedirectPaths,
 		ErrorPages:        s.ErrorPages,
 		Limits:            s.Limits,
+		Cors:              s.Cors,
 		Hotlink:           s.Hotlink,
 		HotlinkAllowEmpty: s.HotlinkAllowEmpty,
 		AutoIndex:         s.AutoIndex,

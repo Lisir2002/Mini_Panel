@@ -46,6 +46,7 @@ var (
 	_ SiteAuthManager         = linuxSites{}
 	_ SiteRealIPManager       = linuxSites{}
 	_ SiteTrafficLimitManager = linuxSites{}
+	_ SiteCorsManager         = linuxSites{}
 	_ SiteBehaviorManager     = linuxSites{}
 	_ SiteLogManager          = linuxSites{}
 	_ SiteTLSManager          = linuxSites{}
@@ -295,6 +296,20 @@ func (l linuxSites) SetErrorPages(name string, rules []SiteErrorPageRule) (SiteI
 		native[i] = nginx.ErrorPageRule{Code: r.Code, Path: r.Path}
 	}
 	s, err := l.m.SetErrorPages(name, native)
+	if err != nil {
+		return SiteInfo{}, mapNginxErr(err)
+	}
+	return toSiteInfo(s), nil
+}
+
+// SetCors replaces or clears the cross-origin policy. The nginx writer owns
+// origin/method/header validation and renders the fixed server-level headers;
+// this adapter only translates the neutral policy and errors.
+func (l linuxSites) SetCors(name string, policy SiteCorsSettings) (SiteInfo, error) {
+	s, err := l.m.SetCors(name, nginx.CorsSettings{
+		Origins: policy.Origins, Methods: policy.Methods, Headers: policy.Headers,
+		Credentials: policy.Credentials, MaxAge: policy.MaxAge,
+	})
 	if err != nil {
 		return SiteInfo{}, mapNginxErr(err)
 	}
@@ -585,6 +600,12 @@ func toSiteInfo(s nginx.Site) SiteInfo {
 		out.ErrorPages = make([]SiteErrorPageRule, len(s.ErrorPages))
 		for i, r := range s.ErrorPages {
 			out.ErrorPages[i] = SiteErrorPageRule{Code: r.Code, Path: r.Path}
+		}
+	}
+	if s.Cors != nil {
+		out.Cors = &SiteCorsSettings{
+			Origins: s.Cors.Origins, Methods: s.Cors.Methods, Headers: s.Cors.Headers,
+			Credentials: s.Cors.Credentials, MaxAge: s.Cors.MaxAge,
 		}
 	}
 	if s.Limits != nil {
