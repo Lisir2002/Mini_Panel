@@ -116,6 +116,11 @@ func (m *Manager) setEnabledMove(site Site, enabled bool) error {
 	if enabled {
 		from, to = parked, active
 	}
+	// A move is a write to the serving set: snapshot the bytes before the
+	// file leaves its current home, same rule as every config change.
+	if err := m.snapshotHistory(from); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
 		return fmt.Errorf("创建配置目录: %w", err)
 	}

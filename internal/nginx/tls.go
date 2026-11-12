@@ -248,6 +248,11 @@ func (m *Manager) writeConfig(path, body string) error {
 	if err := m.ensureLogDir(); err != nil {
 		return err
 	}
+	// Same durable-snapshot rule as applyFiles: the TLS writes bypass it, so
+	// they take their own pre-write snapshot here.
+	if err := m.snapshotHistory(path); err != nil {
+		return err
+	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(body), 0o644); err != nil {
 		return err

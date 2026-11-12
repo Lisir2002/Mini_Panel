@@ -388,6 +388,16 @@ func (m *Manager) applyFiles(files []configFile) error {
 		return err
 	}
 
+	// Durable pre-write snapshots (功能设计 §5.2). Taken before anything is
+	// touched and before the in-memory snapshot loop, so even a write that
+	// fails mid-transaction leaves the prior bytes recoverable from disk. A
+	// snapshot failure refuses the whole transaction: no history, no write.
+	for _, f := range files {
+		if err := m.snapshotHistory(f.Path); err != nil {
+			return err
+		}
+	}
+
 	snapshots := make([]fileSnapshot, 0, len(files))
 	for _, f := range files {
 		prev, existed := readMaybe(f.Path)

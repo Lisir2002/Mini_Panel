@@ -148,8 +148,13 @@ type Manager struct {
 	// the nginx worker before a vhost naming it is reloaded, which is what
 	// ensureLogDir guarantees inside every config transaction.
 	LogDir string
-	Run    Runner
-	Now    func() time.Time
+	// HistoryDir holds durable pre-write snapshots of every config file the
+	// panel changes (功能设计 §5.2: snapshots are part of the write protocol
+	// from M2 on). Empty disables the layer; when set, a failed snapshot
+	// refuses the write — the panel must be able to undo before it changes.
+	HistoryDir string
+	Run        Runner
+	Now        func() time.Time
 }
 
 // New detects the layout and returns a usable Manager. siteRoot is the parent
@@ -177,6 +182,13 @@ func NewWithDirs(base, siteRoot, certDir, authDir string) (*Manager, error) {
 // platform layer passes a directory under the panel's own log root so site
 // logs never land inside the nginx config tree.
 func NewWithLogDir(base, siteRoot, certDir, authDir, logDir string) (*Manager, error) {
+	return NewWithHistoryDir(base, siteRoot, certDir, authDir, logDir, "")
+}
+
+// NewWithHistoryDir is NewWithLogDir with the durable config-history directory
+// (usually <DataDir>/config-history). An empty historyDir leaves the snapshot
+// layer inert, which is what the unit harnesses and embedded uses want.
+func NewWithHistoryDir(base, siteRoot, certDir, authDir, logDir, historyDir string) (*Manager, error) {
 	l, err := Detect(base)
 	if err != nil {
 		return nil, err
@@ -193,7 +205,7 @@ func NewWithLogDir(base, siteRoot, certDir, authDir, logDir string) (*Manager, e
 	if logDir == "" {
 		logDir = filepath.Join(base, "minipanel-logs")
 	}
-	return &Manager{Layout: l, SiteRoot: siteRoot, CertDir: certDir, AuthDir: authDir, LogDir: logDir, Run: ExecRunner, Now: time.Now}, nil
+	return &Manager{Layout: l, SiteRoot: siteRoot, CertDir: certDir, AuthDir: authDir, LogDir: logDir, HistoryDir: historyDir, Run: ExecRunner, Now: time.Now}, nil
 }
 
 // Site is one row of the site list: the facts the panel generated, not a
@@ -737,6 +749,12 @@ func (m *Manager) Create(spec Spec) (Site, error) {
 		return Site{}, fmt.Errorf("创建配置目录: %w", err)
 	}
 	if err := m.ensureLogDir(); err != nil {
+		m.undoRoot(root, madeRoot)
+		return Site{}, err
+	}
+	// Create writes the vhost directly (not through applyFiles), so it takes
+	// its own pre-write snapshot — normally recording "the file was absent".
+	if err := m.snapshotHistory(confPath); err != nil {
 		m.undoRoot(root, madeRoot)
 		return Site{}, err
 	}

@@ -119,9 +119,10 @@ func (linuxPlatform) WebServer() (WebServerCtl, bool) {
 }
 
 func (linuxPlatform) Sites() (SiteManager, bool) {
-	m, err := nginx.NewWithLogDir(nginxRoot(), linuxPlatform{}.SiteRoot(),
+	m, err := nginx.NewWithHistoryDir(nginxRoot(), linuxPlatform{}.SiteRoot(),
 		rooted("/etc/minipanel/certs"), rooted("/etc/minipanel/auth"),
-		rooted("/var/log/minipanel/sites"))
+		rooted("/var/log/minipanel/sites"),
+		filepath.Join(linuxPlatform{}.DataDir(), "config-history"))
 	if err != nil {
 		return nil, false
 	}
